@@ -29,6 +29,8 @@ export type VoiceSendTarget = {
 };
 
 export type VoiceInputLayerOptions = {
+  /** Resume an existing draft at the review menu without starting the microphone. */
+  initialText?: string;
   actions: LayerActions;
   /** Post-removal cleanup (also fires when the screen turns off). */
   onClosed: () => void;
@@ -105,6 +107,7 @@ export class VoiceInputLayer implements Layer {
     const defaultIndex = options.defaultTargetIndex ?? 0;
     this.defaultTargetIndex = Math.min(Math.max(0, defaultIndex), Math.max(0, this.sendTargets.length - 1));
     this.menuIndex = this.defaultTargetIndex;
+    if (options.initialText) { this.finalizedText = options.initialText; this.phase = "menu"; this.status = "Review, send, or discard?"; }
   }
 
   startCapture(): void {

@@ -168,6 +168,14 @@ export class LayerStack {
     return false;
   }
 
+  /** Remove one overlay without disturbing newer overlays; always run its cleanup. */
+  removeLayer(layer: Layer): boolean {
+    const index = this.layers.indexOf(layer);
+    if (index < 1) return false;
+    notifyRemoved(this.layers.splice(index, 1)[0]);
+    return true;
+  }
+
   clearToBase(): void {
     for (const layer of this.layers.splice(1)) {
       notifyRemoved(layer);

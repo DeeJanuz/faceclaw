@@ -17,6 +17,7 @@ import {
 import { Layer, LayerActions, LayerContext, LayerStack, noopLayerActions } from "../layers";
 import { CONTEXT_MENU_DIM, MenuLayer, type MenuItem } from "../menu";
 import { VoiceInputLayer, type VoiceSendTarget } from "./voice-input";
+import { VoiceSearchLayer } from "./voice-search";
 import { KeyboardInputLayer, type KeyboardInputSession } from "./keyboard-input";
 import { voiceActivity } from "./voice-activity";
 import { AssistantLayer } from "./assistant";
@@ -296,7 +297,7 @@ class Shell {
   // App-provided top-bar tray icons, keyed by owner id; drawn between the
   // notification icons and the battery indicators.
   private readonly trayIcons = new Map<string, GrayImage>();
-  private activeVoiceLayer: VoiceInputLayer | null = null;
+  private activeVoiceLayer: VoiceInputLayer | VoiceSearchLayer | null = null;
   private activeKeyboardLayer: KeyboardInputLayer | null = null;
   private assistantSession: AssistantSession | null = null;
   private assistantLayer: AssistantLayer | null = null;
@@ -896,12 +897,25 @@ class Shell {
   // preview-mode permission prompt); a second tap must not queue another open.
   private voiceDialogPending = false;
 
+  /** Open a single reviewed destination in the full shell, including permission and mic lifecycle. */
+  openReviewedVoiceInput(
+    target: VoiceSendTarget,
+    canStart: () => boolean = () => true,
+    onUnavailable: () => void = () => {},
+  ): void {
+    this.openVoiceDialog({ finishOnClick: true, defaultTarget: "app", sendTargets: [target], canStart, onUnavailable });
+  }
+
   private openVoiceDialog(options: {
     finishOnClick?: boolean;
     handsFree?: boolean;
     defaultTarget: "assistant" | "app";
+    sendTargets?: VoiceSendTarget[];
+    canStart?: () => boolean;
+    onUnavailable?: () => void;
   }): void {
-    if (this.voiceDialogPending) return;
+    if (this.voiceDialogPending || this.activeVoiceLayer || this.activeKeyboardLayer) { options.onUnavailable?.(); return; }
+    if (options.canStart && !options.canStart()) { options.onUnavailable?.(); return; }
     this.voiceDialogPending = true;
     void (async () => {
       let ready = true;
@@ -914,7 +928,9 @@ class Shell {
       }
       // Re-checked after the await: another path may have opened a dialog
       // (or torn down the base state) while a permission prompt was up.
-      if (!ready || this.activeVoiceLayer || this.activeKeyboardLayer) return;
+      if (!ready || this.activeVoiceLayer || this.activeKeyboardLayer || (options.canStart && !options.canStart())) {
+        options.onUnavailable?.(); return;
+      }
       this.openVoiceDialogNow(options);
       this.config.requestShellRender();
     })();
@@ -924,8 +940,9 @@ class Shell {
     finishOnClick?: boolean;
     handsFree?: boolean;
     defaultTarget: "assistant" | "app";
+    sendTargets?: VoiceSendTarget[];
   }): void {
-    const targets = this.buildVoiceSendTargets();
+    const targets = options.sendTargets ?? this.buildVoiceSendTargets();
     let defaultIndex = targets.findIndex((target) => target.id === options.defaultTarget);
     if (defaultIndex < 0) defaultIndex = 0;
     // Skip the menu only for a hands-free (wakeword) capture aimed at the
@@ -996,6 +1013,57 @@ class Shell {
   /** Deliver a text string to the foreground window (e.g. finalized voice input). */
   sendTextToForegroundWindow(text: string): void {
     this.foregroundWindow()?.receiveTextInput?.(text);
+  }
+
+  /** Voice search has its own confirmation action and cannot invoke a send target. */
+  startExternalAppSearch(windowId: string, label: string, onSearch: (query: string) => void, onClosed: () => void, canStart: () => boolean): () => void {
+    let cancelled = false;
+    let layer: VoiceSearchLayer | null = null;
+    const cancel = () => { cancelled = true; if (layer) this.stack.removeLayer(layer); else onClosed(); };
+    void (async () => {
+      await Promise.resolve();
+      if (cancelled || !canStart()) { onClosed(); return; }
+      let ready = false;
+      try { ready = (await this.config.prepareVoiceCapture?.()) ?? true; } catch { /* Permission refused. */ }
+      if (!ready || cancelled || !canStart() || !this.screenOn || this.foregroundWindow()?.windowId !== windowId || this.activeVoiceLayer || this.activeKeyboardLayer || !this.stack.isAtBase()) { onClosed(); return; }
+      layer = new VoiceSearchLayer({ actions: this.config.actions, label,
+        onSearch: query => { if (!cancelled && this.screenOn && this.foregroundWindow()?.windowId === windowId) onSearch(query); },
+        dismiss: () => { if (layer) this.stack.removeLayer(layer); },
+        onClosed: () => { if (this.activeVoiceLayer === layer) this.activeVoiceLayer = null; voiceActivity.setActive(false); this.noteUserActivity(); onClosed(); },
+      });
+      this.activeVoiceLayer = layer; voiceActivity.setActive(true); this.stack.push(layer); layer.startCapture(); this.config.requestShellRender();
+    })();
+    return cancel;
+  }
+
+  /** A capability-scoped app review. It has one explicit target and never auto-sends. */
+  startExternalAppReview(windowId: string, label: string, initialText: string, onSend: (text: string) => void, onClosed: () => void): () => void {
+    let cancelled = false;
+    let layer: VoiceInputLayer | null = null;
+    const cancel = () => {
+      cancelled = true;
+      if (layer) this.stack.removeLayer(layer);
+      else onClosed();
+    };
+    void (async () => {
+      await Promise.resolve(); // Install the cancellation handle before any synchronous refusal.
+      if (!initialText) {
+        let ready = false;
+        try { ready = (await this.config.prepareVoiceCapture?.()) ?? true; } catch { /* Permission refused. */ }
+        if (!ready) { onClosed(); return; }
+      }
+      if (cancelled || !this.screenOn || this.foregroundWindow()?.windowId !== windowId || this.activeVoiceLayer || this.activeKeyboardLayer || !this.stack.isAtBase()) { onClosed(); return; }
+      layer = new VoiceInputLayer({
+        actions: this.config.actions, initialText, finishOnClick: true, autoSend: false,
+        sendTargets: [{ id: "external-app", label: `Send via ${this.foregroundWindow()?.title ?? "app"}: ${label}`, onSend: (text) => { if (!cancelled && this.foregroundWindow()?.windowId === windowId) onSend(text); } }],
+        onClosed: () => { if (this.activeVoiceLayer === layer) this.activeVoiceLayer = null; voiceActivity.setActive(false); this.noteUserActivity(); onClosed(); },
+        dismiss: () => this.stack.removeLayer(layer),
+      });
+      this.activeVoiceLayer = layer; voiceActivity.setActive(true); this.stack.push(layer);
+      if (!initialText) layer.startCapture();
+      this.config.requestShellRender();
+    })();
+    return cancel;
   }
 
   /**

@@ -1,3 +1,4 @@
+import { ExternalAppPlatform, externalAppId, installedExternalApps } from "../apps/external/platform";
 import { Application, ImageSource } from "@nativescript/core";
 import { EvenAIStatus, EvenAIStatusName, EventSourceType, EventSourceTypeName, OsEventTypeList, OsEventTypeName, WatchGestureType, WatchGestureTypeName } from "./events";
 import { isValidMacAddress, loadDeviceAddresses } from "./device-addresses";
@@ -307,6 +308,8 @@ class DashboardController {
   private incompatibleDisconnectPending = false;
   private unpairedDisconnectPending = false;
 
+  private externalApps: ExternalAppPlatform;
+
   constructor() {
     const sharedActions = {
       disconnect: () => this.disconnect(),
@@ -362,6 +365,19 @@ class DashboardController {
         if (on) this.requestShellRender();
         this.emit();
       },
+    });
+    this.externalApps = new ExternalAppPlatform({
+      configureSurface: (id, visible, mode) => this.configureWindowSurface(id, visible, mode),
+      setSurfaceVisible: (id, visible) => this.setWindowSurfaceVisible(id, visible),
+      removeSurface: (id) => this.removeWindowSurface(id),
+      submitRaster: async (id, pixels, width, height, serial) => {
+        if (!this.display || this.glassesLocked || this.phase === "charging") return;
+        const frameId = frameTimings.startFrame(`render:${id}`, 0);
+        await this.display.submitSurfaceFrame(id, pixels, { x: 0, y: 0, width, height }, `apk:${serial}`, 0, frameId);
+        this.schedulePreviewUpdate();
+      },
+      requestRender: () => this.requestShellRender(),
+      isLocked: () => this.glassesLocked,
     });
     // Boot hooks register windows that exist from startup (the launcher,
     // pinned first in the sidebar and the boot foreground).
@@ -618,6 +634,7 @@ class DashboardController {
   private setGlassesLocked(locked: boolean, reason: string): void {
     if (locked === this.glassesLocked) return;
     this.glassesLocked = locked;
+    this.externalApps?.lockChanged();
     this.appendLog(`glasses ${locked ? "locked" : "unlocked"}: ${reason}`);
     this.wearRemote?.schedulePublish();
     void this.syncLockSurface().catch((error) => {
@@ -2271,6 +2288,8 @@ class DashboardController {
    * open window focus it instead of opening another.
    */
   private async launchApp(appId: string, params?: AppLaunchParams): Promise<void> {
+    const external = installedExternalApps().find((entry) => externalAppId(entry.component) === appId);
+    if (external) { await this.externalApps.open(external.component); return; }
     const app = ALL_APPS.find((entry) => entry.appId === appId);
     if (app) {
       await app.launch(this.buildAppContext(app), params);
@@ -2464,7 +2483,7 @@ class DashboardController {
   }
 
   private async handleAndroidNotificationPosted(notificationKey: string): Promise<void> {
-    if (!notificationKey) {
+    if (!notificationKey || this.glassesLocked) {
       this.requestShellRender();
       return;
     }

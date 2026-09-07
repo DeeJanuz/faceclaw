@@ -388,6 +388,7 @@ public class FaceclawMediaNotificationListenerService extends NotificationListen
         if (statusBarNotification == null || statusBarNotification.getNotification() == null) {
             return false;
         }
+        if (android.os.Process.myUserHandle().equals(statusBarNotification.getUser()) && FaceclawExternalApps.get(service).isSourceSuppressed(statusBarNotification.getPackageName())) return false;
         // Our own notifications stay out of the mirror: the foreground-service
         // one is noise, and the Timers app rings on the glasses itself (its
         // phone notification is for the phone), so mirroring it would stack a

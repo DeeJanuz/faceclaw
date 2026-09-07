@@ -1,0 +1,243 @@
+package com.faceclaw.sdk.hosttest;
+import android.app.Instrumentation;
+import android.os.Bundle;
+import android.content.*;
+import com.faceclaw.app.*;
+import com.faceclaw.sdk.*;
+import java.nio.ByteBuffer;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+
+/** Real cross-UID IPC; only synthetic fixture packages are approved. */
+public class BoundaryTest extends Instrumentation {
+ @Override public void onCreate(Bundle arguments) { super.onCreate(arguments); start(); }
+ @Override public void onStart() {
+  int passed=0,failed=0; StringBuilder output=new StringBuilder();
+  for(java.lang.reflect.Method method:getClass().getMethods()) if(method.getName().startsWith("test")) {
+   try { setUp(); method.invoke(this); passed++; output.append("PASS ").append(method.getName()).append("\n"); }
+   catch(Throwable error) { failed++; Throwable cause=error.getCause()==null?error:error.getCause(); output.append("FAIL ").append(method.getName()).append(": ").append(cause).append("\n"); }
+   finally { try { tearDown(); } catch(Exception ignored) {} }
+  }
+  Bundle result=new Bundle(); result.putString("stream",output.toString()+measurements+"Passed: "+passed+" Failed: "+failed+"\n"); result.putInt("passed",passed); result.putInt("failed",failed); finish(failed==0?-1:0,result);
+ }
+ private Instrumentation getInstrumentation() { return this; }
+ private static void assertTrue(String message,boolean value) { if(!value) throw new AssertionError(message); }
+ private static void assertFalse(boolean value) { assertTrue("Expected false",!value); }
+ private static void assertEquals(Object expected,Object actual) { if(!java.util.Objects.equals(expected,actual)) throw new AssertionError("Expected "+expected+" but got "+actual); }
+ static final String PKG="com.faceclaw.sdk.fixture";
+ Context context; FaceclawExternalApps manager; AtomicInteger frames,notifications,replyResults,searchRequests; CountDownLatch connected;
+ java.util.List<Double> timings=new java.util.concurrent.CopyOnWriteArrayList<>();
+ StringBuilder measurements=new StringBuilder();
+ private void clearFixtureGrants() {
+  android.content.SharedPreferences preferences=context.getSharedPreferences("faceclaw-external-apps",0);
+  android.content.SharedPreferences.Editor edit=preferences.edit();
+  for(String key:preferences.getAll().keySet()) if(key.startsWith(PKG+"/")) edit.remove(key);
+  edit.commit();
+ }
+ private void selectFixtureHost() throws Exception {
+  CountDownLatch bound=new CountDownLatch(1); java.util.concurrent.atomic.AtomicReference<android.os.IBinder> remote=new java.util.concurrent.atomic.AtomicReference<>();
+  ServiceConnection connection=new ServiceConnection() {
+   public void onServiceConnected(ComponentName name,android.os.IBinder binder) { remote.set(binder); bound.countDown(); }
+   public void onServiceDisconnected(ComponentName name) {}
+  };
+  assertTrue("Fixture setup bind",context.bindService(new Intent().setComponent(new ComponentName(PKG,PKG+".FixtureSetupService")),connection,Context.BIND_AUTO_CREATE));
+  try {
+   assertTrue("Fixture setup readiness",bound.await(5,TimeUnit.SECONDS));
+   android.os.Parcel data=android.os.Parcel.obtain(),reply=android.os.Parcel.obtain();
+   try { data.writeInterfaceToken("com.faceclaw.sdk.fixture.Setup"); remote.get().transact(1,data,reply,0); reply.readException(); }
+   finally { data.recycle(); reply.recycle(); }
+  } finally { context.unbindService(connection); }
+ }
+ public void setUp() throws Exception {
+  context=getInstrumentation().getTargetContext(); selectFixtureHost(); timings.clear(); frames=new AtomicInteger(); notifications=new AtomicInteger(); replyResults=new AtomicInteger(); searchRequests=new AtomicInteger(); connected=new CountDownLatch(1);
+  getInstrumentation().runOnMainSync(()->{
+   clearFixtureGrants();
+   manager=FaceclawExternalApps.get(context); manager.refresh();
+   manager.setListener(new FaceclawExternalAppListener() {
+    public void onEvent(String component,String type,String json) { if(type.equals("connected")) connected.countDown(); if(type.equals("notification")) notifications.incrementAndGet(); if(type.equals("notification-reply-result")) replyResults.incrementAndGet(); if(type.equals("search-dictation")) searchRequests.incrementAndGet(); }
+    public void onFrame(String component,int width,int height,ByteBuffer pixels) { if(pixels.remaining()==width*height) {
+     frames.incrementAndGet();
+     long timestamp=0,multiplier=1;
+     for(int i=0;i<8;i++) { timestamp+=((pixels.get(i)&255)-1)*multiplier; multiplier*=255; }
+     double elapsed=(android.os.SystemClock.elapsedRealtimeNanos()-timestamp)/1000000.0;
+     if(elapsed>=0&&elapsed<10000) timings.add(elapsed);
+    } }
+   });
+  });
+ }
+ public void tearDown() throws Exception { getInstrumentation().runOnMainSync(()->{ clearFixtureGrants(); manager.refresh(); }); }
+ String approve(String service) throws Exception {
+  String component=PKG+"/"+PKG+"."+service, identity=PackageIdentity.forPackage(context,PKG);
+  getInstrumentation().runOnMainSync(()->{ context.getSharedPreferences("faceclaw-external-apps",0).edit().putString(component+":pin",identity).commit(); manager.refresh(); });
+  assertTrue("Fixture handshake failed",connected.await(5,TimeUnit.SECONDS)); return component;
+ }
+ void send(String component,String type,String json) { getInstrumentation().runOnMainSync(()->manager.send(component,type,json)); }
+ void open(String component) { send(component,"open","{\"width\":32,\"height\":16}"); send(component,"visibility","{\"visible\":true,\"screenOn\":true}"); }
+ void settle() throws Exception { Thread.sleep(150); getInstrumentation().waitForIdleSync(); }
+ private boolean[] proposedChoices(String component) throws Exception {
+  java.lang.reflect.Method method=FaceclawExternalApps.class.getDeclaredMethod("approvalChoices",String.class); method.setAccessible(true);
+  return (boolean[])method.invoke(manager,component);
+ }
+ private boolean saveApproval(String component,String pin,boolean[] choices) throws Exception {
+  android.content.pm.ServiceInfo service=context.getPackageManager().getServiceInfo(ComponentName.unflattenFromString(component),android.content.pm.PackageManager.GET_META_DATA);
+  java.lang.reflect.Method method=FaceclawExternalApps.class.getDeclaredMethod("approveSelection",android.content.pm.ServiceInfo.class,String.class,boolean[].class); method.setAccessible(true);
+  AtomicBoolean saved=new AtomicBoolean(); AtomicReference<Throwable> error=new AtomicReference<>();
+  runOnMainSync(()->{ try { saved.set((Boolean)method.invoke(manager,service,pin,choices)); if(saved.get()) manager.refresh(); } catch(Throwable failure) { error.set(failure); } });
+  if(error.get()!=null) throw new AssertionError(error.get());
+  return saved.get();
+ }
+ private void revokeThroughPolicy(String component) throws Exception {
+  java.lang.reflect.Method method=FaceclawExternalApps.class.getDeclaredMethod("revokeApproval",String.class); method.setAccessible(true);
+  AtomicReference<Throwable> error=new AtomicReference<>();
+  runOnMainSync(()->{ try { method.invoke(manager,component); } catch(Throwable failure) { error.set(failure); } });
+  if(error.get()!=null) throw new AssertionError(error.get());
+ }
+ private void assertChoices(boolean[] expected,boolean[] actual) { assertTrue("Permission choices differ",java.util.Arrays.equals(expected,actual)); }
+ public void testFreshApprovalDefaultsRequireExplicitSaveAndSuppressionIsScoped() throws Exception {
+  String c=PKG+"/"+PKG+".CanvasService";
+  android.content.SharedPreferences prefs=context.getSharedPreferences("faceclaw-external-apps",0);
+  java.util.Map<String,?> before=new java.util.HashMap<>(prefs.getAll());
+  boolean[] checked=proposedChoices(c); assertChoices(new boolean[]{true,true,true,true},checked);
+  assertEquals(before,new java.util.HashMap<>(prefs.getAll())); assertFalse(manager.allows(c,"notifications")); assertFalse(manager.isSourceSuppressed(PKG+".source"));
+  assertTrue("Approval save",saveApproval(c,PackageIdentity.forPackage(context,PKG),checked));
+  assertTrue("Approved fixture handshake",connected.await(5,TimeUnit.SECONDS));
+  for(String capability:new String[]{"notifications","dictation","previews","suppress"}) { assertTrue("Saved checked permission",prefs.getBoolean(c+":"+capability,false)); assertTrue("Connected capability",manager.allows(c,capability)); }
+  assertTrue("Declared source suppressed",manager.isSourceSuppressed(PKG+".source"));
+  assertFalse(manager.isSourceSuppressed("unrelated.app")); assertFalse(manager.isSourceSuppressed(""));
+  prefs.edit().putBoolean(c+":unknown-capability",true).commit(); assertFalse(manager.allows(c,"unknown-capability"));
+  revokeThroughPolicy(c);
+  assertFalse(manager.isConnected(c)); assertFalse(manager.isSourceSuppressed(PKG+".source"));
+  for(String capability:new String[]{"pin","notifications","dictation","previews","suppress"}) assertFalse(prefs.contains(c+":"+capability));
+  assertChoices(new boolean[]{true,true,true,true},proposedChoices(c));
+ }
+ public void testLegacyAbsentChoicesStayLegacyAcrossRefreshAndReapproval() throws Exception {
+  String c=approve("CanvasService");
+  android.content.SharedPreferences prefs=context.getSharedPreferences("faceclaw-external-apps",0);
+  java.util.Map<String,?> before=new java.util.HashMap<>(prefs.getAll());
+  assertChoices(new boolean[]{false,false,true,false},proposedChoices(c));
+  runOnMainSync(manager::refresh); assertEquals(before,new java.util.HashMap<>(prefs.getAll()));
+  assertFalse(manager.allows(c,"notifications")); assertFalse(manager.allows(c,"dictation")); assertFalse(manager.allows(c,"suppress")); assertTrue("Legacy preview default",manager.allows(c,"previews"));
+  assertTrue("Reapproval",saveApproval(c,PackageIdentity.forPackage(context,PKG),proposedChoices(c)));
+  assertChoices(new boolean[]{false,false,true,false},proposedChoices(c));
+ }
+ public void testExplicitUncheckedChoicesSurviveRefreshAndChangedSignerReapproval() throws Exception {
+  String c=PKG+"/"+PKG+".CanvasService"; String identity=PackageIdentity.forPackage(context,PKG);
+  boolean[] chosen={false,true,false,false};
+  assertTrue("Unchecked approval",saveApproval(c,identity,chosen)); assertTrue("Fixture handshake",connected.await(5,TimeUnit.SECONDS));
+  runOnMainSync(manager::refresh); assertChoices(chosen,proposedChoices(c));
+  context.getSharedPreferences("faceclaw-external-apps",0).edit().putString(c+":pin","old-signer").commit(); runOnMainSync(manager::refresh);
+  assertFalse(manager.isConnected(c)); assertChoices(chosen,proposedChoices(c));
+  assertTrue("Explicit new signer approval",saveApproval(c,identity,proposedChoices(c))); assertChoices(chosen,proposedChoices(c));
+ }
+ public void testChangedIdentityBeforeApprovalCannotWriteDefaults() throws Exception {
+  String c=PKG+"/"+PKG+".CanvasService";
+  android.content.SharedPreferences prefs=context.getSharedPreferences("faceclaw-external-apps",0);
+  java.util.Map<String,?> before=new java.util.HashMap<>(prefs.getAll());
+  assertFalse(saveApproval(c,"stale-or-forged-identity",proposedChoices(c)));
+  assertEquals(before,new java.util.HashMap<>(prefs.getAll())); assertFalse(manager.installedJson().contains(PKG));
+ }
+ public void testPhoneSettingsIntentCannotGrantAppOrCapabilities() throws Exception {
+  android.content.SharedPreferences prefs=context.getSharedPreferences("faceclaw-external-apps",0);
+  java.util.Map<String,?> before=new java.util.HashMap<>(prefs.getAll());
+  Intent forged=new Intent(context,FaceclawAppSettingsActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+   .putExtra("appPackage",PKG).putExtra("pin",PackageIdentity.forPackage(context,PKG))
+   .putExtra("approve",true).putExtra("notifications",true).putExtra("dictation",true);
+  android.app.Activity activity=startActivitySync(forged);
+  try { settle(); assertEquals(before,new java.util.HashMap<>(prefs.getAll())); assertEquals("[]",manager.installedJson()); }
+  finally { runOnMainSync(activity::finish); }
+ }
+ public void testTransportTimingAndCoalescing() throws Exception {
+  String c=approve("CanvasService");
+  for(int[] size:new int[][]{{576,260},{640,452}}) {
+   send(c,"open",Protocol.object("width",size[0],"height",size[1]).toString()); send(c,"visibility","{\"visible\":true,\"screenOn\":true}");
+   settle(); timings.clear();
+   for(int sample=0;sample<20;sample++) {
+    int before=frames.get(); send(c,"render","{}");
+    for(int retry=0;retry<60&&frames.get()==before;retry++) Thread.sleep(20);
+    assertTrue("Frame timeout",frames.get()>before); Thread.sleep(20);
+   }
+   java.util.List<Double> sorted=new java.util.ArrayList<>(timings); java.util.Collections.sort(sorted);
+   assertTrue("Timestamp samples missing",sorted.size()>=20);
+   measurements.append(context.getPackageName()).append(" ").append(size[0]).append("x").append(size[1]).append(" submitBitmap-to-private-copy ms median=").append(sorted.get(sorted.size()/2)).append(" p95=").append(sorted.get((int)Math.ceil(sorted.size()*0.95)-1)).append(" samples=").append(sorted.size()).append("\n");
+  }
+  Thread.sleep(30); int before=frames.get(); send(c,"burst","{\"count\":40}"); Thread.sleep(500);
+  int delivered=frames.get()-before; assertTrue("Burst queue not bounded",delivered>=1&&delivered<=2);
+  measurements.append("burst submitted=40 delivered=").append(delivered).append(" coalesced-or-throttled=").append(40-delivered).append("\n");
+ }
+ public void testVoiceSearchRequiresDictationAndVisibleSelectedSession() throws Exception {
+  String c=approve("CanvasService"); open(c);
+  send(c,"test-search-request","{}"); settle(); assertEquals(0,searchRequests.get());
+  context.getSharedPreferences("faceclaw-external-apps",0).edit().putBoolean(c+":dictation",true).commit();
+  send(c,"test-search-request","{}"); settle(); assertEquals(1,searchRequests.get());
+  send(c,"visibility","{\"visible\":false,\"screenOn\":true}"); send(c,"test-search-request","{}"); settle(); assertEquals(1,searchRequests.get());
+  send(c,"visibility","{\"visible\":true,\"screenOn\":false}"); send(c,"test-search-request","{}"); settle(); assertEquals(1,searchRequests.get());
+  revokeThroughPolicy(c); send(c,"test-search-request","{}"); settle(); assertEquals(1,searchRequests.get());
+ }
+ public void testNotificationReplyRequiresGrantsLiveTokenAndSingleUseResult() throws Exception {
+  String c=approve("CanvasService");
+  String valid=Protocol.object("id","fixture-message","target","fixture-target","replyToken","fixture-token","text","Exact reviewed reply","confirmed",true).toString();
+  assertFalse(manager.replyToNotification(c,valid));
+  getInstrumentation().runOnMainSync(()->context.getSharedPreferences("faceclaw-external-apps",0).edit().putBoolean(c+":notifications",true).putBoolean(c+":dictation",true).commit());
+  send(c,"capabilities",Protocol.object("notifications",true,"dictation",true,"notificationReplies",true).toString());
+  send(c,"test-publish-reply","{}"); settle(); assertEquals(1,notifications.get());
+  assertFalse(manager.replyToNotification(c,Protocol.object("id","fixture-message","target","fixture-target","replyToken","fixture-token","text","x","confirmed",false).toString()));
+  send(c,"notification-reply",Protocol.object("id","fixture-message","target","foreign-target","replyToken","fixture-token","text","x","confirmed",true).toString()); settle(); assertEquals(0,replyResults.get());
+  assertTrue("Authorized notification reply",manager.replyToNotification(c,valid)); settle(); assertEquals(1,replyResults.get());
+  assertTrue("Duplicate enqueued for SDK rejection",manager.replyToNotification(c,valid)); settle(); assertEquals(1,replyResults.get());
+  send(c,"test-publish-reply","{}"); settle(); manager.replyToNotification(c,valid); settle(); assertEquals(1,replyResults.get());
+  getInstrumentation().runOnMainSync(()->context.getSharedPreferences("faceclaw-external-apps",0).edit().putBoolean(c+":dictation",false).commit());
+  assertFalse(manager.replyToNotification(c,valid));
+  send(c,"test-publish-reply",Protocol.object("token","unconsumed-token").toString()); settle();
+  send(c,"capabilities",Protocol.object("notifications",true,"dictation",false,"notificationReplies",true).toString());
+  send(c,"capabilities",Protocol.object("notifications",true,"dictation",true,"notificationReplies",true).toString());
+  getInstrumentation().runOnMainSync(()->context.getSharedPreferences("faceclaw-external-apps",0).edit().putBoolean(c+":dictation",true).commit());
+  manager.replyToNotification(c,valid.replace("fixture-token","unconsumed-token")); settle(); assertEquals(1,replyResults.get());
+ }
+ public void testRestoredApprovalBackupRequiresFreshConsent() throws Exception {
+  final String namespace="faceclaw-fixture-backup-test";
+  try {
+   android.content.SharedPreferences prefs=ApprovalStore.open(context,namespace); prefs.edit().putString("pin","synthetic-restored-grant").commit();
+   assertTrue("Test marker removal",new java.io.File(context.getNoBackupFilesDir(),namespace+".installation").delete());
+   assertFalse(ApprovalStore.open(context,namespace).contains("pin"));
+  } finally { context.getSharedPreferences(namespace,0).edit().clear().commit(); new java.io.File(context.getNoBackupFilesDir(),namespace+".installation").delete(); }
+ }
+ public void testUnapprovedPackageIsNotDiscoveredAsLaunchable() throws Exception { settle(); assertFalse(manager.installedJson().contains(PKG)); }
+ public void testMutualSdkHandshakeFrameSleepAndRevocation() throws Exception {
+  String c=approve("CanvasService"); open(c); for(int i=0;i<40&&frames.get()==0;i++) settle(); assertTrue("SharedMemory frame absent",frames.get()>0);
+  int count=frames.get(); send(c,"visibility","{\"visible\":true,\"screenOn\":false}"); send(c,"render","{}"); settle(); assertEquals(count,frames.get());
+  getInstrumentation().runOnMainSync(()->{ context.getSharedPreferences("faceclaw-external-apps",0).edit().remove(c+":pin").commit(); manager.refresh(); });
+  assertFalse(manager.isConnected(c)); send(c,"render","{}"); settle(); assertEquals(count,frames.get());
+ }
+ public void testHostRejectsBadFrameSessionGenerationLengthAndCapabilities() throws Exception {
+  String c=approve("AdversarialService"); open(c);
+  for(String attack:new String[]{"session","generation","length","notification"}) { send(c,"fixture",Protocol.object("attack",attack).toString()); settle(); }
+  assertEquals(0,frames.get()); assertEquals(0,notifications.get());
+  send(c,"fixture","{\"attack\":\"valid\"}"); settle(); assertEquals(1,frames.get());
+  getInstrumentation().runOnMainSync(()->context.getSharedPreferences("faceclaw-external-apps",0).edit().putBoolean(c+":notifications",true).commit());
+  send(c,"fixture","{\"attack\":\"notification\"}"); settle(); assertEquals(1,notifications.get());
+ }
+ public void testForgedSendingUidDoesNotAuthorizeStolenCallback() throws Exception {
+  String c=approve("AdversarialService");
+  getInstrumentation().runOnMainSync(()->context.getSharedPreferences("faceclaw-external-apps",0).edit().putBoolean(c+":notifications",true).commit());
+  java.lang.reflect.Field field=FaceclawExternalApps.class.getDeclaredField("connections"); field.setAccessible(true);
+  Object connection=((java.util.Map<?,?>)field.get(manager)).get(c);
+  java.lang.reflect.Field inboxField=connection.getClass().getDeclaredField("inbox"), sessionField=connection.getClass().getDeclaredField("session"); inboxField.setAccessible(true); sessionField.setAccessible(true);
+  android.os.Messenger stolen=(android.os.Messenger)inboxField.get(connection);
+  android.os.Message message=Protocol.message(Protocol.EVENT,(String)sessionField.get(connection),"notification",Protocol.object("id","x","target","synthetic","title","Synthetic","text","Synthetic"));
+  message.sendingUid=context.getPackageManager().getApplicationInfo(PKG,0).uid;
+  stolen.send(message); settle(); assertEquals(0,notifications.get());
+ }
+ public void testHostConsentRejectsNonActivityPendingIntent() throws Exception {
+  if(android.os.Build.VERSION.SDK_INT<31) return;
+  String c=approve("AdversarialService"); send(c,"fixture",Protocol.object("attack","consent-broadcast").toString()); settle();
+  java.lang.reflect.Field field=FaceclawExternalApps.class.getDeclaredField("connections"); field.setAccessible(true);
+  Object connection=((java.util.Map<?,?>)field.get(manager)).get(c);
+  java.lang.reflect.Field consentField=connection.getClass().getDeclaredField("consent"); consentField.setAccessible(true);
+  assertEquals(null,consentField.get(connection));
+ }
+ public void testChangedSignerPinCannotReconnect() throws Exception {
+  String c=approve("AdversarialService");
+  getInstrumentation().runOnMainSync(()->{ context.getSharedPreferences("faceclaw-external-apps",0).edit().putString(c+":pin","wrong-signer").commit(); manager.refresh(); });
+  assertFalse(manager.isConnected(c)); assertFalse(manager.installedJson().contains(PKG));
+ }
+}

@@ -85,9 +85,10 @@ public final class FaceclawExternalApps {
    JSONObject data=new JSONObject(json);
    if(type.equals("open")||type.equals("resize")) {
     c.width=data.getInt("width"); c.height=data.getInt("height"); Protocol.frameSize(c.width,c.height); data.put("generation",++c.generation); c.open=true;
+    c.frames.clear();
    }
-   if(type.equals("close")) { c.open=false; c.visible=false; c.generation++; }
-   if(type.equals("visibility")) { c.visible=data.optBoolean("visible"); c.screenOn=data.optBoolean("screenOn"); }
+   if(type.equals("close")) { c.open=false; c.visible=false; c.generation++; c.frames.clear(); }
+   if(type.equals("visibility")) { c.visible=data.optBoolean("visible"); c.screenOn=data.optBoolean("screenOn"); if(!c.visible||!c.screenOn)c.frames.clear(); }
    c.remote.send(Protocol.message(Protocol.EVENT,c.session,type,data));
   } catch(Exception e) { disconnect(component,true); }
  }
@@ -96,17 +97,32 @@ public final class FaceclawExternalApps {
  }
  private void disconnect(String component,boolean retry) {
   Connection c=connections.remove(component); if(c==null) return;
-  c.ready=false; c.generation++;
+  c.ready=false; c.generation++; c.frames.clear(); for(Surface surface:c.surfaces.values())surface.frames.clear();
   try { if(c.remote!=null) c.remote.send(Protocol.message(Protocol.EVENT,c.session,"revoke",null)); } catch(Exception ignored) {}
   try { context.unbindService(c); } catch(Exception ignored) {}
   emit(component,"disconnected",new JSONObject()); extensionsChanged();
   if(retry && approved(c.service)) main.postDelayed(()->{ if(!connections.containsKey(component)&&approved(c.service)) bind(c.service); },5000);
  }
+ /** At most one private snapshot waits for the 16ms boundary; the final frame is never dropped. */
+ private final class FrameDelivery {
+  Runnable pending; boolean scheduled; long lastFrame;
+  final Runnable flush=()->{
+   scheduled=false; Runnable delivery=pending; pending=null;
+   if(delivery!=null) { lastFrame=SystemClock.elapsedRealtime(); delivery.run(); }
+  };
+  void offer(Runnable delivery,long now) {
+   pending=delivery;
+   if(now-lastFrame>=16) { main.removeCallbacks(flush); flush.run(); }
+   else if(!scheduled) { scheduled=true; main.postDelayed(flush,16-(now-lastFrame)); }
+  }
+  void clear() { pending=null; scheduled=false; lastFrame=0; main.removeCallbacks(flush); }
+ }
  private final class Connection implements ServiceConnection {
   final ServiceInfo service; final String component,session=UUID.randomUUID().toString(); final Messenger inbox;
   java.lang.ref.WeakReference<Activity> selectionActivity; long selectionUntil;
   final Map<String,Surface> surfaces=new HashMap<>(); final Map<String,String> extensionRequests=new HashMap<>(); final Set<String> actionIds=new HashSet<>();
-  Messenger remote; PendingIntent consent; boolean ready,open,visible,screenOn=true; int width,height; long generation,sequence,lastFrame,rateStart,lastOpenRequest; int rate;
+  final FrameDelivery frames=new FrameDelivery();
+  Messenger remote; PendingIntent consent; boolean ready,open,visible,screenOn=true; int width,height; long generation,sequence,rateStart,lastOpenRequest; int rate;
   Connection(ServiceInfo service) { this.service=service; component=key(service); inbox=new Messenger(new Handler(Looper.getMainLooper(),m->{ receive(m); return true; })); }
   public void onServiceConnected(ComponentName name,IBinder binder) {
    if(connections.get(component)!=this || !approved(service)) return;
@@ -140,14 +156,18 @@ public final class FaceclawExternalApps {
      try {
       int w=b.getInt("width"),h=b.getInt("height"); int size=Protocol.frameSize(w,h);
       if(!open||!visible||!screenOn||w!=width||h!=height||b.getLong("generation")!=generation||seq<=sequence) return;
-      sequence=seq; if(now-lastFrame<16) return; lastFrame=now;
       byte[] copy;
       if(Build.VERSION.SDK_INT>=27 && b.containsKey("memory")) {
        SharedMemory memory=b.getParcelable("memory"); if(memory==null) return;
        try { if(memory.getSize()!=size) return; ByteBuffer mapping=memory.mapReadOnly(); try { copy=new byte[size]; mapping.get(copy); } finally { SharedMemory.unmap(mapping); } } finally { memory.close(); }
       } else { byte[] bytes=b.getByteArray("pixels"); if(bytes==null||bytes.length!=size) return; copy=bytes.clone(); }
-      // Private snapshot only; app changes to shared memory can no longer reach native rendering.
-      if(listener!=null) listener.onFrame(component,w,h,ByteBuffer.wrap(copy));
+      sequence=seq; final long frameGeneration=generation;
+      // ACK permits another frame only after its memory has become a private snapshot.
+      frames.offer(()->{
+       if(connections.get(component)!=this||!ready||!approved(service)||!open||!visible||!screenOn||generation!=frameGeneration||width!=w||height!=h)return;
+       try { if(listener!=null)listener.onFrame(component,w,h,ByteBuffer.wrap(copy)); }
+       catch(Exception ignored) { disconnect(component,false); }
+      },now);
      } finally {
       // Close descriptors even on early rejection before mapping.
       if(Build.VERSION.SDK_INT>=27 && b.containsKey("memory")) { SharedMemory mem=b.getParcelable("memory"); if(mem!=null) mem.close(); }
@@ -353,7 +373,7 @@ public final class FaceclawExternalApps {
  public String extensionsJson() { return extensions.snapshot().toString(); }
  private void extensionsChanged() {
   extensions.changed();
-  for(Connection c:connections.values()) { c.extensionRequests.clear(); c.surfaces.clear(); }
+  for(Connection c:connections.values()) { c.extensionRequests.clear(); for(Surface surface:c.surfaces.values())surface.frames.clear(); c.surfaces.clear(); }
   String snapshot=extensionsJson();
   FaceclawSettings.getInstance(context).setString("apps.extensions.effective",snapshot);
   for(Connection c:connections.values()) if(c.ready) send(c.component,"extensions",snapshot);
@@ -407,8 +427,9 @@ public final class FaceclawExternalApps {
    emit(c.component,"extension-event",Protocol.object("feature",feature,"generation",generation,"type","action","action",action,"actionId",id,"data",payload));
   }
  }
- private static final class Surface {
-  int width,height; long generation,sequence,lastFrame; boolean visible,screenOn;
+ private final class Surface {
+  final FrameDelivery frames=new FrameDelivery();
+  int width,height; long generation,sequence; boolean visible,screenOn;
   Surface(int width,int height,long generation) { this.width=width; this.height=height; this.generation=generation; }
  }
  private long nextSurfaceGeneration=1;
@@ -422,17 +443,19 @@ public final class FaceclawExternalApps {
  public boolean openExtensionSurface(String component,String feature,int width,int height) {
   if(!ExtensionContract.surface(feature)||!isConnected(component)||!extensions.controls(component,feature)) return false;
   try {
-   Protocol.frameSize(width,height); Connection c=connections.get(component); Surface surface=new Surface(width,height,++nextSurfaceGeneration); c.surfaces.put(feature,surface);
+   Protocol.frameSize(width,height); Connection c=connections.get(component); Surface surface=new Surface(width,height,++nextSurfaceGeneration); Surface previous=c.surfaces.put(feature,surface); if(previous!=null)previous.frames.clear();
    c.remote.send(Protocol.message(Protocol.EVENT,c.session,"extension-surface",Protocol.object("feature",feature,"type","open","width",width,"height",height,"generation",surface.generation,"extensionGeneration",extensions.generation(),"visible",false,"screenOn",false))); return true;
   } catch(Exception ignored) { return false; }
  }
  public void setExtensionSurfaceVisibility(String component,String feature,boolean visible,boolean screenOn) {
   Connection c=connections.get(component); if(c==null||!extensions.controls(component,feature)) return;
   Surface surface=c.surfaces.get(feature); if(surface==null) return; surface.visible=visible; surface.screenOn=screenOn;
+  if(!visible||!screenOn)surface.frames.clear();
   send(component,"extension-surface",Protocol.object("feature",feature,"type","visibility","generation",surface.generation,"visible",visible,"screenOn",screenOn).toString());
  }
  public void closeExtensionSurface(String component,String feature) {
   Connection c=connections.get(component); if(c==null) return; Surface surface=c.surfaces.remove(feature); if(surface==null) return;
+  surface.frames.clear();
   send(component,"extension-surface",Protocol.object("feature",feature,"type","close","generation",surface.generation).toString());
  }
  private void receiveExtensionFrame(Connection c,Message message,long now) throws Exception {
@@ -442,12 +465,17 @@ public final class FaceclawExternalApps {
    if(surface==null||!extensions.controls(c.component,feature)||!surface.visible||!surface.screenOn||surface.generation!=b.getLong("generation")||sequence<=surface.sequence) return;
    int width=b.getInt("width"),height=b.getInt("height"),size=Protocol.frameSize(width,height);
    if(width!=surface.width||height!=surface.height) return;
-   surface.sequence=sequence; if(now-surface.lastFrame<16) return; surface.lastFrame=now; byte[] copy;
+   byte[] copy;
    if(Build.VERSION.SDK_INT>=27&&b.containsKey("memory")) {
     SharedMemory memory=b.getParcelable("memory"); if(memory==null||memory.getSize()!=size) return;
     ByteBuffer mapping=memory.mapReadOnly(); try { copy=new byte[size]; mapping.get(copy); } finally { SharedMemory.unmap(mapping); }
    } else { byte[] supplied=b.getByteArray("pixels"); if(supplied==null||supplied.length!=size) return; copy=supplied.clone(); }
-   if(listener!=null) listener.onExtensionFrame(c.component,feature,surface.generation,width,height,ByteBuffer.wrap(copy));
+   surface.sequence=sequence; final long frameGeneration=surface.generation;
+   surface.frames.offer(()->{
+    if(connections.get(c.component)!=c||!c.ready||!approved(c.service)||c.surfaces.get(feature)!=surface||!extensions.controls(c.component,feature)||!surface.visible||!surface.screenOn||surface.generation!=frameGeneration||surface.width!=width||surface.height!=height)return;
+    try { if(listener!=null)listener.onExtensionFrame(c.component,feature,frameGeneration,width,height,ByteBuffer.wrap(copy)); }
+    catch(Exception ignored) { disconnect(c.component,false); }
+   },now);
   } finally {
    if(Build.VERSION.SDK_INT>=27&&b.containsKey("memory")) { SharedMemory memory=b.getParcelable("memory"); if(memory!=null) memory.close(); }
    Message ack=Protocol.message(Protocol.EXTENSION_ACK,c.session,"ack",null); ack.getData().putString("feature",feature); ack.getData().putLong("generation",b.getLong("generation")); ack.getData().putLong("sequence",sequence); c.remote.send(ack);

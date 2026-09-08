@@ -25,7 +25,7 @@ public class BoundaryTest extends Instrumentation {
  private static void assertFalse(boolean value) { assertTrue("Expected false",!value); }
  private static void assertEquals(Object expected,Object actual) { if(!java.util.Objects.equals(expected,actual)) throw new AssertionError("Expected "+expected+" but got "+actual); }
  static final String PKG="com.faceclaw.sdk.fixture";
- Context context; FaceclawExternalApps manager; AtomicInteger frames,notifications,replyResults,searchRequests,extensionFrames,extensionResults,extensionTimeouts,ownRequests,refineRequests,systemMenuRequests; volatile String systemMenuPayload; volatile int extensionTransparent=-1,extensionBlack=-1; CountDownLatch connected;
+ Context context; FaceclawExternalApps manager; AtomicInteger frames,notifications,replyResults,searchRequests,extensionFrames,extensionResults,extensionTimeouts,ownRequests,refineRequests,systemMenuRequests; volatile String systemMenuPayload; volatile int extensionTransparent=-1,extensionBlack=-1,latestFrame=-1,latestExtensionFrame=-1; CountDownLatch connected;
  java.util.List<Double> timings=new java.util.concurrent.CopyOnWriteArrayList<>();
  StringBuilder measurements=new StringBuilder();
  private void clearFixtureGrants() {
@@ -49,15 +49,15 @@ public class BoundaryTest extends Instrumentation {
   } finally { context.unbindService(connection); }
  }
  public void setUp() throws Exception {
-  context=getInstrumentation().getTargetContext(); selectFixtureHost(); timings.clear(); frames=new AtomicInteger(); ownRequests=new AtomicInteger(); systemMenuRequests=new AtomicInteger(); systemMenuPayload=null; refineRequests=new AtomicInteger(); extensionFrames=new AtomicInteger(); extensionResults=new AtomicInteger(); extensionTimeouts=new AtomicInteger(); notifications=new AtomicInteger(); replyResults=new AtomicInteger(); searchRequests=new AtomicInteger(); connected=new CountDownLatch(1);
+  context=getInstrumentation().getTargetContext(); latestFrame=-1; latestExtensionFrame=-1; selectFixtureHost(); timings.clear(); frames=new AtomicInteger(); ownRequests=new AtomicInteger(); systemMenuRequests=new AtomicInteger(); systemMenuPayload=null; refineRequests=new AtomicInteger(); extensionFrames=new AtomicInteger(); extensionResults=new AtomicInteger(); extensionTimeouts=new AtomicInteger(); notifications=new AtomicInteger(); replyResults=new AtomicInteger(); searchRequests=new AtomicInteger(); connected=new CountDownLatch(1);
   getInstrumentation().runOnMainSync(()->{
    clearFixtureGrants();
    manager=FaceclawExternalApps.get(context); manager.refresh();
    manager.setListener(new FaceclawExternalAppListener() {
     public void onEvent(String component,String type,String json) { if(type.equals("connected")) connected.countDown(); if(type.equals("extension-event")&&json.contains("\"result\"")) extensionResults.incrementAndGet(); if(type.equals("extension-event")&&json.contains("\"timeout\"")) extensionTimeouts.incrementAndGet(); if(type.equals("notification")) notifications.incrementAndGet(); if(type.equals("notification-reply-result")) replyResults.incrementAndGet(); if(type.equals("search-dictation")) searchRequests.incrementAndGet(); if(type.equals("own-notifications")) ownRequests.incrementAndGet(); if(type.equals("request-system-menu")) { systemMenuPayload=json; systemMenuRequests.incrementAndGet(); } if(type.equals("host-refinement")) refineRequests.incrementAndGet(); }
-    public void onExtensionFrame(String component,String feature,long generation,int width,int height,ByteBuffer pixels) { extensionTransparent=pixels.get(0)&255; extensionBlack=pixels.get(1)&255; extensionFrames.incrementAndGet(); }
+    public void onExtensionFrame(String component,String feature,long generation,int width,int height,ByteBuffer pixels) { extensionTransparent=pixels.get(0)&255; extensionBlack=pixels.get(1)&255; latestExtensionFrame=pixels.get(pixels.limit()-1)&255; extensionFrames.incrementAndGet(); }
     public void onFrame(String component,int width,int height,ByteBuffer pixels) { if(pixels.remaining()==width*height) {
-     frames.incrementAndGet();
+     latestFrame=pixels.get(pixels.limit()-1)&255; frames.incrementAndGet();
      long timestamp=0,multiplier=1;
      for(int i=0;i<8;i++) { timestamp+=((pixels.get(i)&255)-1)*multiplier; multiplier*=255; }
      double elapsed=(android.os.SystemClock.elapsedRealtimeNanos()-timestamp)/1000000.0;
@@ -395,4 +395,73 @@ public class BoundaryTest extends Instrumentation {
   getInstrumentation().runOnMainSync(()->{ context.getSharedPreferences("faceclaw-external-apps",0).edit().putString(c+":pin","wrong-signer").commit(); manager.refresh(); });
   assertFalse(manager.isConnected(c)); assertFalse(manager.installedJson().contains(PKG));
  }
+ private Object field(Object target,String name) throws Exception { java.lang.reflect.Field f=target.getClass().getDeclaredField(name);f.setAccessible(true);return f.get(target); }
+ private Object frameStream(String component,boolean extension) throws Exception {
+  Object connection=((java.util.Map<?,?>)field(manager,"connections")).get(component);
+  return extension?((java.util.Map<?,?>)field(connection,"surfaces")).get("ui.launcher"):connection;
+ }
+ private void delayFrameWindow(Object stream,int milliseconds) throws Exception {
+  Object delivery=field(stream,"frames");java.lang.reflect.Field last=delivery.getClass().getDeclaredField("lastFrame");last.setAccessible(true);
+  // Extend just this test's window so cancellation remains deterministic under emulator load.
+  runOnMainSync(()->{try{last.setLong(delivery,android.os.SystemClock.elapsedRealtime()+milliseconds);}catch(Exception error){throw new AssertionError(error);}});
+ }
+ private void awaitFrameSequence(Object stream,long after) throws Exception {
+  for(int i=0;i<120;i++){waitForIdleSync();if(((Long)field(stream,"sequence"))>after)return;Thread.sleep(5);}
+  throw new AssertionError("Synthetic frame never reached validation");
+ }
+ private String prepareFrameStream(boolean extension) throws Exception {
+  connected=new CountDownLatch(1);String component=approve("AdversarialService");open(component);
+  if(extension){
+   send(component,"fixture","{\"attack\":\"publish-launcher\"}");settle();grantExtension(component,"ui.launcher",true);
+   runOnMainSync(()->{assertTrue("Open synthetic launcher",manager.openExtensionSurface(component,"ui.launcher",32,16));manager.setExtensionSurfaceVisibility(component,"ui.launcher",true,true);});
+  }
+  return component;
+ }
+ private void finalFrameAfterQuiescence(boolean extension,boolean mutable) throws Exception {
+  String component=prepareFrameStream(extension);Object stream=frameStream(component,extension);
+  delayFrameWindow(stream,180);long before=(Long)field(stream,"sequence");
+  send(component,"fixture",Protocol.object("attack",(extension?"extension":"frame")+(mutable?"-memory":"-burst")).toString());
+  awaitFrameSequence(stream,before);Thread.sleep(260);waitForIdleSync();
+  assertEquals(mutable?7:4,extension?latestExtensionFrame:latestFrame);
+  assertEquals(1,extension?extensionFrames.get():frames.get());
+  assertEquals(null,field(field(stream,"frames"),"pending"));
+ }
+ public void testRegularFinalFrameSurvivesThrottleAfterSenderStops() throws Exception { finalFrameAfterQuiescence(false,false); }
+ public void testExtensionFinalFrameSurvivesThrottleAfterSenderStops() throws Exception { finalFrameAfterQuiescence(true,false); }
+ public void testRegularDeferredFrameOwnsCopyBeforeAckAllowsMemoryMutation() throws Exception { finalFrameAfterQuiescence(false,true); }
+ public void testExtensionDeferredFrameOwnsCopyBeforeAckAllowsMemoryMutation() throws Exception { finalFrameAfterQuiescence(true,true); }
+ private void staleQueuedFrames(boolean extension) throws Exception {
+  for(String change:extension?new String[]{"hide","sleep","resize","close","grant","revoke","disconnect","pin"}:new String[]{"hide","sleep","resize","close","revoke","disconnect","pin"}) {
+   String component=prepareFrameStream(extension);Object stream=frameStream(component,extension);Object delivery=field(stream,"frames");
+   delayFrameWindow(stream,1000);long sequence=(Long)field(stream,"sequence");int before=extension?extensionFrames.get():frames.get();
+   send(component,"fixture",Protocol.object("attack",extension?"extension-burst":"frame-burst").toString());
+   awaitFrameSequence(stream,sequence);Runnable pending=(Runnable)field(delivery,"pending");assertTrue("Frame pending before "+change,pending!=null);
+   if(change.equals("revoke"))revokeThroughPolicy(component);
+   else if(change.equals("disconnect")){
+    java.lang.reflect.Method method=FaceclawExternalApps.class.getDeclaredMethod("disconnect",String.class,boolean.class);method.setAccessible(true);
+    runOnMainSync(()->{try{method.invoke(manager,component,false);}catch(Exception error){throw new AssertionError(error);}});
+   } else if(change.equals("pin"))context.getSharedPreferences("faceclaw-external-apps",0).edit().putString(component+":pin","changed-signer").commit();
+   else if(extension){
+    if(change.equals("grant"))grantExtension(component,"ui.launcher",false);
+    else runOnMainSync(()->{
+     if(change.equals("hide"))manager.setExtensionSurfaceVisibility(component,"ui.launcher",false,true);
+     if(change.equals("sleep"))manager.setExtensionSurfaceVisibility(component,"ui.launcher",true,false);
+     if(change.equals("resize"))manager.openExtensionSurface(component,"ui.launcher",64,32);
+     if(change.equals("close"))manager.closeExtensionSurface(component,"ui.launcher");
+    });
+   } else {
+    if(change.equals("hide"))send(component,"visibility","{\"visible\":false,\"screenOn\":true}");
+    if(change.equals("sleep"))send(component,"visibility","{\"visible\":true,\"screenOn\":false}");
+    if(change.equals("resize"))send(component,"resize","{\"width\":64,\"height\":32}");
+    if(change.equals("close"))send(component,"close","{}");
+   }
+   if(!change.equals("pin"))assertEquals(null,field(delivery,"pending"));
+   // Even a callback already dequeued before cancellation must recheck live authority.
+   runOnMainSync(pending);assertEquals(before,extension?extensionFrames.get():frames.get());
+   revokeThroughPolicy(component);settle();
+  }
+ }
+ public void testRegularQueuedFramesCannotCrossVisibilityGenerationApprovalOrConnection() throws Exception { staleQueuedFrames(false); }
+ public void testExtensionQueuedFramesCannotCrossVisibilityGenerationGrantOrConnection() throws Exception { staleQueuedFrames(true); }
+
 }

@@ -53,6 +53,8 @@ Override `onHostConnected()`, `onHostDisconnected()`, and `onHostEvent(String, J
 
 Use ordinary Canvas drawing, optional `Ui.text`, `Ui.card`, `Ui.wrap`, and `Ui.layers` helpers, or mix them. `Ui.layers` composites ordered ARGB bitmaps using standard Canvas source-over alpha against black; submission converts the final result to grayscale. Pixel 1 represents opaque black and 255 white. This version sends pixels for both styles; it has no remote glyph-cache commands. The host owns its shell, viewport, BLE link, sleep policy, reserved gestures, and final incremental display updates.
 
+Use the [shared window-motion contract](WINDOW_MOTION.md) and `WindowAnimator` / `Ui.transitionCard` for standard card and notification transitions. Java and JavaScript helpers preserve T3 timing, defer opening body rendering until 90%, clear body pixels before closing, and support immediate reversal. The contract includes runnable authoring examples and parity fixtures. Adoption is optional.
+
 `FrameAnimator` is an optional main-thread clock for app-owned transitions. Construct it with a progress callback, call `start(durationMs)`, and render/submit your own bitmap for each callback. It emits eased progress from 0 to 1 at intervals of up to 40 ms; delivery can be slower under load. Call `cancel()` when hidden, disconnected, resized, or when the source content becomes invalid. A callback can safely cancel or replace its own animation. It does not retain scene bitmaps or guarantee display frame rate.
 
 | Host event | Data |

@@ -49,6 +49,20 @@ public final class Ui {
   Style style=shared; Paint p=new Paint(); p.setAntiAlias(style.antiAlias); p.setColor(color);
   float effectiveRadius=style.cornerRadius(radius); canvas.drawRoundRect(left,top,right,bottom,effectiveRadius,effectiveRadius,p);
  }
+ /** Body work is invoked only after the shared reveal threshold; draw at fixed destination coordinates. */
+ public interface WindowBody { void draw(Canvas canvas); }
+ public static void transitionCard(Canvas canvas, WindowMotion.Frame frame, String heading, WindowBody body) {
+  WindowMotion.Rect r=frame.rect; float x=(float)r.x,y=(float)r.y,right=(float)(r.x+r.width),bottom=(float)(r.y+r.height);
+  card(canvas,x,y,right,bottom,8,Color.BLACK);
+  Paint border=new Paint();border.setAntiAlias(shared.antiAlias);border.setColor(Color.rgb(235,235,235));border.setStyle(Paint.Style.STROKE);border.setStrokeWidth(shared.borderWidth(2));
+  canvas.drawRoundRect(x,y,right,bottom,shared.cornerRadius(8),shared.cornerRadius(8),border);
+  int save=canvas.save();
+  try {
+   canvas.clipRect(x+8,y+8,right-8,bottom-8);
+   text(canvas,heading,x+16,y+27,17,Color.rgb(190,190,190));
+   if(frame.bodyVisible && body!=null) {canvas.clipRect(x+8,y+42,right-8,bottom-8);body.draw(canvas);}
+  } finally {canvas.restoreToCount(save);}
+ }
  public static List<String> wrap(String text,Paint paint,float width) {
   if(width<=0) throw new IllegalArgumentException("Invalid wrap width");
   List<String> lines=new ArrayList<>();

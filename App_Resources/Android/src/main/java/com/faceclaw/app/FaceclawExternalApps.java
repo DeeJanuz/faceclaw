@@ -222,11 +222,15 @@ public final class FaceclawExternalApps {
  public String androidAppsJson() {
   JSONArray result=new JSONArray(); PackageManager pm=context.getPackageManager();
   try {
-   List<ApplicationInfo> apps=pm.getInstalledApplications(0);
+   Map<String,ApplicationInfo> compatible=new HashMap<>();
+   for(ResolveInfo resolved:discover()) {
+    ServiceInfo service=resolved.serviceInfo;
+    if(service!=null&&validService(service)) compatible.put(service.packageName,service.applicationInfo);
+   }
+   List<ApplicationInfo> apps=new ArrayList<>(compatible.values());
    apps.sort((a,b)->pm.getApplicationLabel(a).toString().compareToIgnoreCase(pm.getApplicationLabel(b).toString()));
    for(ApplicationInfo app:apps) {
     if(result.length()>=512) break;
-    if((app.flags&ApplicationInfo.FLAG_SYSTEM)!=0 && pm.getLaunchIntentForPackage(app.packageName)==null) continue;
     result.put(Protocol.object("packageName",app.packageName,"name",pm.getApplicationLabel(app).toString()));
    }
   } catch(Exception ignored) {}

@@ -359,6 +359,15 @@ public class BoundaryTest extends Instrumentation {
  public void testLocalSettingsCatalogDoesNotGrantOrActivateApps() throws Exception {
   settle(); assertTrue("Installed catalog includes an unapproved app",manager.androidAppsJson().contains(PKG));
   assertFalse(manager.installedJson().contains(PKG));
+  org.json.JSONArray catalog=new org.json.JSONArray(manager.androidAppsJson());
+  for(int i=0;i<catalog.length();i++) {
+   String pkg=catalog.getJSONObject(i).getString("packageName"); boolean compatible=false;
+   for(android.content.pm.ResolveInfo candidate:context.getPackageManager().queryIntentServices(new Intent(Protocol.ACTION).setPackage(pkg),android.content.pm.PackageManager.GET_META_DATA)) {
+    android.content.pm.ServiceInfo service=candidate.serviceInfo;
+    if(service.exported&&service.enabled&&service.applicationInfo.enabled&&service.metaData!=null&&service.metaData.getInt("com.faceclaw.PROTOCOL_MAJOR",0)==Protocol.VERSION)compatible=true;
+   }
+   assertTrue("Only compatible Faceclaw packages appear in settings: "+pkg,compatible);
+  }
   assertFalse(manager.openAndroidAppSettings(null,PKG));
   assertFalse(manager.prioritizeExtension("unknown.feature",PKG+"/Missing"));
   assertFalse(manager.prioritizeExtension("transcription",PKG+"/Missing"));

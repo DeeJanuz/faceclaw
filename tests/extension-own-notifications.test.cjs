@@ -84,3 +84,15 @@ test('large app catalogs retain Signal and publish catalog-only changes in bound
  h.sent.length=0;h.catalog([...apps,{packageName:'app.new',name:'Z new'}]);
  h.platform.publishOwnNotifications('owner');assert.equal(h.snapshot().notificationApps.length,902);
 });
+
+test('locked startup and rejected delivery do not suppress the launcher catalog after unlock',()=>{
+ const h=harness();let accepted=false;
+ h.platform.hooks={apps:()=>[{appId:'clock',title:'Clock'}]};h.platform.feature=feature=>feature==='ui.launcher'?{component:'owner'}:undefined;
+ h.platform.native.sendExtension=(_owner,_feature,_type,json)=>{h.sent.push(JSON.parse(json));return accepted;};
+ h.locked(true);h.platform.publishState();assert.equal(h.sent.length,0);
+ h.locked(false);h.platform.publishState();assert.equal(h.sent.length,1);assert.equal(h.sent[0].apps[0].appId,'clock');
+ accepted=true;h.platform.publishState();assert.equal(h.sent.length,2);
+ h.platform.publishState();assert.equal(h.sent.length,2);
+ h.platform.native.openExtensionSurface=()=>true;assert.equal(h.platform.openSurface('ui.launcher',576,260),true);
+ assert.equal(h.sent.length,3,'reopening resends the current catalog');
+});

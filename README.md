@@ -32,7 +32,7 @@ Compatible Android APKs can draw their own glasses screens while Faceclaw owns
 the shell and Bluetooth connection. Install an APK normally, then open
 Settings > Installed apps and select the application to open its phone settings.
 A three-second glasses notice directs you to the phone. Compatible applications
-open their setup page; other Android applications open their system app settings.
+open their setup page. This list includes only apps declaring an enabled, exported Faceclaw service with the supported protocol version, including apps awaiting approval. Ordinary Android apps are excluded.
 Use the application's Faceclaw permissions page to approve its capabilities. The application asks you to select one active Faceclaw host.
 Approved applications appear in the launcher. Applications with their own phone
 setup screen can open Faceclaw's approval and permission controls directly from

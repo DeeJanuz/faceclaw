@@ -106,7 +106,11 @@ export class ExtensionPlatform {
     return Boolean(this.native.sendExtension(component, feature, "event", JSON.stringify(data)));
   }
   openSurface(feature: string, width: number, height: number): boolean {
-    const selected = this.feature(feature); return !!selected && !this.isLocked() && Boolean(this.native.openExtensionSurface(selected.component, feature, width, height));
+    const selected = this.feature(feature);
+    if (!selected || this.isLocked() || !this.native.openExtensionSurface(selected.component, feature, width, height)) return false;
+    // A newly opened provider surface must receive a catalog even if host state is unchanged.
+    this.publishState(true);
+    return true;
   }
   setSurfaceVisibility(feature: string, visible: boolean, screenOn: boolean): void {
     const selected = this.feature(feature); if (selected) this.native.setExtensionSurfaceVisibility(selected.component, feature, visible, screenOn && !this.isLocked());
@@ -146,10 +150,13 @@ export class ExtensionPlatform {
     }
     this.lastState = ""; this.publishState();
   }
-  private publishState(): void {
+  private publishState(force = false): void {
+    if (this.isLocked()) return;
     const state = { event: "host-state", battery: shell.getBatteryLevels(), ...(this.hooks.hostState?.() ?? {}), windows: shell.getWindows().map(window => ({ windowId: window.windowId, appId: window.appId, title: window.title, closeable: window.closeable === true })), focusedWindowId: shell.foregroundWindow()?.windowId ?? "", screenOn: shell.isScreenOn(), apps: this.hooks.apps?.() ?? [] };
-    const serialized = JSON.stringify(state); if (serialized === this.lastState || serialized.length > 30000) return; this.lastState = serialized;
-    for (const feature of ["ui.launcher", "ui.app-menu", "ui.notifications"]) { const selected = this.feature(feature); if (selected && !this.isLocked()) this.event(selected.component, feature, state); }
+    const serialized = JSON.stringify(state); if ((!force && serialized === this.lastState) || serialized.length > 30000) return;
+    let delivered = true, recipients = 0;
+    for (const feature of ["ui.launcher", "ui.app-menu", "ui.notifications"]) { const selected = this.feature(feature); if (selected) { recipients++; delivered = this.event(selected.component, feature, state) && delivered; } }
+    if (recipients && delivered) this.lastState = serialized;
   }
   private notificationAppCatalog(): { packageName: string; name: string }[] {
     if (Date.now() - this.notificationAppsAt > 30000) {

@@ -10,6 +10,7 @@ function setup() {
  vm.runInNewContext(ts.transpileModule(fs.readFileSync('app/apps/external/platform.ts', 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS } }).outputText,
   { module, exports: module.exports, require: name => imports[name] || {}, Date: { now: () => now }, global: { isAndroid: false } });
  const platform = Object.create(module.exports.ExternalAppPlatform.prototype);
+ platform.extensions = { onNativeEvent: () => false };
  const state = { window: { windowId: 'window' }, ready: true, visible: true, lastInput: now };
  platform.windows = new Map([['app', state]]); platform.options = { isLocked: () => locked };
  platform.native = { allows: () => allowed, send: (component, type, json) => calls.push({ component, type, data: JSON.parse(json) }) };

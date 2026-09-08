@@ -1,3 +1,7 @@
+import { configureAppMenuPresenter } from "../ui/window-menu";
+import { ExtensionLayer } from "../ui/shell/extension-layer";
+import { weatherBridge } from "../native/weather";
+import { onEffectiveExtensionsChanged, windowLayoutPolicy } from "../ui/extension-settings";
 import { ExternalAppPlatform, externalAppId, installedExternalApps } from "../apps/external/platform";
 import { Application, ImageSource } from "@nativescript/core";
 import { EvenAIStatus, EvenAIStatusName, EventSourceType, EventSourceTypeName, OsEventTypeList, OsEventTypeName, WatchGestureType, WatchGestureTypeName } from "./events";
@@ -70,6 +74,8 @@ import { type KeyboardInputSession } from "../ui/shell/keyboard-input";
 import { assistantAllowProactiveSetting, assistantBackendSetting, assistantBridgeHostSetting, assistantBridgePortSetting, assistantBridgeTokenSetting, brightnessSetting, brightnessSettingToLevel, displayModeSetting, navigateDisplayModeSetting, navigateVerticalPositionSetting, terminalDisplayModeSetting, terminalVerticalPositionSetting, elevenLabsApiKeySetting, getStringSettingById, openAiApiKeySetting, nightscoutApiTokenSetting, firmwareDebugFlagsSetting, lockScreenEnabledSetting, nightscoutSiteUrlSetting, onAnySettingChanged, previewColorSetting, ringConnectionModeSetting, saveVoiceRecordingsSetting, sonioxApiKeySetting, screenTimeoutSetting, screenTimeoutSettingToMs, suspendEvenHubWhenScreenOffSetting, verticalPositionSetting, voiceProviderSetting, wakeWordActionSetting, type ConfigSettingString } from "../ui/dashboard-settings";
 import { isIgnoringBatteryOptimizations, requestIgnoreBatteryOptimizations } from "../native/battery-optimization";
 import {
+  getInstalledEvenHubApps,
+  installedEvenHubAppId,
   getInstalledEvenHubAppById,
   installedEvenHubPackageId,
   uninstallEvenHubPackage,
@@ -308,6 +314,7 @@ class DashboardController {
   private incompatibleDisconnectPending = false;
   private unpairedDisconnectPending = false;
 
+  private extensionSurfaces = new Map<string, { component: string; layer: ExtensionLayer; timer?: ReturnType<typeof setTimeout>; wokeScreen: boolean; interacted: boolean }>();
   private externalApps: ExternalAppPlatform;
 
   constructor() {
@@ -367,7 +374,7 @@ class DashboardController {
       },
     });
     this.externalApps = new ExternalAppPlatform({
-      configureSurface: (id, visible, mode) => this.configureWindowSurface(id, visible, mode),
+      configureSurface: (id, _visible, mode) => this.configureWindowSurface(id, mode),
       setSurfaceVisible: (id, visible) => this.setWindowSurfaceVisible(id, visible),
       removeSurface: (id) => this.removeWindowSurface(id),
       submitRaster: async (id, pixels, width, height, serial) => {
@@ -378,12 +385,37 @@ class DashboardController {
       },
       requestRender: () => this.requestShellRender(),
       isLocked: () => this.glassesLocked,
+      extensions: {
+        apps: () => [
+          ...LAUNCHABLE_APPS.map(app => ({ appId: app.appId, title: app.title, icon: app.icon })),
+          ...installedExternalApps().map(app => ({ appId: externalAppId(app.component), title: app.name, icon: "package" })),
+          ...getInstalledEvenHubApps().map(app => ({ appId: installedEvenHubAppId(app.packageId), title: app.name, icon: "package", uninstallable: true })),
+        ],
+        launchApp: appId => { this.closeExtensionSurface("ui.app-menu"); void this.launchApp(appId); },
+        uninstallApp: appId => this.uninstallApp(appId),
+        hostState: () => ({ weather: weatherBridge.snapshot() }),
+        showSurface: (feature, component, target) => this.showExtensionSurface(feature, component, target),
+        closeSurface: feature => this.closeExtensionSurface(feature),
+        onFrame: (component, feature, _generation, width, height, pixels) => {
+          if (feature === "ui.launcher") {
+            if (shell.foregroundWindow()?.appId !== "launcher" || !this.display || this.glassesLocked) return;
+            const frameId = frameTimings.startFrame("render:extension-launcher", 0);
+            void this.display.submitSurfaceFrame("window:launcher", pixels, { x: 0, y: 0, width, height }, `extension:${Date.now()}`, 0, frameId).then(() => this.schedulePreviewUpdate());
+            return;
+          }
+          const state = this.extensionSurfaces.get(feature);
+          if (!state || state.component !== component) return;
+          state.layer.setFrame(pixels, width, height); this.requestShellRender();
+        },
+      },
     });
+    configureAppMenuPresenter((windowId, title, items, onClosed) => shell.canShowExtensionOverlay() && this.externalApps.extensions.openMenu(windowId, title, items, onClosed));
     // Boot hooks register windows that exist from startup (the launcher,
     // pinned first in the sidebar and the boot foreground).
     for (const app of ALL_APPS) {
       app.boot?.(this.buildAppContext(app));
     }
+    onEffectiveExtensionsChanged(() => this.applyDisplayModeIfChanged());
     timerEngine.onChange(() => this.refreshAlarmReliabilityWarning());
     this.offAndroidNotification = onAndroidNotificationPosted((notificationKey) => {
       void this.handleAndroidNotificationPosted(notificationKey).catch((error) => {
@@ -481,9 +513,13 @@ class DashboardController {
    * place; workers that support resizing receive the new viewport. Other
    * worker windows are closed and launched again at the new size.
    */
+  private lastExtensionLayout = JSON.stringify(windowLayoutPolicy());
+
   private applyDisplayModeIfChanged(): void {
     const mode = displayModeSetting.get();
-    if (mode === this.lastDisplayMode) return;
+    const layout = JSON.stringify(windowLayoutPolicy());
+    if (mode === this.lastDisplayMode && layout === this.lastExtensionLayout) return;
+    this.lastExtensionLayout = layout;
     this.lastDisplayMode = mode;
     this.appendLog(`display mode: ${mode}`);
     const foregroundWindowId = shell.foregroundWindow()?.windowId;
@@ -494,7 +530,6 @@ class DashboardController {
           window.relayout();
           await this.configureWindowSurface(
             window.surfaceId,
-            window.windowId === foregroundWindowId,
             window.heightMode,
           );
         } else if (window.closeable) {
@@ -532,7 +567,7 @@ class DashboardController {
     void (async () => {
       for (const window of Array.from(shell.getWindows())) {
         if (!changed.includes(window.appId)) continue;
-        await this.configureWindowSurface(window.surfaceId, window.windowId === shell.foregroundWindow()?.windowId, window.heightMode);
+        await this.configureWindowSurface(window.surfaceId, window.heightMode);
         window.relayout?.();
       }
       shell.foregroundWindow()?.requestRender();
@@ -544,12 +579,10 @@ class DashboardController {
     const position = verticalPositionSetting.get();
     if (position === this.lastVerticalPosition) return;
     this.lastVerticalPosition = position;
-    const foregroundWindowId = shell.foregroundWindow()?.windowId;
     void (async () => {
       for (const window of shell.getWindows()) {
         await this.configureWindowSurface(
           window.surfaceId,
-          window.windowId === foregroundWindowId,
           window.heightMode,
         );
       }
@@ -1221,11 +1254,9 @@ class DashboardController {
       // loop re-applies the current dim from here.
       await target.setUnderlayDim(SHELL_SURFACE_Z_ORDER, 1);
       this.appliedUnderlayDim = 1;
-      const foregroundWindowId = shell.foregroundWindow()?.windowId;
       for (const window of shell.getWindows()) {
         await this.configureWindowSurface(
           window.surfaceId,
-          window.windowId === foregroundWindowId,
           window.heightMode,
           target,
         );
@@ -1508,11 +1539,9 @@ class DashboardController {
       await communicator.setUnderlayDim(SHELL_SURFACE_Z_ORDER, 1);
       this.appliedUnderlayDim = 1;
       await this.configureLockSurface(communicator);
-      const foregroundWindowId = shell.foregroundWindow()?.windowId;
       for (const window of shell.getWindows()) {
         await this.configureWindowSurface(
           window.surfaceId,
-          window.windowId === foregroundWindowId,
           window.heightMode,
         );
       }
@@ -2168,8 +2197,7 @@ class DashboardController {
       reconfigureSurface: (heightMode) => {
         // Resize the surface rect to the new band; a foreground window stays
         // visible. The shell re-renders so the chrome (top bar) follows.
-        const visible = shell.foregroundWindow()?.windowId === windowId;
-        void this.configureWindowSurface(surfaceId, visible, heightMode);
+        void this.configureWindowSurface(surfaceId, heightMode);
         this.requestShellRender();
       },
       onClosed: () => {
@@ -2178,7 +2206,7 @@ class DashboardController {
     });
     this.inProcessApps.set(windowId, app);
     shell.registerWindow(app.window);
-    await this.configureWindowSurface(surfaceId, false, app.window.heightMode);
+    await this.configureWindowSurface(surfaceId, app.window.heightMode);
     shell.focusWindow(windowId);
     this.requestShellRender();
     this.appendLog(`launched ${windowId}`);
@@ -2191,8 +2219,8 @@ class DashboardController {
     const host = new WorkerAppHost({
       appId,
       worker: createWorker(),
-      configureSurface: (surfaceId, visible, heightMode) =>
-        this.configureWindowSurface(surfaceId, visible, heightMode),
+      configureSurface: (surfaceId, _visible, heightMode) =>
+        this.configureWindowSurface(surfaceId, heightMode),
       setSurfaceVisible: (surfaceId, visible) => this.setWindowSurfaceVisible(surfaceId, visible),
       removeSurface: (surfaceId) => this.removeWindowSurface(surfaceId),
       requestShellRender: () => this.requestShellRender(),
@@ -2288,6 +2316,7 @@ class DashboardController {
    * open window focus it instead of opening another.
    */
   private async launchApp(appId: string, params?: AppLaunchParams): Promise<void> {
+    if (appId === "notifications" && this.externalApps.extensions.openNotificationInbox()) return;
     const external = installedExternalApps().find((entry) => externalAppId(entry.component) === appId);
     if (external) { await this.externalApps.open(external.component); return; }
     const app = ALL_APPS.find((entry) => entry.appId === appId);
@@ -2326,7 +2355,6 @@ class DashboardController {
   /** Create/refresh a window surface on the compositor, if a display target exists. */
   private async configureWindowSurface(
     surfaceId: string,
-    visible: boolean,
     heightMode: WindowHeightMode = "min",
     // ensurePreviewDisplay passes its not-yet-published target explicitly.
     target: DisplayTarget | null = this.display,
@@ -2337,7 +2365,10 @@ class DashboardController {
       zOrder: 0,
       transparency: "opaque",
     });
-    await target.setSurfaceVisible(surfaceId, visible);
+    // Setup can overlap window restoration, focus changes, or another layout
+    // update. Resolve visibility after the await so stale setup cannot reveal
+    // a background window over the current one.
+    await target.setSurfaceVisible(surfaceId, shell.foregroundWindow()?.surfaceId === surfaceId);
   }
 
   private removeWindowSurface(surfaceId: string): void {
@@ -2482,7 +2513,50 @@ class DashboardController {
     this.schedulePreviewUpdate();
   }
 
+  private showExtensionSurface(feature: string, component: string, target?: string): boolean {
+    if (this.glassesLocked || this.phase === "charging") return false;
+    const prior = this.extensionSurfaces.get(feature);
+    if (prior && feature === "ui.notifications" && target !== "inbox" && prior.interacted) return false;
+    if (prior) { this.closeExtensionSurface(feature, false); }
+    if (!shell.canShowExtensionOverlay()) return false;
+    const wokeScreen = prior?.wokeScreen || !shell.isScreenOn();
+    if (!shell.isScreenOn()) shell.wake("window");
+    const layer = new ExtensionLayer(event => {
+      const state = this.extensionSurfaces.get(feature);
+      if (state) {
+        if (feature !== "ui.notifications" || event.type === "click") state.interacted = true;
+        if (event.type === "click") state.layer.opaque = true;
+        if (event.type !== "long-press" && event.type !== "long-press-release") { if (state.timer) clearTimeout(state.timer); state.timer = undefined; }
+      }
+      this.externalApps.extensions.surfaceInput(feature, event);
+    }, (width, height) => {
+      this.externalApps.extensions.openSurface(feature, width, height);
+      this.externalApps.extensions.setSurfaceVisibility(feature, true, shell.isScreenOn());
+    }, () => {
+      const state = this.extensionSurfaces.get(feature);
+      if (!state || state.layer !== layer) return;
+      if (state.timer) clearTimeout(state.timer);
+      this.extensionSurfaces.delete(feature);
+      this.externalApps.extensions.closeSurface(feature);
+    }, feature === "ui.notifications" ? "medium" : "min", feature !== "ui.notifications" || target === "inbox" || wokeScreen);
+    const state = { component, layer, wokeScreen, interacted: target === "inbox", timer: undefined as ReturnType<typeof setTimeout> | undefined };
+    this.extensionSurfaces.set(feature, state);
+    if (!shell.showExtensionOverlay(layer, feature !== "ui.app-menu")) { this.extensionSurfaces.delete(feature); if (wokeScreen) shell.sleep(); return false; }
+    if (feature === "ui.notifications" && target !== "inbox") state.timer = setTimeout(() => this.closeExtensionSurface(feature), 5000);
+    this.requestShellRender();
+    return true;
+  }
+
+  private closeExtensionSurface(feature: string, restoreSleep = true): void {
+    if (feature === "ui.launcher") { setTimeout(() => shell.getWindows().find(window => window.appId === "launcher")?.requestRender(), 0); return; }
+    const state = this.extensionSurfaces.get(feature);
+    if (!state) return;
+    shell.closeExtensionOverlay(state.layer);
+    if (restoreSleep && state.wokeScreen && !state.interacted && !shell.hasOverlay()) shell.sleep();
+  }
+
   private async handleAndroidNotificationPosted(notificationKey: string): Promise<void> {
+    if (this.externalApps.extensions.handlesNotifications()) { this.requestShellRender(); return; }
     if (!notificationKey || this.glassesLocked) {
       this.requestShellRender();
       return;

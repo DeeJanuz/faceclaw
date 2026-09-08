@@ -25,7 +25,7 @@ public class BoundaryTest extends Instrumentation {
  private static void assertFalse(boolean value) { assertTrue("Expected false",!value); }
  private static void assertEquals(Object expected,Object actual) { if(!java.util.Objects.equals(expected,actual)) throw new AssertionError("Expected "+expected+" but got "+actual); }
  static final String PKG="com.faceclaw.sdk.fixture";
- Context context; FaceclawExternalApps manager; AtomicInteger frames,notifications,replyResults,searchRequests; CountDownLatch connected;
+ Context context; FaceclawExternalApps manager; AtomicInteger frames,notifications,replyResults,searchRequests,extensionFrames,extensionResults,extensionTimeouts,ownRequests,refineRequests,systemMenuRequests; volatile String systemMenuPayload; volatile int extensionTransparent=-1,extensionBlack=-1; CountDownLatch connected;
  java.util.List<Double> timings=new java.util.concurrent.CopyOnWriteArrayList<>();
  StringBuilder measurements=new StringBuilder();
  private void clearFixtureGrants() {
@@ -49,12 +49,13 @@ public class BoundaryTest extends Instrumentation {
   } finally { context.unbindService(connection); }
  }
  public void setUp() throws Exception {
-  context=getInstrumentation().getTargetContext(); selectFixtureHost(); timings.clear(); frames=new AtomicInteger(); notifications=new AtomicInteger(); replyResults=new AtomicInteger(); searchRequests=new AtomicInteger(); connected=new CountDownLatch(1);
+  context=getInstrumentation().getTargetContext(); selectFixtureHost(); timings.clear(); frames=new AtomicInteger(); ownRequests=new AtomicInteger(); systemMenuRequests=new AtomicInteger(); systemMenuPayload=null; refineRequests=new AtomicInteger(); extensionFrames=new AtomicInteger(); extensionResults=new AtomicInteger(); extensionTimeouts=new AtomicInteger(); notifications=new AtomicInteger(); replyResults=new AtomicInteger(); searchRequests=new AtomicInteger(); connected=new CountDownLatch(1);
   getInstrumentation().runOnMainSync(()->{
    clearFixtureGrants();
    manager=FaceclawExternalApps.get(context); manager.refresh();
    manager.setListener(new FaceclawExternalAppListener() {
-    public void onEvent(String component,String type,String json) { if(type.equals("connected")) connected.countDown(); if(type.equals("notification")) notifications.incrementAndGet(); if(type.equals("notification-reply-result")) replyResults.incrementAndGet(); if(type.equals("search-dictation")) searchRequests.incrementAndGet(); }
+    public void onEvent(String component,String type,String json) { if(type.equals("connected")) connected.countDown(); if(type.equals("extension-event")&&json.contains("\"result\"")) extensionResults.incrementAndGet(); if(type.equals("extension-event")&&json.contains("\"timeout\"")) extensionTimeouts.incrementAndGet(); if(type.equals("notification")) notifications.incrementAndGet(); if(type.equals("notification-reply-result")) replyResults.incrementAndGet(); if(type.equals("search-dictation")) searchRequests.incrementAndGet(); if(type.equals("own-notifications")) ownRequests.incrementAndGet(); if(type.equals("request-system-menu")) { systemMenuPayload=json; systemMenuRequests.incrementAndGet(); } if(type.equals("host-refinement")) refineRequests.incrementAndGet(); }
+    public void onExtensionFrame(String component,String feature,long generation,int width,int height,ByteBuffer pixels) { extensionTransparent=pixels.get(0)&255; extensionBlack=pixels.get(1)&255; extensionFrames.incrementAndGet(); }
     public void onFrame(String component,int width,int height,ByteBuffer pixels) { if(pixels.remaining()==width*height) {
      frames.incrementAndGet();
      long timestamp=0,multiplier=1;
@@ -74,6 +75,78 @@ public class BoundaryTest extends Instrumentation {
  void send(String component,String type,String json) { getInstrumentation().runOnMainSync(()->manager.send(component,type,json)); }
  void open(String component) { send(component,"open","{\"width\":32,\"height\":16}"); send(component,"visibility","{\"visible\":true,\"screenOn\":true}"); }
  void settle() throws Exception { Thread.sleep(150); getInstrumentation().waitForIdleSync(); }
+ private String declarations(String feature,String configuration) { return "{\"declarations\":[{\"feature\":\""+feature+"\",\"enabled\":true,\"configuration\":"+configuration+"}]}"; }
+ private void grantExtension(String component,String feature,boolean granted) {
+  runOnMainSync(()->{ context.getSharedPreferences("faceclaw-external-apps",0).edit().putBoolean(component+":extension:"+feature,granted).commit(); manager.refresh(); });
+ }
+ public void testExtensionDeclarationsRequireSeparateGrantAndPin() throws Exception {
+  String c=approve("CanvasService"); send(c,"test-publish-extensions",declarations("ui.typography","{\"size\":17}")); settle();
+  org.json.JSONArray features=new org.json.JSONObject(manager.extensionsJson()).getJSONArray("features");
+  org.json.JSONObject typography=null; for(int i=0;i<features.length();i++) if(features.getJSONObject(i).getString("feature").equals("ui.typography")) typography=features.getJSONObject(i);
+  assertEquals("",typography.getString("component")); assertEquals(1,typography.getJSONArray("contenders").length());
+  grantExtension(c,"ui.typography",true);
+  features=new org.json.JSONObject(manager.extensionsJson()).getJSONArray("features");
+  for(int i=0;i<features.length();i++) if(features.getJSONObject(i).getString("feature").equals("ui.typography")) typography=features.getJSONObject(i);
+  assertEquals(c,typography.getString("component")); assertEquals(17,typography.getJSONObject("configuration").getInt("size"));
+  runOnMainSync(()->{ context.getSharedPreferences("faceclaw-external-apps",0).edit().putString(c+":pin","wrong-pin").commit(); manager.refresh(); });
+  assertFalse(manager.extensionsJson().contains(c));
+ }
+ public void testExtensionContractRejectsUnknownKeysAndDependencies() throws Exception {
+  for(String json:new String[]{declarations("ui.typography","{\"size\":21}"),declarations("ui.typography","{\"hostPreference\":true}"),declarations("ui.navigation","{\"hold\":\"execute-native\"}"),declarations("unknown","{}")}) {
+   try { ExtensionContract.declarations(new org.json.JSONObject(json).getJSONArray("declarations")); throw new AssertionError("Invalid extension accepted"); } catch(IllegalArgumentException expected) {}
+  }
+  ExtensionContract.declarations(new org.json.JSONObject(declarations("ui.typography","{\"font\":\"Inter_18pt-Regular.ttf\",\"size\":17}")).getJSONArray("declarations"));
+ }
+ public void testFullStandaloneBundlePublishesEverySupportedConfiguration() throws Exception {
+  java.io.ByteArrayOutputStream bytes=new java.io.ByteArrayOutputStream();
+  try(java.io.InputStream source=getContext().getAssets().open("full-extension-bundle.json")) { byte[] block=new byte[4096]; int read; while((read=source.read(block))!=-1) bytes.write(block,0,read); }
+  String json=new String(bytes.toByteArray(),java.nio.charset.StandardCharsets.UTF_8);
+  org.json.JSONArray declarations=ExtensionContract.declarations(new org.json.JSONObject(json).getJSONArray("declarations")); assertEquals(11,declarations.length());
+  String c=approve("CanvasService"); send(c,"test-publish-extensions",json); settle();
+  org.json.JSONArray features=new org.json.JSONObject(manager.extensionsJson()).getJSONArray("features"); assertEquals(11,features.length());
+  for(int i=0;i<features.length();i++) { org.json.JSONArray contenders=features.getJSONObject(i).getJSONArray("contenders"); assertEquals(1,contenders.length()); assertEquals(c,contenders.getJSONObject(0).getString("component")); assertTrue("Bundle feature enabled",contenders.getJSONObject(0).getBoolean("enabled")); }
+  grantExtension(c,"ui.window-layout",true); features=new org.json.JSONObject(manager.extensionsJson()).getJSONArray("features");
+  for(int i=0;i<features.length();i++) if(features.getJSONObject(i).getString("feature").equals("ui.window-layout")) { assertEquals(c,features.getJSONObject(i).getString("component")); assertEquals("medium",features.getJSONObject(i).getJSONObject("configuration").getString("ownHeightMode")); assertEquals("viewport",features.getJSONObject(i).getJSONObject("configuration").getString("inputDialogs")); }
+ }
+ public void testSharedStyleRejectsPathsBeforeAssetAccessAndResets() throws Exception {
+  AtomicInteger accesses=new AtomicInteger();
+  Context wrapped=new ContextWrapper(context) { @Override public android.content.res.AssetManager getAssets() { accesses.incrementAndGet(); return super.getAssets(); } };
+  Ui.applySharedStyle(wrapped,new org.json.JSONObject("{\"font\":\"../../private-file.ttf\",\"size\":17}"));
+  assertEquals(0,accesses.get()); assertEquals(Float.valueOf(16),Float.valueOf(Ui.style().size));
+  Ui.applySharedStyle(wrapped,new org.json.JSONObject("{\"font\":\"Inter_18pt-Regular.ttf\",\"size\":17,\"raster\":\"crisp\"}"));
+  assertEquals(1,accesses.get()); assertEquals(Float.valueOf(17),Float.valueOf(Ui.style().size)); assertFalse(Ui.style().antiAlias);
+  Ui.resetSharedStyle(); assertEquals(Float.valueOf(16),Float.valueOf(Ui.style().size));
+ }
+ public void testExtensionRequestsAreWinnerBoundAndSingleUse() throws Exception {
+  String c=approve("CanvasService"); send(c,"test-publish-extensions",declarations("assistant","{}")); settle();
+  assertFalse(manager.sendExtension(c,"assistant","request","{\"requestId\":\"request-1\"}"));
+  grantExtension(c,"assistant",true);
+  runOnMainSync(()->assertTrue("Granted request dispatched",manager.sendExtension(c,"assistant","request","{\"requestId\":\"request-1\"}")));
+  settle(); assertEquals(1,extensionResults.get());
+  grantExtension(c,"assistant",false); assertFalse(manager.sendExtension(c,"assistant","request","{\"requestId\":\"request-2\"}"));
+ }
+ public void testAttemptedProviderDispatchCannotAuthorizeFallback() throws Exception {
+  String c=approve("CanvasService"); send(c,"test-publish-extensions",declarations("assistant","{}")); settle(); grantExtension(c,"assistant",true);
+  java.lang.reflect.Field connections=FaceclawExternalApps.class.getDeclaredField("connections"); connections.setAccessible(true);
+  Object connection=((java.util.Map<?,?>)connections.get(manager)).get(c);
+  java.lang.reflect.Field remote=connection.getClass().getDeclaredField("remote"); remote.setAccessible(true);
+  android.os.Messenger original=(android.os.Messenger)remote.get(connection);
+  android.os.Messenger broken=new android.os.Messenger(new android.os.Binder() { @Override protected boolean onTransact(int code,android.os.Parcel data,android.os.Parcel reply,int flags) throws android.os.RemoteException { throw new android.os.RemoteException("Synthetic ambiguous transport"); } });
+  runOnMainSync(()->{ try {
+   remote.set(connection,broken);
+   assertTrue("Attempted dispatch must remain accepted/uncertain",manager.sendExtension(c,"assistant","request","{\"requestId\":\"uncertain-request\"}"));
+  } catch(Exception error) { throw new AssertionError(error); } finally { try { remote.set(connection,original); } catch(Exception ignored) {} } });
+  assertEquals(1,extensionTimeouts.get()); assertEquals(0,extensionResults.get());
+ }
+ public void testExtensionSurfacesRequireWinnerVisibilityAndOwnStream() throws Exception {
+  String c=approve("CanvasService"); send(c,"test-publish-extensions",declarations("ui.launcher","{}")); settle();
+  assertFalse(manager.openExtensionSurface(c,"ui.launcher",32,16)); assertFalse(manager.sendExtensionPointer(c,"ui.launcher",0,0,32,16)); grantExtension(c,"ui.launcher",true);
+  runOnMainSync(()->{ assertTrue("Granted surface opened",manager.openExtensionSurface(c,"ui.launcher",32,16)); manager.setExtensionSurfaceVisibility(c,"ui.launcher",true,true); }); settle();
+  runOnMainSync(()->{ assertTrue("Visible exact viewport pointer",manager.sendExtensionPointer(c,"ui.launcher",0,0,32,16)); assertFalse(manager.sendExtensionPointer(c,"ui.launcher",32,0,32,16)); assertFalse(manager.sendExtensionPointer(c,"ui.launcher",-1,0,32,16)); assertFalse(manager.sendExtensionPointer(c,"ui.launcher",0,0,640,452)); });
+  assertEquals(1,extensionFrames.get()); assertEquals(0,frames.get()); assertEquals(0,extensionTransparent); assertEquals(1,extensionBlack);
+  runOnMainSync(()->manager.setExtensionSurfaceVisibility(c,"ui.launcher",true,false)); settle(); assertEquals(1,extensionFrames.get()); assertFalse(manager.sendExtensionPointer(c,"ui.launcher",0,0,32,16));
+  grantExtension(c,"ui.launcher",false); runOnMainSync(()->manager.setExtensionSurfaceVisibility(c,"ui.launcher",true,true)); settle(); assertEquals(1,extensionFrames.get());
+ }
  private boolean[] proposedChoices(String component) throws Exception {
   java.lang.reflect.Method method=FaceclawExternalApps.class.getDeclaredMethod("approvalChoices",String.class); method.setAccessible(true);
   return (boolean[])method.invoke(manager,component);
@@ -172,6 +245,39 @@ public class BoundaryTest extends Instrumentation {
   send(c,"visibility","{\"visible\":false,\"screenOn\":true}"); send(c,"test-search-request","{}"); settle(); assertEquals(1,searchRequests.get());
   send(c,"visibility","{\"visible\":true,\"screenOn\":false}"); send(c,"test-search-request","{}"); settle(); assertEquals(1,searchRequests.get());
   revokeThroughPolicy(c); send(c,"test-search-request","{}"); settle(); assertEquals(1,searchRequests.get());
+ }
+ public void testSystemMenuRequiresOwnOpenVisibleAwakeSession() throws Exception {
+  String c=approve("CanvasService"); send(c,"test-system-menu","{}"); settle(); assertEquals(0,systemMenuRequests.get());
+  open(c); send(c,"test-system-menu","{}"); settle(); assertEquals(1,systemMenuRequests.get()); assertEquals("{}",systemMenuPayload);
+  send(c,"visibility","{\"visible\":false,\"screenOn\":true}"); send(c,"test-system-menu","{}"); settle(); assertEquals(1,systemMenuRequests.get());
+  send(c,"visibility","{\"visible\":true,\"screenOn\":false}"); send(c,"test-system-menu","{}"); settle(); assertEquals(1,systemMenuRequests.get());
+  open(c); send(c,"close","{}"); send(c,"test-system-menu","{}"); settle(); assertEquals(1,systemMenuRequests.get());
+  revokeThroughPolicy(c); send(c,"test-system-menu","{}"); settle(); assertEquals(1,systemMenuRequests.get());
+ }
+ public void testSystemMenuRejectsStaleSessionAndForgedUidAndStripsForeignTarget() throws Exception {
+  String c=approve("AdversarialService"); open(c);
+  send(c,"fixture","{\"attack\":\"system-menu-stale\"}"); settle(); assertEquals(0,systemMenuRequests.get());
+  java.lang.reflect.Field field=FaceclawExternalApps.class.getDeclaredField("connections"); field.setAccessible(true);
+  Object connection=((java.util.Map<?,?>)field.get(manager)).get(c);
+  java.lang.reflect.Field inboxField=connection.getClass().getDeclaredField("inbox"), sessionField=connection.getClass().getDeclaredField("session"); inboxField.setAccessible(true); sessionField.setAccessible(true);
+  android.os.Messenger stolen=(android.os.Messenger)inboxField.get(connection);
+  android.os.Message message=Protocol.message(Protocol.EVENT,(String)sessionField.get(connection),"request-system-menu",new org.json.JSONObject());
+  message.sendingUid=context.getPackageManager().getApplicationInfo(PKG,0).uid;
+  stolen.send(message); settle(); assertEquals(0,systemMenuRequests.get());
+  send(c,"fixture","{\"attack\":\"system-menu-valid\"}"); settle(); assertEquals(1,systemMenuRequests.get()); assertEquals("{}",systemMenuPayload);
+ }
+ public void testOwnContentAndHostRefinementRequireIndependentVisibleGrants() throws Exception {
+  String c=approve("CanvasService"); open(c);
+  send(c,"test-publish-extensions",declarations("notification-content","{}")); settle();
+  send(c,"test-own-notifications","{}"); send(c,"test-host-refinement","{}"); settle(); assertEquals(0,ownRequests.get()); assertEquals(0,refineRequests.get());
+  grantExtension(c,"notification-content",true);
+  send(c,"test-own-notifications","{}"); send(c,"test-host-refinement","{}"); settle(); assertEquals(1,ownRequests.get()); assertEquals(0,refineRequests.get());
+  context.getSharedPreferences("faceclaw-external-apps",0).edit().putBoolean(c+":dictation",true).commit();
+  send(c,"test-host-refinement","{}"); settle(); assertEquals(1,refineRequests.get());
+  send(c,"visibility","{\"visible\":false,\"screenOn\":true}"); send(c,"test-own-notifications","{}"); send(c,"test-host-refinement","{}"); settle(); assertEquals(1,ownRequests.get()); assertEquals(1,refineRequests.get());
+  send(c,"visibility","{\"visible\":true,\"screenOn\":false}"); send(c,"test-own-notifications","{}"); send(c,"test-host-refinement","{}"); settle(); assertEquals(1,ownRequests.get()); assertEquals(1,refineRequests.get());
+  open(c); grantExtension(c,"notification-content",false); context.getSharedPreferences("faceclaw-external-apps",0).edit().putBoolean(c+":dictation",false).commit();
+  send(c,"test-own-notifications","{}"); send(c,"test-host-refinement","{}"); settle(); assertEquals(1,ownRequests.get()); assertEquals(1,refineRequests.get());
  }
  public void testNotificationReplyRequiresGrantsLiveTokenAndSingleUseResult() throws Exception {
   String c=approve("CanvasService");

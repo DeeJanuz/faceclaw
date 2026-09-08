@@ -1,14 +1,53 @@
 package com.faceclaw.sdk;
 
 import android.graphics.*;
+import android.content.Context;
+import org.json.JSONObject;
 import java.util.*;
 /** Optional ordinary Canvas helpers. All coordinates are viewport pixels. */
 public final class Ui {
+ /** Immutable style shared by measurement and drawing in an app process. */
+ public static final class Style {
+  public final Typeface typeface;
+  public final boolean antiAlias,hinted;
+  public final float size;
+  private final int border,selectionBorder,radius;
+  private Style(Typeface face,boolean aa,boolean hint,float size,int border,int selectionBorder,int radius) {
+   this.typeface=face; this.antiAlias=aa; this.hinted=hint; this.size=size;
+   this.border=border; this.selectionBorder=selectionBorder; this.radius=radius;
+  }
+  /** Existing apps use 16px as their body role; relative sizes retain their hierarchy. */
+  public float fontSize(float originalSize) { return originalSize*size/16f; }
+  public float borderWidth(float originalWidth) { return border<0?originalWidth:border; }
+  public float selectionBorderWidth(float originalWidth) { return selectionBorder<0?originalWidth:selectionBorder; }
+  public float cornerRadius(float originalRadius) { return radius<0?originalRadius:radius; }
+  public Paint textPaint(float originalSize,int color) {
+   Paint paint=new Paint(); paint.setColor(color); paint.setTypeface(typeface); paint.setTextSize(fontSize(originalSize));
+   paint.setAntiAlias(antiAlias); paint.setSubpixelText(false); paint.setHinting(hinted?Paint.HINTING_ON:Paint.HINTING_OFF);
+   return paint;
+  }
+ }
+ private static volatile Style shared=defaults();
+ private static Style defaults() { return new Style(Typeface.create("sans-serif",Typeface.NORMAL),true,false,16f,-1,-1,-1); }
+ public static Style style() { return shared; }
+ public static void resetSharedStyle() { shared=defaults(); }
+ /** Called by the verified SDK connection; font names refer only to SDK-bundled assets. */
+ public static void applySharedStyle(Context context,JSONObject supplied) {
+  try {
+   JSONObject data=ExtensionContract.configuration("ui.typography",supplied);
+   Typeface face=Typeface.create("sans-serif",Typeface.NORMAL);
+   if(data.has("font")) face=Typeface.createFromAsset(context.getAssets(),"faceclaw/fonts/"+data.getString("font"));
+   String raster=data.optString("raster","antialiased");
+   shared=new Style(face,raster.equals("antialiased"),raster.equals("hinted"),(float)data.optDouble("size",16),
+    data.optInt("borderWidth",-1),data.optInt("selectionBorderWidth",-1),data.optInt("cardRadius",-1));
+  } catch(Exception unavailable) { resetSharedStyle(); }
+ }
  public static void text(Canvas canvas,String text,float x,float baseline,float size,int color) {
-  Paint p=new Paint(Paint.ANTI_ALIAS_FLAG); p.setColor(color); p.setTextSize(size); p.setTypeface(Typeface.create("sans-serif",Typeface.NORMAL)); canvas.drawText(text,x,baseline,p);
+  canvas.drawText(text,x,baseline,shared.textPaint(size,color));
  }
  public static void card(Canvas canvas,float left,float top,float right,float bottom,float radius,int color) {
-  Paint p=new Paint(Paint.ANTI_ALIAS_FLAG); p.setColor(color); canvas.drawRoundRect(left,top,right,bottom,radius,radius,p);
+  Style style=shared; Paint p=new Paint(); p.setAntiAlias(style.antiAlias); p.setColor(color);
+  float effectiveRadius=style.cornerRadius(radius); canvas.drawRoundRect(left,top,right,bottom,effectiveRadius,effectiveRadius,p);
  }
  public static List<String> wrap(String text,Paint paint,float width) {
   if(width<=0) throw new IllegalArgumentException("Invalid wrap width");

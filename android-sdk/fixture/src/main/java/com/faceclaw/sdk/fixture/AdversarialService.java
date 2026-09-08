@@ -17,6 +17,7 @@ public class AdversarialService extends Service {
     if(type.equals("fixture")) {
      String attack=data.getString("attack");
      if(attack.equals("notification")) { host.send(Protocol.message(Protocol.EVENT,session,"notification",Protocol.object("id","x","target","synthetic","title","Synthetic","text","Synthetic"))); }
+     else if(attack.startsWith("system-menu")) { host.send(Protocol.message(Protocol.EVENT,attack.equals("system-menu-stale")?"wrong-session":session,"request-system-menu",Protocol.object("windowId","foreign-window","action","close"))); }
      else if(attack.equals("consent-broadcast")) {
       android.app.PendingIntent pi=android.app.PendingIntent.getBroadcast(this,0,new Intent("com.faceclaw.fixture.NO_ACTION").setPackage(getPackageName()),android.app.PendingIntent.FLAG_IMMUTABLE);
       Message consent=Protocol.message(Protocol.CONSENT,session,"consent",null); consent.getData().putParcelable("consent",pi); host.send(consent);

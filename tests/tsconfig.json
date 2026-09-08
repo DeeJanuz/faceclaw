@@ -29,6 +29,7 @@
     "../app/apps/evenhub/containers.ts",
     "../app/apps/timer/timer-model.ts",
     "../app/apps/teleprompter/script-tracker.ts",
-    "../app/native/external-notifications.ts"
+    "../app/native/external-notifications.ts",
+    "../app/apps/external/extension-policy.ts"
   ]
 }

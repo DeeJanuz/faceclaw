@@ -21,9 +21,15 @@ public final class FaceclawExternalApps {
  private final Map<String,Connection> connections=new java.util.concurrent.ConcurrentHashMap<>();
  private FaceclawExternalAppListener listener;
  private final SharedPreferences prefs;
+ private final FaceclawExtensions extensions;
+ private JSONObject sharedStyle=new JSONObject();
  private static final String[] APPROVAL_CAPABILITIES={"notifications","dictation","previews","suppress"};
  private FaceclawExternalApps(Context c) {
   context=c; prefs=ApprovalStore.open(c,"faceclaw-external-apps");
+  extensions=new FaceclawExtensions(prefs,new FaceclawExtensions.Owners() {
+   public Map<String,String> approved() { Map<String,String> owners=new TreeMap<>(); for(ResolveInfo r:discover()) if(FaceclawExternalApps.this.approved(r.serviceInfo)) owners.put(key(r.serviceInfo),prefs.getString(key(r.serviceInfo)+":pin","")); return owners; }
+   public boolean connected(String component) { Connection current=connections.get(component); return current!=null&&current.ready; }
+  });
   IntentFilter filter=new IntentFilter(); filter.addAction(Intent.ACTION_PACKAGE_ADDED); filter.addAction(Intent.ACTION_PACKAGE_REMOVED); filter.addAction(Intent.ACTION_PACKAGE_REPLACED); filter.addDataScheme("package");
   c.registerReceiver(new BroadcastReceiver() { public void onReceive(Context ignored,Intent intent) {
    if(Intent.ACTION_PACKAGE_REMOVED.equals(intent.getAction()) && !intent.getBooleanExtra(Intent.EXTRA_REPLACING,false) && intent.getData()!=null) {
@@ -36,9 +42,9 @@ public final class FaceclawExternalApps {
  public void setListener(FaceclawExternalAppListener value) { listener=value; refresh(); }
  private List<ResolveInfo> discover() { return context.getPackageManager().queryIntentServices(new Intent(Protocol.ACTION),PackageManager.GET_META_DATA); }
  private String key(ServiceInfo s) { return new ComponentName(s.packageName,s.name).flattenToString(); }
- private boolean validService(ServiceInfo s) { return s.exported && s.enabled && s.applicationInfo.enabled && s.metaData!=null && s.metaData.getInt("com.faceclaw.PROTOCOL_MAJOR",0)==Protocol.VERSION; }
+ private boolean validService(ServiceInfo s) { return key(s).length()<=512 && s.exported && s.enabled && s.applicationInfo.enabled && s.metaData!=null && s.metaData.getInt("com.faceclaw.PROTOCOL_MAJOR",0)==Protocol.VERSION; }
  private boolean approved(ServiceInfo s) {
-  try { return validService(s) && PackageIdentity.forPackage(context,s.packageName).equals(prefs.getString(key(s)+":pin","")); } catch(Exception e) { return false; }
+  try { return validService(s) && PackageIdentity.forPackage(context,s.packageName).equals(prefs.getString(key(s)+":pin","")) && PackageIdentity.forUid(context,s.applicationInfo.uid).equals(prefs.getString(key(s)+":pin","")); } catch(Exception e) { return false; }
  }
  public String installedJson() {
   JSONArray result=new JSONArray();
@@ -52,7 +58,7 @@ public final class FaceclawExternalApps {
   Set<String> present=new HashSet<>();
   for(ResolveInfo r:discover()) if(approved(r.serviceInfo)) { String k=key(r.serviceInfo); present.add(k); if(!connections.containsKey(k)&&connections.size()<8) bind(r.serviceInfo); }
   for(String k:new ArrayList<>(connections.keySet())) if(!present.contains(k)) disconnect(k,false);
-  emit("","changed",new JSONObject());
+  emit("","changed",new JSONObject()); extensionsChanged();
  }
  private void bind(ServiceInfo s) {
   Connection c=new Connection(s); connections.put(c.component,c);
@@ -86,20 +92,21 @@ public final class FaceclawExternalApps {
   } catch(Exception e) { disconnect(component,true); }
  }
  private void publishCapabilities(String component) {
-  send(component,"capabilities",Protocol.object("notifications",allows(component,"notifications"),"dictation",allows(component,"dictation"),"previews",allows(component,"previews"),"maxWidth",Protocol.MAX_WIDTH,"maxHeight",Protocol.MAX_HEIGHT,"maxText",8000,"maxNotificationText",4096,"notificationReplies",true,"searchDictation",true).toString());
+  send(component,"capabilities",Protocol.object("notifications",allows(component,"notifications"),"dictation",allows(component,"dictation"),"previews",allows(component,"previews"),"maxWidth",Protocol.MAX_WIDTH,"maxHeight",Protocol.MAX_HEIGHT,"maxText",8000,"maxNotificationText",4096,"notificationReplies",true,"searchDictation",true,"extensions",ExtensionContract.VERSION,"windowMenus",true).toString());
  }
  private void disconnect(String component,boolean retry) {
   Connection c=connections.remove(component); if(c==null) return;
   c.ready=false; c.generation++;
   try { if(c.remote!=null) c.remote.send(Protocol.message(Protocol.EVENT,c.session,"revoke",null)); } catch(Exception ignored) {}
   try { context.unbindService(c); } catch(Exception ignored) {}
-  emit(component,"disconnected",new JSONObject());
+  emit(component,"disconnected",new JSONObject()); extensionsChanged();
   if(retry && approved(c.service)) main.postDelayed(()->{ if(!connections.containsKey(component)&&approved(c.service)) bind(c.service); },5000);
  }
  private final class Connection implements ServiceConnection {
   final ServiceInfo service; final String component,session=UUID.randomUUID().toString(); final Messenger inbox;
   java.lang.ref.WeakReference<Activity> selectionActivity; long selectionUntil;
-  Messenger remote; PendingIntent consent; boolean ready,open,visible,screenOn=true; int width,height; long generation,sequence,lastFrame,rateStart; int rate;
+  final Map<String,Surface> surfaces=new HashMap<>(); final Map<String,String> extensionRequests=new HashMap<>(); final Set<String> actionIds=new HashSet<>();
+  Messenger remote; PendingIntent consent; boolean ready,open,visible,screenOn=true; int width,height; long generation,sequence,lastFrame,rateStart,lastOpenRequest; int rate;
   Connection(ServiceInfo service) { this.service=service; component=key(service); inbox=new Messenger(new Handler(Looper.getMainLooper(),m->{ receive(m); return true; })); }
   public void onServiceConnected(ComponentName name,IBinder binder) {
    if(connections.get(component)!=this || !approved(service)) return;
@@ -124,9 +131,10 @@ public final class FaceclawExternalApps {
     }
     if(m.what==Protocol.READY) {
      if(Protocol.json(b).optInt("version")!=Protocol.VERSION) return;
-     ready=true; consent=null; selectionActivity=null; publishCapabilities(component); emit(component,"connected",new JSONObject()); return;
+     ready=true; consent=null; selectionActivity=null; publishCapabilities(component); send(component,"shared-style",sharedStyle.toString()); emit(component,"connected",new JSONObject()); extensionsChanged(); return;
     }
     if(!ready) return;
+    if(m.what==Protocol.EXTENSION_FRAME) { receiveExtensionFrame(this,m,now); return; }
     if(m.what==Protocol.FRAME) {
      long seq=b.getLong("sequence");
      try {
@@ -149,13 +157,26 @@ public final class FaceclawExternalApps {
     }
     if(m.what!=Protocol.EVENT) return;
     String type=b.getString("type",""); JSONObject data=Protocol.json(b);
-    if(type.equals("host-switched")) {
-     prefs.edit().remove(component+":pin").remove(component+":notifications").remove(component+":dictation").remove(component+":previews").remove(component+":suppress").apply();
-     disconnect(component,false); return;
-    }
+    if(type.equals("host-switched")) { revokeApproval(component); return; }
     if(type.equals("disconnected")) { disconnect(component,false); return; }
+    if(type.equals("publish-extensions")) {
+     long before=extensions.generation(); if(extensions.publish(component,data.getJSONArray("declarations"))&&before!=extensions.generation()) extensionsChanged(); return;
+    }
+    if(type.equals("extension-result")||type.equals("extension-progress")||type.equals("extension-action")) { receiveExtensionControl(this,type,data); return; }
+    if(type.equals("window-menu-state")) { if(open&&data.opt("available") instanceof Boolean) emit(component,type,Protocol.object("available",data.getBoolean("available"))); return; }
+    if(type.equals("window-protection")) { if(open&&data.opt("protected") instanceof Boolean) emit(component,type,Protocol.object("protected",data.getBoolean("protected"))); return; }
+    if(type.equals("own-notifications")||type.equals("own-notification-action")) {
+     if(isExtensionGranted(component,"notification-content")&&open&&visible&&screenOn) emit(component,type,data); return;
+    }
+    if(type.equals("request-open-window")) {
+     Object target=data.opt("target"); if(!(target instanceof String)||((String)target).length()>512||now-lastOpenRequest<2000) return;
+     lastOpenRequest=now; emit(component,type,Protocol.object("target",target)); return;
+    }
+    if(type.equals("sleep")) { if(open&&visible&&screenOn) emit(component,type,new JSONObject()); return; }
+    if(type.equals("request-system-menu")) { if(open&&visible&&screenOn) emit(component,type,new JSONObject()); return; }
     if(type.equals("notification")||type.equals("remove-notification")||type.equals("notification-reply-result")) { if(!allows(component,"notifications")) return; }
-    else if(type.equals("dictation")||type.equals("cancel-dictation")||type.equals("search-dictation")||type.equals("cancel-search-dictation")) { if(!allows(component,"dictation")||!open||!visible||!screenOn) {
+    else if(type.equals("dictation")||type.equals("cancel-dictation")||type.equals("search-dictation")||type.equals("cancel-search-dictation")||type.equals("capture-dictation")||type.equals("finish-capture-dictation")||type.equals("cancel-capture-dictation")||type.equals("host-refinement")||type.equals("cancel-host-refinement")) { if(!allows(component,"dictation")||!open||!visible||!screenOn) {
+      if(type.equals("host-refinement")||type.equals("capture-dictation")) remote.send(Protocol.message(Protocol.EVENT,session,type.equals("host-refinement")?"host-refinement-rejected":"capture-dictation-closed",Protocol.object("requestId",data.optString("requestId","").substring(0,Math.min(128,data.optString("requestId","").length())),"reason","Permission or visible window required")));
       if(type.equals("dictation")||type.equals("search-dictation")) remote.send(Protocol.message(Protocol.EVENT,session,type.equals("search-dictation")?"search-dictation-rejected":"dictation-rejected",Protocol.object("requestId",data.optString("requestId","").substring(0,Math.min(128,data.optString("requestId","").length())),"reason","Dictation permission or visible window required")));
       return;
      } }
@@ -244,6 +265,7 @@ public final class FaceclawExternalApps {
    if(!validService(current) || !PackageIdentity.forPackage(context,current.packageName).equals(pin)) return false;
    String component=key(current);
    SharedPreferences.Editor edit=prefs.edit().putString(component+":pin",pin);
+   if(!pin.equals(prefs.getString(component+":pin",""))) for(String saved:prefs.getAll().keySet()) if(saved.startsWith(component+":extension")) edit.remove(saved);
    for(int i=0;i<choices.length;i++) edit.putBoolean(component+":"+APPROVAL_CAPABILITIES[i],choices[i]);
    return edit.commit();
   } catch(Exception ignored) { return false; }
@@ -251,6 +273,7 @@ public final class FaceclawExternalApps {
  private void revokeApproval(String component) {
   SharedPreferences.Editor edit=prefs.edit().remove(component+":pin");
   for(String capability:APPROVAL_CAPABILITIES) edit.remove(component+":"+capability);
+  for(String key:prefs.getAll().keySet()) if(key.startsWith(component+":extension")) edit.remove(key);
   edit.apply(); disconnect(component,false); emit(component,"changed",new JSONObject());
  }
  private void showApp(Activity a,ResolveInfo resolved) {
@@ -262,7 +285,7 @@ public final class FaceclawExternalApps {
     boolean[] choices=approvalChoices(k);
     int padding=(int)(20*a.getResources().getDisplayMetrics().density);
     LinearLayout content=new LinearLayout(a); content.setOrientation(LinearLayout.VERTICAL); content.setPadding(padding,padding,padding,0);
-    TextView explanation=new TextView(a); explanation.setText("Allow this independently installed app to show a glasses window and receive input? Checked permissions will be enabled when you approve. You can uncheck any permission now or change it later."); content.addView(explanation);
+    TextView explanation=new TextView(a); explanation.setText("Allow this independently installed app to show a glasses window, receive input, and read the battery/weather displayed by the host? Checked permissions will be enabled when you approve. You can uncheck any permission now or change it later."); content.addView(explanation);
     String source=s.metaData.getString("com.faceclaw.SUPPRESS_PACKAGE","");
     String[] labels={"Notifications on glasses","Dictation and review","Message text previews","Suppress declared source on glasses"};
     for(int i=0;i<choices.length;i++) {
@@ -285,7 +308,7 @@ public final class FaceclawExternalApps {
   options.add("Notifications: "+prefs.getBoolean(k+":notifications",false)); options.add("Dictation/review: "+prefs.getBoolean(k+":dictation",false));
   options.add("Message text previews: "+prefs.getBoolean(k+":previews",true));
   options.add("Suppress declared source on glasses: "+prefs.getBoolean(k+":suppress",false));
-  options.add("Configure bridge connection"); options.add("Revoke app approval");
+  options.add("Configure bridge connection"); options.add("Global customizations and providers"); options.add("Revoke app approval");
   new AlertDialog.Builder(a).setTitle(resolved.loadLabel(context.getPackageManager())).setItems(options.toArray(new String[0]),(d,index)->{
    if(index==0) requestHostSelection(a,k);
    else if(index>=1&&index<=4) {
@@ -295,8 +318,149 @@ public final class FaceclawExternalApps {
     boolean enabled=prefs.getBoolean(k+":"+flag,flag.equals("previews"));
     Runnable change=()->{ prefs.edit().putBoolean(k+":"+flag,!enabled).apply(); emit(k,"grants-changed",new JSONObject()); publishCapabilities(k); };
     if(!enabled) new AlertDialog.Builder(a).setMessage(index==4?"Suppress only "+source+" notifications on glasses while this app is connected? Phone notifications stay unchanged.":"Enable "+options.get(index).split(":")[0]+" for this app?").setNegativeButton("Cancel",null).setPositiveButton("Enable",(dialog,which)->change.run()).show(); else change.run();
-   } else if(index==5) configure(a,k,s); else revokeApproval(k);
+   } else if(index==5) configure(a,k,s); else if(index==6) showExtensions(a,k); else revokeApproval(k);
   }).setNegativeButton("Close",null).show();
+ }
+ public boolean publishSharedStyle(String json) {
+  if(json==null||json.length()>ExtensionContract.MAX_CONFIG) return false;
+  try {
+   JSONObject style=ExtensionContract.configuration("ui.typography",new JSONObject(json));
+   if(style.toString().equals(sharedStyle.toString())) return true; sharedStyle=style;
+   for(Connection c:connections.values()) if(c.ready) send(c.component,"shared-style",sharedStyle.toString()); return true;
+  } catch(Exception ignored) { return false; }
+ }
+ public String extensionsJson() { return extensions.snapshot().toString(); }
+ private void extensionsChanged() {
+  extensions.changed();
+  for(Connection c:connections.values()) { c.extensionRequests.clear(); c.surfaces.clear(); }
+  String snapshot=extensionsJson();
+  FaceclawSettings.getInstance(context).setString("apps.extensions.effective",snapshot);
+  for(Connection c:connections.values()) if(c.ready) send(c.component,"extensions",snapshot);
+  emit("","extensions-changed",extensions.snapshot());
+ }
+ /** Local host API. This is never exposed as an external IPC setter. */
+ public boolean isExtensionGranted(String component,String feature) { return extensions.granted(component,feature)&&isConnected(component); }
+ public boolean sendAppProvider(String component,String feature,String type,String json) {
+  if(!feature.equals("transcription")||!isExtensionGranted(component,feature)||!Arrays.asList("request","event","cancel").contains(type)) return false;
+  return sendExtensionInternal(component,feature,type,json,true);
+ }
+ public boolean sendExtension(String component,String feature,String type,String json) { return sendExtensionInternal(component,feature,type,json,false); }
+ private boolean sendExtensionInternal(String component,String feature,String type,String json,boolean ownProvider) {
+  if(!isConnected(component)||(!ownProvider&&!extensions.controls(component,feature))||json==null||json.length()>Protocol.MAX_JSON/2||!Arrays.asList("request","event","cancel","input").contains(type)) return false;
+  Connection c=connections.get(component); if(c==null) return false;
+  try {
+   JSONObject data=new JSONObject(json); long generation=extensions.generation();
+   if(type.equals("request")) {
+    String id=data.getString("requestId"); if(!ExtensionContract.token(id)||c.extensionRequests.size()>=32||c.extensionRequests.containsKey(id)) return false;
+    c.extensionRequests.put(id,feature);
+    main.postDelayed(()->{
+     if(connections.get(component)==c&&generation==extensions.generation()&&feature.equals(c.extensionRequests.remove(id)))
+      emit(component,"extension-event",Protocol.object("feature",feature,"generation",generation,"type","timeout","requestId",id));
+    },feature.equals("assistant")?600000:feature.equals("transcription")?390000:feature.equals("refinement")?120000:20000);
+   }
+   if(type.equals("cancel")) c.extensionRequests.remove(data.optString("requestId"));
+   Message outgoing=Protocol.message(Protocol.EVENT,c.session,"extension-event",Protocol.object("feature",feature,"generation",generation,"type",type,"data",data));
+   try { c.remote.send(outgoing); }
+   catch(Exception uncertain) {
+    String id=data.optString("requestId");
+    if(feature.equals(c.extensionRequests.remove(id))) emit(component,"extension-event",Protocol.object("feature",feature,"generation",generation,"type","timeout","requestId",id));
+    // IPC was attempted. A transport exception cannot safely authorize backend fallback/retry.
+   }
+   return true;
+  } catch(Exception ignored) { return false; }
+ }
+ private void receiveExtensionControl(Connection c,String type,JSONObject data) throws Exception {
+  String feature=data.getString("feature"); long generation=data.getLong("generation");
+  boolean pending=feature.equals(c.extensionRequests.get(data.optString("requestId")));
+  if(generation!=extensions.generation()||(!extensions.controls(c.component,feature)&&!(pending&&feature.equals("transcription")&&isExtensionGranted(c.component,feature)))) return;
+  JSONObject payload=data.getJSONObject("data"); if(payload.toString().length()>Protocol.MAX_JSON/2) return;
+  if(type.equals("extension-result")||type.equals("extension-progress")) {
+   String id=data.getString("requestId"); if(!feature.equals(c.extensionRequests.get(id))) return;
+   if(type.equals("extension-result")) c.extensionRequests.remove(id);
+   emit(c.component,"extension-event",Protocol.object("feature",feature,"generation",generation,"type",type.equals("extension-result")?"result":"progress","requestId",id,"data",payload));
+  } else {
+   String action=data.getString("action"), id=data.getString("actionId");
+   if(!ExtensionContract.action(feature,action)||!ExtensionContract.token(id)||c.actionIds.contains(id)) return;
+   // Fail closed after the session's bounded action ledger fills; never forget a consumed authority.
+   if(c.actionIds.size()>=4096) return; c.actionIds.add(id);
+   emit(c.component,"extension-event",Protocol.object("feature",feature,"generation",generation,"type","action","action",action,"actionId",id,"data",payload));
+  }
+ }
+ private static final class Surface {
+  int width,height; long generation,sequence,lastFrame; boolean visible,screenOn;
+  Surface(int width,int height,long generation) { this.width=width; this.height=height; this.generation=generation; }
+ }
+ private long nextSurfaceGeneration=1;
+ /** Only the host's real mirror hit-test dispatches bounded pointer input to a current visible surface. */
+ public boolean sendExtensionPointer(String component,String feature,int x,int y,int width,int height) {
+  if(!ExtensionContract.surface(feature)||!isConnected(component)||!extensions.controls(component,feature)) return false;
+  Connection c=connections.get(component); Surface surface=c==null?null:c.surfaces.get(feature);
+  if(surface==null||!surface.visible||!surface.screenOn||surface.width!=width||surface.height!=height||x<0||y<0||x>=width||y>=height) return false;
+  return sendExtensionInternal(component,feature,"input",Protocol.object("event","input","input",Protocol.object("type","pointer-click","x",x,"y",y)).toString(),false);
+ }
+ public boolean openExtensionSurface(String component,String feature,int width,int height) {
+  if(!ExtensionContract.surface(feature)||!isConnected(component)||!extensions.controls(component,feature)) return false;
+  try {
+   Protocol.frameSize(width,height); Connection c=connections.get(component); Surface surface=new Surface(width,height,++nextSurfaceGeneration); c.surfaces.put(feature,surface);
+   c.remote.send(Protocol.message(Protocol.EVENT,c.session,"extension-surface",Protocol.object("feature",feature,"type","open","width",width,"height",height,"generation",surface.generation,"extensionGeneration",extensions.generation(),"visible",false,"screenOn",false))); return true;
+  } catch(Exception ignored) { return false; }
+ }
+ public void setExtensionSurfaceVisibility(String component,String feature,boolean visible,boolean screenOn) {
+  Connection c=connections.get(component); if(c==null||!extensions.controls(component,feature)) return;
+  Surface surface=c.surfaces.get(feature); if(surface==null) return; surface.visible=visible; surface.screenOn=screenOn;
+  send(component,"extension-surface",Protocol.object("feature",feature,"type","visibility","generation",surface.generation,"visible",visible,"screenOn",screenOn).toString());
+ }
+ public void closeExtensionSurface(String component,String feature) {
+  Connection c=connections.get(component); if(c==null) return; Surface surface=c.surfaces.remove(feature); if(surface==null) return;
+  send(component,"extension-surface",Protocol.object("feature",feature,"type","close","generation",surface.generation).toString());
+ }
+ private void receiveExtensionFrame(Connection c,Message message,long now) throws Exception {
+  Bundle b=message.getData(); String feature=b.getString("feature",""); long sequence=b.getLong("sequence");
+  try {
+   Surface surface=c.surfaces.get(feature);
+   if(surface==null||!extensions.controls(c.component,feature)||!surface.visible||!surface.screenOn||surface.generation!=b.getLong("generation")||sequence<=surface.sequence) return;
+   int width=b.getInt("width"),height=b.getInt("height"),size=Protocol.frameSize(width,height);
+   if(width!=surface.width||height!=surface.height) return;
+   surface.sequence=sequence; if(now-surface.lastFrame<16) return; surface.lastFrame=now; byte[] copy;
+   if(Build.VERSION.SDK_INT>=27&&b.containsKey("memory")) {
+    SharedMemory memory=b.getParcelable("memory"); if(memory==null||memory.getSize()!=size) return;
+    ByteBuffer mapping=memory.mapReadOnly(); try { copy=new byte[size]; mapping.get(copy); } finally { SharedMemory.unmap(mapping); }
+   } else { byte[] supplied=b.getByteArray("pixels"); if(supplied==null||supplied.length!=size) return; copy=supplied.clone(); }
+   if(listener!=null) listener.onExtensionFrame(c.component,feature,surface.generation,width,height,ByteBuffer.wrap(copy));
+  } finally {
+   if(Build.VERSION.SDK_INT>=27&&b.containsKey("memory")) { SharedMemory memory=b.getParcelable("memory"); if(memory!=null) memory.close(); }
+   Message ack=Protocol.message(Protocol.EXTENSION_ACK,c.session,"ack",null); ack.getData().putString("feature",feature); ack.getData().putLong("generation",b.getLong("generation")); ack.getData().putLong("sequence",sequence); c.remote.send(ack);
+  }
+ }
+ private String extensionLabel(String feature) {
+  switch(feature) {
+   case "notification-content": return "Own inbox (reads other apps’ notification content; open and dismiss with user input)";
+   case "ui.notifications": return "Notification presentation (reads other apps' notification content)";
+   case "device-tools": return "Device tools (read and act through approved host tools)";
+   case "assistant": return "Assistant (receives assistant prompts)";
+   case "transcription": return "Transcription (receives microphone audio)";
+   case "refinement": return "Refinement (receives dictated drafts)";
+   default: return feature;
+  }
+ }
+ private void showExtensions(Activity activity,String component) {
+  ArrayList<String> features=new ArrayList<>(),labels=new ArrayList<>();
+  for(String feature:ExtensionContract.FEATURES) if(extensions.declaration(component,feature)!=null) { features.add(feature); labels.add(extensionLabel(feature)+": "+(extensions.granted(component,feature)?"allowed":"not allowed")); }
+  if(features.isEmpty()) { new AlertDialog.Builder(activity).setMessage("This app has not published customization features. Open its settings and connect it first.").setPositiveButton("OK",null).show(); return; }
+  new AlertDialog.Builder(activity).setTitle("Global customizations").setItems(labels.toArray(new String[0]),(d,index)->{
+   String feature=features.get(index); boolean granted=extensions.granted(component,feature);
+   new AlertDialog.Builder(activity).setTitle(extensionLabel(feature)).setItems(new String[]{granted?"Revoke permission":"Grant permission","Set feature priority"},(dialog,choice)->{
+    if(choice==1) { showExtensionOrder(activity,feature); return; }
+    if(granted) { extensions.grant(component,feature,false); extensionsChanged(); return; }
+    AlertDialog consent=new AlertDialog.Builder(activity).setTitle("Allow global feature?").setMessage(extensionLabel(feature)+" can affect Faceclaw outside this app. Android system settings are not granted. You can revoke this permission here.").setNegativeButton("Cancel",null).setPositiveButton("Allow",(ignored,which)->{ if(extensions.grant(component,feature,true)) extensionsChanged(); }).create();
+    consent.show(); consent.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE); consent.getButton(AlertDialog.BUTTON_POSITIVE).setFilterTouchesWhenObscured(true);
+   }).setNegativeButton("Close",null).show();
+  }).setNegativeButton("Close",null).show();
+ }
+ private void showExtensionOrder(Activity activity,String feature) {
+  List<String> components=extensions.orderedComponents(feature); String[] labels=new String[components.size()];
+  for(int i=0;i<labels.length;i++) { ComponentName name=ComponentName.unflattenFromString(components.get(i)); String label=name==null?components.get(i):name.getPackageName(); try { label=context.getPackageManager().getApplicationLabel(context.getPackageManager().getApplicationInfo(name.getPackageName(),0)).toString(); } catch(Exception ignored) {} labels[i]=(i+1)+". "+label; }
+  new AlertDialog.Builder(activity).setTitle("Priority: tap to move first").setItems(labels,(d,index)->{ if(extensions.prioritize(feature,components.get(index))) extensionsChanged(); showExtensionOrder(activity,feature); }).setNegativeButton("Done",null).show();
  }
  private void configure(Activity a,String k,ServiceInfo service) {
   if(!isConnected(k)||!"bridge".equals(service.metaData.getString("com.faceclaw.CONFIGURATION",""))) return;

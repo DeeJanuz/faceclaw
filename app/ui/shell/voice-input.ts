@@ -1,3 +1,4 @@
+import { extensionPlatform } from "../../apps/external/extension-platform";
 import { type GrayImage } from "../../graphics/image";
 import { voiceControlBridge, type VoiceTranscriptEvent } from "../../native/voice-control";
 import { refineDictation, type AnthropicStreamHandle } from "../../native/anthropic";
@@ -189,7 +190,7 @@ export class VoiceInputLayer implements Layer {
   private menuRows(): Array<{ label: string; dim: boolean; onSelect: () => void }> {
     const text = this.displayText().trim();
     const hasText = text.length > 0;
-    const hasLlmKey = anthropicApiKeySetting.get().trim().length > 0;
+    const hasLlmKey = !!extensionPlatform()?.feature("refinement") || anthropicApiKeySetting.get().trim().length > 0;
     const rows: Array<{ label: string; dim: boolean; onSelect: () => void }> = [];
     for (const target of this.sendTargets) {
       rows.push({

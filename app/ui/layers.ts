@@ -287,7 +287,7 @@ export class LayerStack {
     if (!belowRequested) {
       return [ownPlane];
     }
-    const dim = layer.dimUnderneath || 1;
+    const dim = typeof layer.dimUnderneath === "number" ? layer.dimUnderneath : 1;
     const below = this.paintLayer(layer.paintOverBase ? 0 : index - 1, dimSoFar * dim);
     return [...(dim < 1 ? dimPlanes(below, dim) : below), ownPlane];
   }

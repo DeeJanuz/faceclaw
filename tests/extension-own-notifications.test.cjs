@@ -1,12 +1,12 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),ts=require('typescript');
 const {NotificationLeases}=require('../.test-build/app/apps/external/extension-policy.js');
 function harness(registry = {}) {
- let allowed=true,locked=false,screenOn=true,seq=0;
+ let allowed=true,locked=false,screenOn=true,foreground='apk:owner',seq=0;
  const module={exports:{}},sent=[],dismissed=[],opened=[];
  let sources=[{key:'native-secret',postTime:5,packageName:'app.native',appName:'Native',title:'Native note',actions:[]},{key:'apk:secret',postTime:6,component:'private/component',target:'private-target',replyToken:'SECRET',packageName:'app.external',appName:'External',title:'External note',actions:[{index:0,title:'Open',enabled:true}]}];
  const imports={
  '../../assistant/tool-registry':registry,
- '../../ui/shell/shell':{shell:{isScreenOn:()=>screenOn,getWindows:()=>[],openNotificationModal:key=>opened.push(key),getBatteryLevels:()=>({})}},
+ '../../ui/shell/shell':{shell:{isScreenOn:()=>screenOn,foregroundWindow:()=>({windowId:foreground}),getWindows:()=>[],openNotificationModal:key=>opened.push(key),getBatteryLevels:()=>({})}},
  '../../native/notification-icons':{readActiveNotifications:()=>sources,dismissNotification:(key)=>{dismissed.push(key);return key!=='apk:secret';}},
  '../../native/external-notifications':{invokeExternalNotification:key=>{opened.push(key);return true;}},
  '../../native/notification-apps':{readNotificationApps:()=>[{packageName:'app.native',name:'Native'}]},
@@ -15,7 +15,7 @@ function harness(registry = {}) {
  vm.runInNewContext(ts.transpileModule(fs.readFileSync('app/apps/external/extension-platform.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText,{module,exports:module.exports,require:name=>imports[name]||{},java:{util:{UUID:{randomUUID:()=>({toString:()=>`id-${++seq}`})}}}});
  const platform=Object.create(module.exports.ExtensionPlatform.prototype);
  Object.assign(platform,{generation:3,ownNotifications:new Map(),conversationIds:new Map(),notificationRevision:0,notificationAppsAt:0,notificationApps:[],isLocked:()=>locked,native:{isExtensionGranted:()=>allowed,send:(owner,type,json)=>sent.push({owner,type,data:JSON.parse(json)})}});
- return {platform,sent,dismissed,opened,allowed:v=>allowed=v,locked:v=>locked=v,screen:v=>screenOn=v,sources:v=>sources=v,snapshot:()=>JSON.parse(sent.map(x=>x.data.json).join(''))};
+ return {platform,sent,dismissed,opened,allowed:v=>allowed=v,locked:v=>locked=v,screen:v=>screenOn=v,foreground:v=>foreground=v,sources:v=>sources=v,snapshot:()=>JSON.parse(sent.map(x=>x.data.json).join(''))};
 }
 test('own inbox needs explicit content grant and sanitizes foreign capabilities',()=>{
  for(const deny of [h=>h.allowed(false),h=>h.locked(true),h=>h.screen(false)]) {const h=harness();deny(h);h.platform.publishOwnNotifications('owner');assert.equal(h.sent.length,0);}
@@ -60,4 +60,13 @@ test('explicit device-tool grant preserves ordinary proactive and current availa
  assert.equal((await h.platform.tool('owner',3,'apps.launch',{})).ok,true);assert.equal(calls,1);
  controls=false;assert.equal((await h.platform.tool('owner',3,'apps.launch',{})).ok,false);controls=true;available=false;assert.equal((await h.platform.tool('owner',3,'apps.launch',{})).ok,false);
  assert.equal((await registry.toolRegistry.callTool('apps.launch',{}, {proactive:true})).ok,false);assert.equal(calls,1);
+});
+
+test('only host input delivered to the foreground notification owner authorizes its reader actions',()=>{
+ const h=harness();h.platform.controls=(owner,feature)=>owner==='owner'&&feature==='ui.notifications';h.platform.lastGesture=new Map();
+ for(const deny of [()=>h.foreground('apk:other'),()=>h.locked(true),()=>h.screen(false)]) {
+  deny();h.platform.windowInput('owner',{type:'click'});assert.equal(h.platform.lastGesture.size,0);h.foreground('apk:owner');h.locked(false);h.screen(true);
+ }
+ h.platform.windowInput('other',{type:'click'});h.platform.windowInput('owner',{type:'scroll-down'});assert.equal(h.platform.lastGesture.size,0);
+ h.platform.windowInput('owner',{type:'click'});assert.ok(h.platform.lastGesture.get('ui.notifications')>0);
 });

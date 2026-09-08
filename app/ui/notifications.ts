@@ -229,7 +229,7 @@ export class SingleNotificationLayer implements Layer {
         const visible = () => !this.removed && shell.isScreenOn() && shell.foregroundWindow()?.windowId === foreground &&
           readActiveNotifications(MAX_NOTIFICATIONS, true).some(current => current.key === notification.key && current.postTime === notification.postTime);
         const current = () => visible() && reply.isCurrent();
-        shell.openReviewedVoiceInput({ id: "reply", label: "Send reply", onSend: text => {
+        shell.openReviewedVoiceInput({ id: "reply", label: "Send reply", captureTitle: "Reply", capturePrompt: "Speak your reply...", onSend: text => {
           this.actionError = current() && reply.send(text, status => {
             if (!visible()) return;
             this.actionError = { sent: "Reply sent.", "draft-saved": "Draft saved in app. Open app to send.", unknown: "Send outcome unknown. Check app.", rejected: "Reply rejected or changed." }[status];

@@ -16,6 +16,7 @@ export type EffectiveExtension = {
   live: boolean;
   available: boolean;
   generation: number;
+  contenders?: { component: string; enabled: boolean; granted: boolean; connected: boolean }[];
 };
 type ExtensionSnapshot = { version: number; generation: number; features: EffectiveExtension[] };
 let lastRaw: string | undefined;
@@ -35,6 +36,8 @@ function currentSnapshot(): ExtensionSnapshot {
   }
   return snapshot;
 }
+
+export function extensionBehaviors(): EffectiveExtension[] { return currentSnapshot().features.filter(entry => entry.contenders?.length); }
 
 export function effectiveExtension(feature: ExtensionFeatureId): EffectiveExtension | undefined {
   return currentSnapshot().features.find(entry => entry.feature === feature && entry.available && entry.component);

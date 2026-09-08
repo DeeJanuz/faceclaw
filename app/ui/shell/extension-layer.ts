@@ -9,6 +9,7 @@ export class ExtensionLayer implements Layer {
   get dimUnderneath(): false | number { return this.opaque ? 0 : false; }
   opaque: boolean;
   private frame: GrayImage | undefined;
+  get readyForDisplay(): boolean { return this.frame !== undefined; }
   constructor(
     private readonly input: (event: InputEvent) => void,
     private readonly resized: (width: number, height: number) => void,

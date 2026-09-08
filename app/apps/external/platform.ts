@@ -16,6 +16,11 @@ export const externalAppId = (component: string): string => `apk:${component}`;
 function manager(): any { return global.isAndroid ? com.faceclaw.app.FaceclawExternalApps.get(Utils.android.getApplicationContext()) : null; }
 export function installedExternalApps(): InstalledApk[] { try { return JSON.parse(String(manager()?.installedJson() ?? "[]")); } catch { return []; } }
 export function showExternalAppSettings(): void { manager()?.showManager(Application.android.foregroundActivity ?? Application.android.startActivity); }
+export type InstalledAndroidApp = { packageName: string; name: string };
+export function installedAndroidApps(): InstalledAndroidApp[] { try { return JSON.parse(String(manager()?.androidAppsJson() ?? "[]")); } catch { return []; } }
+export function openAndroidAppSettings(packageName: string): boolean { return Boolean(manager()?.openAndroidAppSettings(Application.android.foregroundActivity ?? Application.android.startActivity, packageName)); }
+export function prioritizeExtension(feature: string, component: string): boolean { return Boolean(manager()?.prioritizeExtension(feature, component)); }
+
 
 type Raster = { width: number; height: number; pixels: Uint8Array };
 type WindowState = { window: ShellWindow; ready: boolean; serial: number; visible: boolean; frame: Raster | null; rendering: boolean; target: string; lastInput: number; cancelReview?: () => void; reviewId?: string; reviewPurpose?: "message" | "search" | "capture"; protected?: boolean; menuAvailable?: boolean; finishCapture?: () => void; completedCapture?: { text: string; at: number }; refinement?: { id: string; cancel: () => void } };
@@ -92,7 +97,7 @@ export class ExternalAppPlatform {
           state.lastInput = Date.now(); this.send(component, "app-menu"); frameTimings.finishFrame(frameId, "external app menu dispatched"); return;
         }
         if (event.type === "system-menu-opened") return;
-        state.lastInput = Date.now(); this.send(component, "input", event); frameTimings.finishFrame(frameId, "external app input dispatched");
+        state.lastInput = Date.now(); if (state.visible) this.extensions.windowInput(component, event); this.send(component, "input", event); frameTimings.finishFrame(frameId, "external app input dispatched");
       },
       requestRender: () => this.send(component, "render"),
       relayout: () => { window.heightMode = this.heightMode(component); state.ready = false; this.cancelOwnedWork(state); state.frame = null; void this.options.configureSurface(surfaceId, state.visible, window.heightMode ?? "min").then(() => { if (this.windows.get(component) !== state) return; state.ready = true; this.send(component, "resize", appViewportSize(window.heightMode ?? "min")); }); },

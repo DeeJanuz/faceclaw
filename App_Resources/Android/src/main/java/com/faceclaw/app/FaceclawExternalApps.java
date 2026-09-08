@@ -218,6 +218,55 @@ public final class FaceclawExternalApps {
   }
   return values.toString();
  }
+ /** Local settings catalog. No grants or app code are activated by enumeration. */
+ public String androidAppsJson() {
+  JSONArray result=new JSONArray(); PackageManager pm=context.getPackageManager();
+  try {
+   List<ApplicationInfo> apps=pm.getInstalledApplications(0);
+   apps.sort((a,b)->pm.getApplicationLabel(a).toString().compareToIgnoreCase(pm.getApplicationLabel(b).toString()));
+   for(ApplicationInfo app:apps) {
+    if(result.length()>=512) break;
+    if((app.flags&ApplicationInfo.FLAG_SYSTEM)!=0 && pm.getLaunchIntentForPackage(app.packageName)==null) continue;
+    result.put(Protocol.object("packageName",app.packageName,"name",pm.getApplicationLabel(app).toString()));
+   }
+  } catch(Exception ignored) {}
+  return result.toString();
+ }
+ /** Explicit local settings navigation only; package names never confer host authority. */
+ public boolean openAndroidAppSettings(Activity activity,String appPackage) {
+  if(activity==null||appPackage==null||appPackage.length()>255||!appPackage.matches("[a-zA-Z0-9_]+(?:\\.[a-zA-Z0-9_]+)+")) return false;
+  try {
+   context.getPackageManager().getApplicationInfo(appPackage,0);
+   for(ResolveInfo app:discover()) if(appPackage.equals(app.serviceInfo.packageName)) {
+    ServiceInfo current=context.getPackageManager().getServiceInfo(new ComponentName(appPackage,app.serviceInfo.name),PackageManager.GET_META_DATA);
+    Intent settings=validService(current)?AppSettingsIntent.resolve(context,current):null;
+    if(settings!=null) { activity.startActivity(settings); return true; }
+   }
+   activity.startActivity(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,android.net.Uri.fromParts("package",appPackage,null)));
+   return true;
+  } catch(PackageManager.NameNotFoundException|ActivityNotFoundException|SecurityException ignored) { return false; }
+ }
+ /** Reordering existing declarations never grants a feature. Local host UI only. */
+ public boolean prioritizeExtension(String feature,String component) {
+  if(!ExtensionContract.known(feature)||!extensions.orderedComponents(feature).contains(component))return false;
+  if(!extensions.prioritize(feature,component))return false; extensionsChanged(); return true;
+ }
+ public void showBehaviorSettings(Activity activity) {
+  if(activity==null)return;
+  JSONArray features=extensions.snapshot().optJSONArray("features"); ArrayList<String> ids=new ArrayList<>(),labels=new ArrayList<>();
+  if(features!=null)for(int i=0;i<features.length();i++) {
+   JSONObject feature=features.optJSONObject(i); if(feature==null)continue;
+   String id=feature.optString("feature"); JSONArray contenders=feature.optJSONArray("contenders");
+   if(contenders==null||contenders.length()==0)continue;
+   ids.add(id);String owner=feature.optBoolean("available")?appLabel(feature.optString("component")):"Faceclaw default";
+   labels.add(extensionLabel(id)+" — "+owner);
+  }
+  new AlertDialog.Builder(activity).setTitle("System behaviors").setItems(labels.toArray(new String[0]),(d,index)->showExtensionOrder(activity,ids.get(index))).setNegativeButton("Close",null).show();
+ }
+ private String appLabel(String component) {
+  ComponentName name=ComponentName.unflattenFromString(component); if(name==null)return component;
+  try {return context.getPackageManager().getApplicationLabel(context.getPackageManager().getApplicationInfo(name.getPackageName(),0)).toString();}catch(Exception ignored){return name.getPackageName();}
+ }
  public void showManager(Activity activity) {
   if(activity==null) return; refresh(); List<ResolveInfo> apps=discover();
   String[] labels=new String[apps.size()]; for(int i=0;i<apps.size();i++) { ResolveInfo r=apps.get(i); labels[i]=r.loadLabel(context.getPackageManager())+(approved(r.serviceInfo)?" (approved)":""); }
@@ -227,7 +276,7 @@ public final class FaceclawExternalApps {
  private void showPermissionsManager(Activity activity) {
   List<ResolveInfo> apps=discover(); String[] labels=new String[apps.size()];
   for(int i=0;i<apps.size();i++) labels[i]=apps.get(i).loadLabel(context.getPackageManager()).toString();
-  new AlertDialog.Builder(activity).setTitle("Faceclaw permissions and priority").setItems(labels,(d,index)->showApp(activity,apps.get(index))).setNegativeButton("Close",null).show();
+  new AlertDialog.Builder(activity).setTitle("Faceclaw permissions and priority").setItems(labels,(d,index)->showApp(activity,apps.get(index))).setNeutralButton("System behaviors",(d,w)->showBehaviorSettings(activity)).setNegativeButton("Close",null).show();
  }
  private void openAppInterface(Activity activity,ResolveInfo app) {
   try {

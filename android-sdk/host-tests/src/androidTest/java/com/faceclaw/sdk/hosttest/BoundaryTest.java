@@ -356,6 +356,14 @@ public class BoundaryTest extends Instrumentation {
    assertFalse(ApprovalStore.open(context,namespace).contains("pin"));
   } finally { context.getSharedPreferences(namespace,0).edit().clear().commit(); new java.io.File(context.getNoBackupFilesDir(),namespace+".installation").delete(); }
  }
+ public void testLocalSettingsCatalogDoesNotGrantOrActivateApps() throws Exception {
+  settle(); assertTrue("Installed catalog includes an unapproved app",manager.androidAppsJson().contains(PKG));
+  assertFalse(manager.installedJson().contains(PKG));
+  assertFalse(manager.openAndroidAppSettings(null,PKG));
+  assertFalse(manager.prioritizeExtension("unknown.feature",PKG+"/Missing"));
+  assertFalse(manager.prioritizeExtension("transcription",PKG+"/Missing"));
+  assertFalse(manager.installedJson().contains(PKG));
+ }
  public void testUnapprovedPackageIsNotDiscoveredAsLaunchable() throws Exception { settle(); assertFalse(manager.installedJson().contains(PKG)); }
  public void testMutualSdkHandshakeFrameSleepAndRevocation() throws Exception {
   String c=approve("CanvasService"); open(c); for(int i=0;i<40&&frames.get()==0;i++) settle(); assertTrue("SharedMemory frame absent",frames.get()>0);

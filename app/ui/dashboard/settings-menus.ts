@@ -1,4 +1,4 @@
-import { showExternalAppSettings } from "../../apps/external/platform";
+import { installedAppSettingsItems, behaviorSettingsItems } from "./app-settings-menus";
 import { knownFolders } from "@nativescript/core";
 import { getDefaultSmallFont } from "../../graphics/ui-fonts";
 import type { GrayImage } from "../../graphics/image";
@@ -85,7 +85,8 @@ export function createSettingsPanelLayer(): SettingsPanelLayer {
 
 function settingsSections(): SettingsSection[] {
   return [
-    { label: "Installed apps", items: [{ label: "Manage Android applications", description: "Approve installed APKs, select this host, and configure app capabilities on your phone.", onSelect: () => showExternalAppSettings() }] },
+    { label: "Installed apps", get items() { return installedAppSettingsItems(); } },
+    { label: "Priorities", get items() { return behaviorSettingsItems(); } },
     {
       label: "Display",
       items: [

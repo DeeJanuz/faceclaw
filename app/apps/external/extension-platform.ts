@@ -114,6 +114,14 @@ export class ExtensionPlatform {
     if (feature === "ui.app-menu") this.closeMenu();
     const selected = this.feature(feature); if (selected) this.native.closeExtensionSurface(selected.component, feature); this.lastGesture.delete(feature);
   }
+  /** A foreground app can host its notification reader in its own window.
+   * Only host-delivered input counts; IPC requests cannot manufacture a gesture.
+   */
+  windowInput(component: string, input: unknown): void {
+    if (!this.controls(component, "ui.notifications") || this.isLocked() || !shell.isScreenOn() ||
+        shell.foregroundWindow()?.windowId !== `apk:${component}` || !record(input)) return;
+    if (["click", "double-click", "pointer-click"].includes(String(input.type))) this.lastGesture.set("ui.notifications", Date.now());
+  }
   surfaceInput(feature: string, input: unknown): void {
     const selected = this.feature(feature); if (!selected || this.isLocked() || !shell.isScreenOn() || !record(input)) return;
     if (["click", "double-click", "scroll-up", "scroll-down", "back", "long-press", "short-then-long-press"].includes(String(input.type))) this.lastGesture.set(feature, Date.now());
@@ -290,10 +298,10 @@ export class ExtensionPlatform {
         const reviewKey = `${component}\n${callId}`;
         if (this.reviews.size) { result(false, "Another review is active"); return; }
         this.hooks.closeSurface?.(feature);
-        const cancel = shell.openReviewedVoiceInput({ id: "extension-notification", label: `Send reply via ${source.appName}: ${source.title}`.slice(0, 200), onSend: text => {
+        const cancel = shell.openReviewedVoiceInput({ id: "extension-notification", captureTitle: "Reply", capturePrompt: "Speak your reply...", label: `Send reply via ${source.appName}: ${source.title}`.slice(0, 200), onSend: text => {
           if (sent || !current()) return; sent = true; this.reviews.delete(reviewKey);
           if (external) { if (!external.send(text, status => result(status === "sent" || status === "draft-saved", undefined, status))) result(false, "Reply outcome unknown", "unknown"); }
-          else result(replyToNotification(source.key, index, source.postTime, text));
+          else { const accepted = replyToNotification(source.key, index, source.postTime, text); result(accepted, undefined, accepted ? "sent" : "unknown"); }
         } }, current, () => { unavailable = true; this.reviews.delete(reviewKey); result(false, "Reply unavailable"); }, () => {
           this.reviews.delete(reviewKey);
           setTimeout(() => { if (!sent) result(false, "Reply cancelled", "rejected"); }, 0);

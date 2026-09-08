@@ -30,13 +30,19 @@ walk you through pairing with the glasses and installing custom firmware.
 
 Compatible Android APKs can draw their own glasses screens while Faceclaw owns
 the shell and Bluetooth connection. Install an APK normally, then open
-Settings > Installed apps > Manage Android applications to approve it and its
-capabilities. The application asks you to select one active Faceclaw host.
+Settings > Installed apps and select the application to open its phone settings.
+A three-second glasses notice directs you to the phone. Compatible applications
+open their setup page; other Android applications open their system app settings.
+Use the application's Faceclaw permissions page to approve its capabilities. The application asks you to select one active Faceclaw host.
 Approved applications appear in the launcher. Applications with their own phone
 setup screen can open Faceclaw's approval and permission controls directly from
 there. For Signal, open **Signal for Faceclaw** in the phone launcher to see the
 selected host, pair the Signal bridge, and check connection status. Host selection
 and bridge pairing are separate steps.
+
+Settings > Priorities lists system behaviors first. Select a behavior to see the
+ordered applications, their availability, and the current owner. Moving an
+application to first place changes priority without granting permissions.
 
 New app approvals start with notifications, dictation/review, message text previews
 and declared-source suppression checked. Review or change these choices before

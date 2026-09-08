@@ -314,6 +314,7 @@ class DashboardController {
   private incompatibleDisconnectPending = false;
   private unpairedDisconnectPending = false;
 
+  private pendingNotificationWake: ExtensionLayer | null = null;
   private extensionSurfaces = new Map<string, { component: string; layer: ExtensionLayer; timer?: ReturnType<typeof setTimeout>; wokeScreen: boolean; interacted: boolean }>();
   private externalApps: ExternalAppPlatform;
 
@@ -733,6 +734,8 @@ class DashboardController {
    * the first caller's spans.
    */
   private ensureEvenHubSessionActive(frameId = 0): Promise<boolean> {
+    // A notification wake must not expose the retained full-screen app first.
+    if (this.pendingNotificationWake) return Promise.resolve(false);
     if (this.evenHubResumePromise) return this.evenHubResumePromise;
     const communicator = this.communicator;
     if (!communicator) {
@@ -2459,6 +2462,7 @@ class DashboardController {
     const planes = frameTimings.span(frameId, "paint", () =>
       frameTimings.runWithFrame(frameId, () => shell.paintSurface()),
     );
+    const notificationWakeFrame = this.pendingNotificationWake?.readyForDisplay ? this.pendingNotificationWake : null;
     const paintMs = Date.now() - paintStartedAtMs;
     const paintUsedStaleData = endRenderPass();
     if (paintUsedStaleData) {
@@ -2500,6 +2504,14 @@ class DashboardController {
         preparedDraws,
       ),
     );
+    if (notificationWakeFrame && this.pendingNotificationWake === notificationWakeFrame) {
+      this.pendingNotificationWake = null;
+      if (shell.isScreenOn()) await this.ensureEvenHubSessionActive(frameId);
+    }
+    if (this.pendingNotificationWake) {
+      frameTimings.finishFrame(frameId, "discarded: waiting for notification content before wake");
+      return;
+    }
     // Backpressure: the next shell render waits for this one to reach the
     // glasses. Timing out here means the loop was blocked for the full timeout
     // and any input arriving meanwhile had its chrome repaint delayed, so say
@@ -2522,7 +2534,6 @@ class DashboardController {
     if (prior) { this.closeExtensionSurface(feature, false); }
     if (!shell.canShowExtensionOverlay()) return false;
     const wokeScreen = prior?.wokeScreen || !shell.isScreenOn();
-    if (!shell.isScreenOn()) shell.wake("window");
     const layer = new ExtensionLayer(event => {
       const state = this.extensionSurfaces.get(feature);
       if (state) {
@@ -2538,12 +2549,18 @@ class DashboardController {
       const state = this.extensionSurfaces.get(feature);
       if (!state || state.layer !== layer) return;
       if (state.timer) clearTimeout(state.timer);
+      if (this.pendingNotificationWake === layer) {
+        this.pendingNotificationWake = null;
+        setTimeout(() => { if (shell.isScreenOn() && !this.pendingNotificationWake) void this.ensureEvenHubSessionActive(); }, 0);
+      }
       this.extensionSurfaces.delete(feature);
       this.externalApps.extensions.closeSurface(feature);
     }, feature === "ui.notifications" ? "medium" : "min", feature !== "ui.notifications" || target === "inbox" || wokeScreen);
     const state = { component, layer, wokeScreen, interacted: target === "inbox", timer: undefined as ReturnType<typeof setTimeout> | undefined };
     this.extensionSurfaces.set(feature, state);
-    if (!shell.showExtensionOverlay(layer, feature !== "ui.app-menu")) { this.extensionSurfaces.delete(feature); if (wokeScreen) shell.sleep(); return false; }
+    if (feature === "ui.notifications" && wokeScreen) this.pendingNotificationWake = layer;
+    if (!shell.isScreenOn()) shell.wake("window");
+    if (!shell.showExtensionOverlay(layer, feature !== "ui.app-menu")) { this.extensionSurfaces.delete(feature); if (this.pendingNotificationWake === layer) this.pendingNotificationWake = null; if (wokeScreen) shell.sleep(); return false; }
     if (feature === "ui.notifications" && target !== "inbox") state.timer = setTimeout(() => this.closeExtensionSurface(feature), 5000);
     this.requestShellRender();
     return true;

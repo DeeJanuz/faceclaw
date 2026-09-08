@@ -26,6 +26,8 @@ type VoicePhase = "capturing" | "menu" | "continuing" | "refining";
 export type VoiceSendTarget = {
   id: string;
   label: string;
+  captureTitle?: string;
+  capturePrompt?: string;
   onSend: (text: string) => void;
 };
 
@@ -67,7 +69,7 @@ export type VoiceInputLayerOptions = {
  */
 export class VoiceInputLayer implements Layer {
   private phase: VoicePhase = "capturing";
-  private status = "Listening...";
+  private status = "Starting microphone...";
   // The active utterance. displayText() is what the dialog shows and what
   // Send delivers; the refine flow also writes the merged result here.
   private finalizedText = "";
@@ -114,12 +116,15 @@ export class VoiceInputLayer implements Layer {
   startCapture(): void {
     if (this.capturing) return;
     this.unsubscribeTranscript = voiceControlBridge.onTranscript((event) => this.onTranscript(event));
+    let subscribing = true;
     this.unsubscribeStatus = voiceControlBridge.onStatus((state) => {
+      if (subscribing) return; // Ignore status replay from the preceding capture.
       // The refine stage owns the status line ("Refining...", error text).
       if (this.phase === "refining") return;
-      this.status = state.status;
+      this.status = /^Listening/.test(state.status) ? "Listening..." : state.status;
       this.actions.requestRender();
     });
+    subscribing = false;
     if (this.handsFree) {
       // No button is held, so the mic has to stop itself. endCapture() is
       // idempotent, and a click still ends the utterance early.
@@ -153,6 +158,7 @@ export class VoiceInputLayer implements Layer {
     }
     this.capturing = false;
     this.phase = "menu";
+    this.status = "Transcribing...";
     void this.actions.stopVoiceCapture();
     if (this.autoSend && this.sendTargets.length) {
       // Skip-confirmation (wakeword): send to the default target as soon as the
@@ -217,7 +223,7 @@ export class VoiceInputLayer implements Layer {
     const image = paintBelow();
     const inMenu = this.phase === "menu";
     paintInputDialog(image, {
-      title: this.capturing ? "Voice ●" : "Voice",
+      title: this.sendTargets[this.defaultTargetIndex]?.captureTitle ?? "Dictation",
       status: this.status,
       text: this.displayText() || this.placeholderText(),
       rows: inMenu ? this.menuRows() : [],
@@ -395,7 +401,7 @@ export class VoiceInputLayer implements Layer {
   private placeholderText(): string {
     switch (this.phase) {
       case "capturing":
-        return "Listening...";
+        return this.sendTargets[this.defaultTargetIndex]?.capturePrompt ?? "Speak your message...";
       case "continuing":
         return "Say more, or describe an edit...";
       case "refining":
@@ -429,6 +435,7 @@ export class VoiceInputLayer implements Layer {
         this.finalizedText = this.finalizedText ? `${this.finalizedText} ${finalText}` : finalText;
       }
       this.liveText = "";
+      if (this.phase === "menu" && !this.pendingAutoSend) this.status = this.finalizedText ? "Review before sending." : "No speech captured.";
       if (this.phase === "continuing" && this.followupFinalizeTimer !== null) {
         // The follow-up finalized; no need to keep waiting.
         this.beginRefine();

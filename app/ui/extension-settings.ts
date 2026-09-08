@@ -47,6 +47,7 @@ export function onEffectiveExtensionsChanged(listener: () => void): () => void {
 }
 
 export type NavigationPolicy = {
+  doubleTap: "back" | "sleep";
   rootBack: "sleep" | "switcher";
   tapHold: "switcher" | "app-menu";
   hold: "app-menu" | "system-menu";
@@ -54,7 +55,7 @@ export type NavigationPolicy = {
 };
 export function navigationPolicy(): NavigationPolicy {
   return {
-    rootBack: "switcher", tapHold: "app-menu", hold: "system-menu", wakeFocus: "sidebar",
+    doubleTap: "back", rootBack: "switcher", tapHold: "app-menu", hold: "system-menu", wakeFocus: "sidebar",
     ...effectiveExtension("ui.navigation")?.configuration,
   } as NavigationPolicy;
 }

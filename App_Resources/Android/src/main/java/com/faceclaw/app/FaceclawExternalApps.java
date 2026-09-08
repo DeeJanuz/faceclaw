@@ -201,16 +201,37 @@ public final class FaceclawExternalApps {
  public void showManager(Activity activity) {
   if(activity==null) return; refresh(); List<ResolveInfo> apps=discover();
   String[] labels=new String[apps.size()]; for(int i=0;i<apps.size();i++) { ResolveInfo r=apps.get(i); labels[i]=r.loadLabel(context.getPackageManager())+(approved(r.serviceInfo)?" (approved)":""); }
-  new AlertDialog.Builder(activity).setTitle("Installed Faceclaw apps").setItems(labels,(d,index)->showApp(activity,apps.get(index))).setNegativeButton("Close",null).show();
+  new AlertDialog.Builder(activity).setTitle("Installed Faceclaw apps").setItems(labels,(d,index)->openAppInterface(activity,apps.get(index)))
+   .setNeutralButton("Permissions and priority",(d,w)->showPermissionsManager(activity)).setNegativeButton("Close",null).show();
+ }
+ private void showPermissionsManager(Activity activity) {
+  List<ResolveInfo> apps=discover(); String[] labels=new String[apps.size()];
+  for(int i=0;i<apps.size();i++) labels[i]=apps.get(i).loadLabel(context.getPackageManager()).toString();
+  new AlertDialog.Builder(activity).setTitle("Faceclaw permissions and priority").setItems(labels,(d,index)->showApp(activity,apps.get(index))).setNegativeButton("Close",null).show();
+ }
+ private void openAppInterface(Activity activity,ResolveInfo app) {
+  try {
+   ServiceInfo current=context.getPackageManager().getServiceInfo(new ComponentName(app.serviceInfo.packageName,app.serviceInfo.name),PackageManager.GET_META_DATA);
+   if(validService(current)) {
+    Intent intent=AppSettingsIntent.resolve(context,current);
+    if(intent!=null) { activity.startActivity(intent); return; }
+   }
+  } catch(PackageManager.NameNotFoundException|ActivityNotFoundException|SecurityException ignored) {}
+  new AlertDialog.Builder(activity).setTitle("App settings unavailable").setMessage("This app has no available phone settings screen. You can still manage its Faceclaw permissions here.")
+   .setPositiveButton("Faceclaw permissions",(d,w)->showApp(activity,app)).setNegativeButton("Close",null).show();
  }
  /** Navigation only. The package hint never supplies service metadata, identity or grants. */
  public void showAppSettings(Activity activity,String appPackage) {
+  if(activity==null) return;
+  // The exported settings Activity can be the first screen in a cold host process.
+  // Reconnect only previously approved apps before presenting their host-selection state.
+  refresh();
   if(appPackage!=null && appPackage.length()<=255 && appPackage.matches("[a-zA-Z0-9_]+(?:\\.[a-zA-Z0-9_]+)+")) {
    for(ResolveInfo app:discover()) if(appPackage.equals(app.serviceInfo.packageName)) {
     showApp(activity,app); return;
    }
   }
-  showManager(activity);
+  showPermissionsManager(activity);
  }
  private boolean canShowConsent(Activity activity) {
   return activity!=null&&!activity.isFinishing()&&!activity.isDestroyed()&&activity.getWindow()!=null&&

@@ -37,7 +37,9 @@ The SDK manifest merges its non-exported host-selection activity. SDK approval s
 
 ## Phone setup entry points
 
-An app may provide its own Android launcher Activity for setup and connection status. Keep credential entry in that app's private configuration path; a public launcher Intent must not configure credentials or authorize a host from caller-provided extras.
+An app should provide its own Android launcher Activity for settings and connection status. **Manage Android applications** opens that app's phone interface when its row is selected. To declare a dedicated entry point, add an intent filter for `com.faceclaw.action.APP_SETTINGS` and category `android.intent.category.DEFAULT` to an exported settings Activity. The host resolves only enabled, exported, unprotected activities in the installed service's package and UID, then sends an explicit Intent with no extras. A validated launcher Activity is the fallback. An app without either entry point gets an explanation and a link to its host permissions. Keep credential entry in that app's private configuration path; public settings Intents must not configure credentials or authorize a host from caller-provided extras.
+
+The manager's **Permissions and priority** button keeps app approval, host selection, individual capability grants and global feature priority in Faceclaw. Apps can link back to those controls with the following host entry point; opening app settings itself never changes authority.
 
 Current Faceclaw hosts advertise an Activity for `com.faceclaw.action.MANAGE_APPS`. An app can declare that action under its manifest `<queries>`, discover available hosts, and launch the selected Activity with an explicit component. The optional `appPackage` string is only a navigation hint: the host validates it, discovers installed app services itself, and shows its normal approval controls. Opening this Activity never grants app approval, selects a host, or enables capabilities automatically. Older hosts can still be configured through **Settings > Installed apps > Manage Android applications**.
 

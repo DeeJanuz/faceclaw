@@ -79,6 +79,41 @@ public class BoundaryTest extends Instrumentation {
  private void grantExtension(String component,String feature,boolean granted) {
   runOnMainSync(()->{ context.getSharedPreferences("faceclaw-external-apps",0).edit().putBoolean(component+":extension:"+feature,granted).commit(); manager.refresh(); });
  }
+ public void testSettingsTargetRequiresSamePackageUidExportAndNoPermission() throws Exception {
+  android.content.pm.ServiceInfo service=new android.content.pm.ServiceInfo();
+  service.packageName=PKG; service.applicationInfo=new android.content.pm.ApplicationInfo(); service.applicationInfo.uid=12345;
+  android.content.pm.ActivityInfo activity=new android.content.pm.ActivityInfo();
+  activity.packageName=PKG; activity.applicationInfo=new android.content.pm.ApplicationInfo(); activity.applicationInfo.uid=12345;
+  activity.exported=true; activity.enabled=true; activity.applicationInfo.enabled=true;
+  assertTrue("Own public settings allowed",AppSettingsIntent.allowedTarget(service,activity));
+  activity.packageName="com.android.settings"; assertFalse(AppSettingsIntent.allowedTarget(service,activity)); activity.packageName=PKG;
+  activity.applicationInfo.uid=9999; assertFalse(AppSettingsIntent.allowedTarget(service,activity)); activity.applicationInfo.uid=12345;
+  activity.exported=false; assertFalse(AppSettingsIntent.allowedTarget(service,activity)); activity.exported=true;
+  activity.enabled=false; assertFalse(AppSettingsIntent.allowedTarget(service,activity)); activity.enabled=true;
+  activity.applicationInfo.enabled=false; assertFalse(AppSettingsIntent.allowedTarget(service,activity)); activity.applicationInfo.enabled=true;
+  activity.permission="android.permission.MANAGE_USERS"; assertFalse(AppSettingsIntent.allowedTarget(service,activity));
+  assertFalse(AppSettingsIntent.allowedTarget(service,null));
+  assertEquals(null,AppSettingsIntent.resolve(context,null));
+ }
+ public void testSettingsResolutionIsExplicitAndDoesNotApproveApp() throws Exception {
+  android.content.pm.ServiceInfo service=context.getPackageManager().getServiceInfo(new ComponentName(PKG,PKG+".CanvasService"),0);
+  Intent intent=AppSettingsIntent.resolve(context,service);
+  assertTrue("Settings entry point resolves",intent!=null);
+  assertEquals(new ComponentName(PKG,PKG+".SettingsActivity"),intent.getComponent());
+  assertEquals(AppSettingsIntent.ACTION,intent.getAction());
+  assertEquals(null,intent.getExtras()); assertEquals(null,intent.getData()); assertEquals(null,intent.getClipData()); assertEquals(0,intent.getFlags());
+  assertFalse(context.getSharedPreferences("faceclaw-external-apps",0).contains(PKG+"/"+PKG+".CanvasService:pin"));
+  service.packageName="com.faceclaw.no.installed.app";
+  assertEquals(null,AppSettingsIntent.resolve(context,service));
+ }
+ public void testNavigationDoubleTapIsBoundedAndOptional() throws Exception {
+  for(String value:new String[]{"back","sleep"}) assertEquals(value,ExtensionContract.configuration("ui.navigation",new org.json.JSONObject().put("doubleTap",value)).getString("doubleTap"));
+  assertFalse(ExtensionContract.configuration("ui.navigation",new org.json.JSONObject().put("hold","app-menu")).has("doubleTap"));
+  for(Object value:new Object[]{"switcher","execute-native","sleep|back",true,1,org.json.JSONObject.NULL}) {
+   try { ExtensionContract.configuration("ui.navigation",new org.json.JSONObject().put("doubleTap",value)); throw new AssertionError("Untrusted double tap accepted"); }
+   catch(IllegalArgumentException expected) {}
+  }
+ }
  public void testExtensionDeclarationsRequireSeparateGrantAndPin() throws Exception {
   String c=approve("CanvasService"); send(c,"test-publish-extensions",declarations("ui.typography","{\"size\":17}")); settle();
   org.json.JSONArray features=new org.json.JSONObject(manager.extensionsJson()).getJSONArray("features");
@@ -218,6 +253,20 @@ public class BoundaryTest extends Instrumentation {
   android.app.Activity activity=startActivitySync(forged);
   try { settle(); assertEquals(before,new java.util.HashMap<>(prefs.getAll())); assertEquals("[]",manager.installedJson()); }
   finally { runOnMainSync(activity::finish); }
+ }
+ public void testColdPhoneSettingsConnectsPreviouslyApprovedAppWithoutChangingGrants() throws Exception {
+  String component=PKG+"/"+PKG+".CanvasService";
+  android.content.SharedPreferences prefs=context.getSharedPreferences("faceclaw-external-apps",0);
+  // Simulate a fresh host process: durable approval exists, but no main-screen refresh ran.
+  prefs.edit().putString(component+":pin",PackageIdentity.forPackage(context,PKG)).commit();
+  java.util.Map<String,?> before=new java.util.HashMap<>(prefs.getAll());
+  assertFalse(manager.isConnected(component));
+  android.app.Activity activity=startActivitySync(new Intent(context,FaceclawAppSettingsActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK).putExtra("appPackage",PKG));
+  try {
+   assertTrue("Cold phone settings must initialize approved app connections",connected.await(5,TimeUnit.SECONDS));
+   assertTrue("Saved mutual host selection reconnects",manager.isConnected(component));
+   assertEquals(before,new java.util.HashMap<>(prefs.getAll()));
+  } finally { runOnMainSync(activity::finish); }
  }
  public void testTransportTimingAndCoalescing() throws Exception {
   String c=approve("CanvasService");

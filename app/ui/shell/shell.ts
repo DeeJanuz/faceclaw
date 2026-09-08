@@ -4,7 +4,7 @@ import { voiceControlBridge } from "../../native/voice-control";
 import { G2_LENS_HEIGHT, G2_LENS_WIDTH, GrayImage } from "../../graphics/image";
 import { singlePlane, type Plane } from "../../graphics/plane";
 import { getDefaultSmallFont } from "../../graphics/ui-fonts";
-import { appMenuPolicy, navigationPolicy, onEffectiveExtensionsChanged } from "../extension-settings";
+import { appMenuPolicy, navigationPolicy, onEffectiveExtensionsChanged, windowLayoutPolicy } from "../extension-settings";
 import { appActionItems, presentAppMenu } from "../window-menu";
 import { EvenAIStatus, EventSourceType, OsEventTypeList, WatchGestureType } from "../../g2/events";
 import type { RawInputEvent } from "../../native/faceclaw-communicator";
@@ -731,7 +731,15 @@ class Shell {
       return { shell: false, window: false };
     }
 
-    // Long-press is the shell's own gesture: it opens the system menu
+    // A provider may reserve the physical double tap for display power.
+    // Handle it before app/back/sidebar routing so the same gesture cannot
+    // also expose the switcher. Directional watch back is translated later.
+    if (event.type === "double-click" && navigationPolicy().doubleTap === "sleep") {
+      this.sleep();
+      return { shell: true, window: false };
+    }
+
+    // By default long-press is the shell's own gesture: it opens the system menu
     // directly, never reaching the app — over the app's own context menu
     // too (the window closes that on system-menu-opened), while an already
     // open system menu just stays. Its later generic release is consumed
@@ -741,12 +749,14 @@ class Shell {
     // so that holding the press long enough still opens the system menu.
     if (event.type === "long-press") {
       if (navigationPolicy().hold === "app-menu") {
+        if (this.activeVoiceLayer || this.activeKeyboardLayer) return { shell: true, window: false };
         if (this.stack.topMatches(layer => layer instanceof ShellOverlayMenuLayer)) return { shell: true, window: false };
         const foreground = this.foregroundWindow();
         if (!foreground) return { shell: true, window: false };
-        if (!this.stack.isAtBase() || !foreground.claimsLongPress?.()) {
-          return { shell: true, window: await this.openAppActions(frameId) };
-        }
+        // A normal hold opens App actions; keeping it held retains the
+        // host-controlled escape even if the APK stops responding.
+        this.startEscapeMenuTimer();
+        return { shell: true, window: await this.openAppActions(frameId) };
       }
       if (this.activeVoiceLayer || !this.stack.isAtBase()) {
         return { shell: true, window: false };
@@ -852,6 +862,9 @@ class Shell {
    * strip left of the icon columns when the one-column variant is active.
    */
   screenshotCropRect(): { x: number; y: number; width: number; height: number } {
+    if (this.focus === "sidebar" && windowLayoutPolicy().switcherHeight === "display") {
+      return { x: 0, y: 0, width: G2_LENS_WIDTH, height: G2_LENS_HEIGHT };
+    }
     const appId = this.foregroundWindow()?.appId;
     const heightMode = this.foregroundWindow()?.heightMode ?? "min";
     const x = sidebarWidth(appId) === 0 ? 0 : sidebarContentLeft(this.windows.length);

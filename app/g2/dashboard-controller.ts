@@ -1,7 +1,7 @@
 import { configureAppMenuPresenter } from "../ui/window-menu";
 import { ExtensionLayer } from "../ui/shell/extension-layer";
 import { weatherBridge } from "../native/weather";
-import { onEffectiveExtensionsChanged, windowLayoutPolicy } from "../ui/extension-settings";
+import { onEffectiveExtensionsChanged, windowLayoutPolicy, navigationPolicy } from "../ui/extension-settings";
 import { ExternalAppPlatform, externalAppId, installedExternalApps } from "../apps/external/platform";
 import { Application, ImageSource } from "@nativescript/core";
 import { EvenAIStatus, EvenAIStatusName, EventSourceType, EventSourceTypeName, OsEventTypeList, OsEventTypeName, WatchGestureType, WatchGestureTypeName } from "./events";
@@ -1806,13 +1806,15 @@ class DashboardController {
    * finger-down/finger-up (the watch) hold for as long as the user does.
    */
   async injectSyntheticRingInput(kind: WearRemoteInputKind, origin: SyntheticInputOrigin = "ring"): Promise<void> {
-    // Match the ring while the display is dark: only a double-click wakes it,
-    // and that wake is handled by Shell.receiveInput. This check also protects
+    // Match the ring while the display is dark: a double-click wakes it,
+    // as does a provider's tap-and-hold switcher gesture. Shell.receiveInput
+    // handles both. This check also protects
     // against a watch acting on a stale state snapshot.
     if (
       origin === "watch" &&
       !shell.isScreenOn() &&
       kind !== "double-click" &&
+      !(kind === "short-then-long-press" && navigationPolicy().tapHold === "switcher") &&
       kind !== "long-press-release"
     ) {
       this.appendLog(`${kind} (watch scheme) ignored while display is off`);

@@ -20,6 +20,7 @@
       "enabled": true,
       "configuration": {
         "rootBack": "sleep",
+        "doubleTap": "sleep",
         "tapHold": "switcher",
         "hold": "app-menu",
         "wakeFocus": "window"

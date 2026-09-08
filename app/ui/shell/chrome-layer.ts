@@ -20,7 +20,6 @@ import {
   sidebarStripVisible,
   TOP_BAR_HEIGHT,
   windowTop,
-  windowBandHeight,
   type WindowHeightMode,
 } from "./geometry";
 
@@ -41,7 +40,11 @@ const ICON_SPACING = 8;
 /** Icon list top/bottom margins within the sidebar band, below the top bar. */
 const LIST_MARGIN = 10;
 function switcherBandHeight(appId?: string): number {
-  return windowLayoutPolicy().switcherHeight === "display" ? windowBandHeight("min", appId) : MIN_WINDOW_HEIGHT;
+  return windowLayoutPolicy().switcherHeight === "display" ? G2_LENS_HEIGHT : MIN_WINDOW_HEIGHT;
+}
+
+function switcherBandTop(appId?: string): number {
+  return windowLayoutPolicy().switcherHeight === "display" ? 0 : minWindowTop(appId);
 }
 
 /** Icon rows that fit in one sidebar column. */
@@ -75,7 +78,7 @@ function slotPosition(variant: SidebarVariant, listTop: number, position: number
 
 /** Top y of the sidebar's icon list (below the band's top bar). */
 function sidebarListTop(appId?: string): number {
-  return minWindowTop(appId) + TOP_BAR_HEIGHT + LIST_MARGIN;
+  return switcherBandTop(appId) + TOP_BAR_HEIGHT + LIST_MARGIN;
 }
 
 /**
@@ -232,9 +235,9 @@ export class ShellChromeLayer implements Layer {
   }
 
   private drawSidebar(image: GrayImage, state: ShellChromeState): void {
-    // Align the sidebar with the app's preferred band. Legacy tall terminal
-    // sessions keep the sidebar at the global band position.
-    const bandTop = minWindowTop(state.foregroundAppId);
+    // A full-height switcher spans the panel regardless of the app's band.
+    // Otherwise retain the host's compact sidebar placement.
+    const bandTop = switcherBandTop(state.foregroundAppId);
     const bandHeight = switcherBandHeight(state.foregroundAppId);
     const bandBottom = bandTop + bandHeight;
     image.fillRect(0, bandTop, SIDEBAR_WIDTH, bandHeight, SHELL_OPAQUE_BLACK);
@@ -313,7 +316,8 @@ export class ShellChromeLayer implements Layer {
     // The bar sits at the top edge of the foreground window's band, wherever
     // its height mode puts that (screen top for max height). It moves when
     // the foreground switches to a window of a different height.
-    const barTop = windowTop(state.foregroundHeightMode, state.foregroundAppId);
+    const barTop = state.focus === "sidebar" && windowLayoutPolicy().switcherHeight === "display"
+      ? 0 : windowTop(state.foregroundHeightMode, state.foregroundAppId);
     // The bar spans the app viewport; with the sidebar overlaid (full-panel
     // mode, sidebar focused) it still starts past the strip.
     const barLeft = sidebarStripVisible(state.focus, state.foregroundAppId) ? SIDEBAR_WIDTH : 0;

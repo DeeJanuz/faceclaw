@@ -2538,7 +2538,7 @@ class DashboardController {
       const state = this.extensionSurfaces.get(feature);
       if (state) {
         if (feature !== "ui.notifications" || event.type === "click") state.interacted = true;
-        if (event.type === "click") state.layer.opaque = true;
+        if (event.type === "click") { state.layer.opaque = true; state.layer.alignTop = false; }
         if (event.type !== "long-press" && event.type !== "long-press-release") { if (state.timer) clearTimeout(state.timer); state.timer = undefined; }
       }
       this.externalApps.extensions.surfaceInput(feature, event);
@@ -2555,7 +2555,7 @@ class DashboardController {
       }
       this.extensionSurfaces.delete(feature);
       this.externalApps.extensions.closeSurface(feature);
-    }, feature === "ui.notifications" ? "medium" : "min", feature !== "ui.notifications" || target === "inbox" || wokeScreen);
+    }, feature === "ui.notifications" ? "medium" : "min", feature !== "ui.notifications" || target === "inbox" || wokeScreen, feature === "ui.notifications" && target !== "inbox");
     const state = { component, layer, wokeScreen, interacted: target === "inbox", timer: undefined as ReturnType<typeof setTimeout> | undefined };
     this.extensionSurfaces.set(feature, state);
     if (feature === "ui.notifications" && wokeScreen) this.pendingNotificationWake = layer;

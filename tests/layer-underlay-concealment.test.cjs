@@ -31,3 +31,13 @@ test('partial dimming composes and replacement layers retain the no-underlay she
  const h=harness();h.stack.push(h.overlay(0.5));h.stack.push(h.overlay(0.5));h.shell.paintSurface();assert.equal(h.stack.baseDim(),0.25);assert.equal(h.shell.underlayDim(),0.25);
  h.stack.push({paint:()=>h.source,handleInput(){}});h.shell.paintSurface();assert.equal(h.stack.baseDim(),false);assert.equal(h.shell.underlayDim(),1);
 });
+
+test('arrival surface ignores the centered app band and reader restores that band',()=>{
+ const image=load('app/graphics/image.ts',{'./bdffont':{},'./textwrap':{}});
+ const {ExtensionLayer}=load('app/ui/shell/extension-layer.ts',{'../../graphics/image':image,'./geometry':{appViewportRect:()=>({x:1,y:3,width:4,height:2})}});
+ const layer=new ExtensionLayer(()=>{},()=>{},()=>{},'medium',false,true);
+ const below=()=>new image.GrayImage(6,7,0);
+ layer.paint({},below);layer.setFrame(new Uint8Array(8).fill(190),4,2);
+ let frame=layer.paint({},below);assert.equal(frame.pixels[1],190);assert.equal(frame.pixels[3*6+1],0);
+ layer.alignTop=false;frame=layer.paint({},below);assert.equal(frame.pixels[1],0);assert.equal(frame.pixels[3*6+1],190);
+});

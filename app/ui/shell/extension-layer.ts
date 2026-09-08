@@ -16,6 +16,7 @@ export class ExtensionLayer implements Layer {
     private readonly closed: () => void,
     private readonly heightMode: WindowHeightMode = "min",
     opaque = true,
+    public alignTop = false,
   ) { this.opaque = opaque; }
   private size = "";
   setFrame(pixels: Uint8Array, width: number, height: number): void {
@@ -25,7 +26,8 @@ export class ExtensionLayer implements Layer {
   }
   paint(_ctx: LayerContext, paintBelow: PaintBelow): GrayImage {
     const image = paintBelow();
-    const rect = appViewportRect(this.heightMode);
+    const rect = { ...appViewportRect(this.heightMode) };
+    if (this.alignTop) rect.y = 0;
     const size = `${rect.width}:${rect.height}`;
     if (size !== this.size) { this.size = size; this.frame = undefined; this.resized(rect.width, rect.height); }
     if (this.opaque) image.fillRect(rect.x, rect.y, rect.width, rect.height, 1);

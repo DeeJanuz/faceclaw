@@ -21,7 +21,7 @@ function harness({ awake = true, protectedFlow = false } = {}) {
     getWindows: () => [],
   };
   class Surface {
-    constructor(input, resized, closed, heightMode, opaque) { Object.assign(this, { input, resized, closed, heightMode, opaque }); }
+    constructor(input, resized, closed, heightMode, opaque, alignTop) { Object.assign(this, { input, resized, closed, heightMode, opaque, alignTop }); }
   }
   const context = { shell, ExtensionLayer: Surface, setTimeout: fn => { timers.set(++timerId, fn); return timerId; }, clearTimeout: id => timers.delete(id) };
   vm.createContext(context);
@@ -45,7 +45,7 @@ test('awake previews retain the backdrop and protected flows never wake or open'
 });
 test('opening content cancels timeout and new arrivals cannot replace the reader', () => {
   const h = harness({ awake: false }); h.controller.showExtensionSurface('ui.notifications', 'example/Service', 'first');
-  const reader = h.layer(); reader.input({ type: 'click' });
+  const reader = h.layer(); assert.equal(reader.alignTop, true); reader.input({ type: 'click' }); assert.equal(reader.alignTop, false);
   assert.equal(reader.opaque, true); assert.equal(h.timers.size, 0);
   h.controller.showExtensionSurface('ui.notifications', 'example/Service', 'second');
   assert.equal(h.layer(), reader); h.controller.closeExtensionSurface('ui.notifications'); assert.equal(h.awake(), true);

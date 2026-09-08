@@ -396,7 +396,8 @@ class DashboardController {
         uninstallApp: appId => this.uninstallApp(appId),
         hostState: () => ({ weather: weatherBridge.snapshot() }),
         showSurface: (feature, component, target) => this.showExtensionSurface(feature, component, target),
-        closeSurface: feature => this.closeExtensionSurface(feature),
+        closeSurface: (feature, restoreSleep) => this.closeExtensionSurface(feature, restoreSleep),
+        notificationReplyReturn: () => this.notificationReplyReturn(),
         onFrame: (component, feature, _generation, width, height, pixels) => {
           if (feature === "ui.launcher") {
             if (shell.foregroundWindow()?.appId !== "launcher" || !this.display || this.glassesLocked) return;
@@ -2566,12 +2567,21 @@ class DashboardController {
     return true;
   }
 
+  private notificationReplyReturn(): () => void {
+    const wokeScreen = this.extensionSurfaces.get("ui.notifications")?.wokeScreen === true;
+    const previousWindow = shell.foregroundWindow()?.windowId;
+    return () => {
+      // A delayed external send must not interrupt a newer app or overlay.
+      if (wokeScreen && !shell.hasOverlay() && shell.foregroundWindow()?.windowId === previousWindow) shell.sleepAtAppRoot();
+    };
+  }
+
   private closeExtensionSurface(feature: string, restoreSleep = true): void {
     if (feature === "ui.launcher") { setTimeout(() => shell.getWindows().find(window => window.appId === "launcher")?.requestRender(), 0); return; }
     const state = this.extensionSurfaces.get(feature);
     if (!state) return;
     shell.closeExtensionOverlay(state.layer);
-    if (restoreSleep && state.wokeScreen && !state.interacted && !shell.hasOverlay()) shell.sleep();
+    if (restoreSleep && state.wokeScreen && !shell.hasOverlay()) shell.sleep();
   }
 
   private async handleAndroidNotificationPosted(notificationKey: string): Promise<void> {

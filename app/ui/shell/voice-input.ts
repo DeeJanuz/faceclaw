@@ -1,5 +1,5 @@
 import { extensionPlatform } from "../../apps/external/extension-platform";
-import { type GrayImage } from "../../graphics/image";
+import { GrayImage } from "../../graphics/image";
 import { voiceControlBridge, type VoiceTranscriptEvent } from "../../native/voice-control";
 import { refineDictation, type AnthropicStreamHandle } from "../../native/anthropic";
 import { anthropicApiKeySetting } from "../dashboard-settings";
@@ -28,6 +28,7 @@ export type VoiceSendTarget = {
   label: string;
   captureTitle?: string;
   capturePrompt?: string;
+  concealUnderlay?: boolean;
   onSend: (text: string) => void;
 };
 
@@ -68,6 +69,7 @@ export type VoiceInputLayerOptions = {
  * via endpoint detection on the decoded PCM. A click still ends it early.
  */
 export class VoiceInputLayer implements Layer {
+  get dimUnderneath(): false | number { return this.sendTargets[this.defaultTargetIndex]?.concealUnderlay ? 0 : false; }
   private phase: VoicePhase = "capturing";
   private status = "Starting microphone...";
   // The active utterance. displayText() is what the dialog shows and what
@@ -220,7 +222,9 @@ export class VoiceInputLayer implements Layer {
   }
 
   paint(_ctx: LayerContext, paintBelow: () => GrayImage): GrayImage {
-    const image = paintBelow();
+    const image = this.dimUnderneath === 0
+      ? new GrayImage(_ctx.stack.getBaseSize().width, _ctx.stack.getBaseSize().height, 1)
+      : paintBelow();
     const inMenu = this.phase === "menu";
     paintInputDialog(image, {
       title: this.sendTargets[this.defaultTargetIndex]?.captureTitle ?? "Dictation",

@@ -92,12 +92,13 @@ export class ExternalAppPlatform {
       close: () => { state.ready = false; state.frame = null; this.cancelOwnedWork(state); this.send(component, "close"); this.windows.delete(component); this.options.removeSurface(surfaceId); },
       hasAppMenu: () => state.menuAvailable === true,
       handleInput: (event, frameId) => {
+        if (state.visible) this.extensions.windowInput(component, event);
         if (event.type === "short-then-long-press") {
           if (!state.menuAvailable) { shell.openSystemMenu(id); return; }
           state.lastInput = Date.now(); this.send(component, "app-menu"); frameTimings.finishFrame(frameId, "external app menu dispatched"); return;
         }
         if (event.type === "system-menu-opened") return;
-        state.lastInput = Date.now(); if (state.visible) this.extensions.windowInput(component, event); this.send(component, "input", event); frameTimings.finishFrame(frameId, "external app input dispatched");
+        state.lastInput = Date.now(); this.send(component, "input", event); frameTimings.finishFrame(frameId, "external app input dispatched");
       },
       requestRender: () => this.send(component, "render"),
       relayout: () => { window.heightMode = this.heightMode(component); state.ready = false; this.cancelOwnedWork(state); state.frame = null; void this.options.configureSurface(surfaceId, state.visible, window.heightMode ?? "min").then(() => { if (this.windows.get(component) !== state) return; state.ready = true; this.send(component, "resize", appViewportSize(window.heightMode ?? "min")); }); },

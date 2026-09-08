@@ -14,7 +14,8 @@ export type ExtensionHooks = {
   uninstallApp?: (appId: string) => Promise<void> | void;
   hostState?: () => { weather?: unknown };
   showSurface?: (feature: string, component: string, target?: string) => boolean;
-  closeSurface?: (feature: string) => void;
+  closeSurface?: (feature: string, restoreSleep?: boolean) => void;
+  notificationReplyReturn?: () => (() => void);
   onFrame?: (component: string, feature: string, generation: number, width: number, height: number, pixels: Uint8Array) => void;
 };
 type Pending = { component: string; feature: string; generation: number; resolve: (data: any) => void; reject: (error: Error) => void; progress?: (data: any) => void };
@@ -120,7 +121,7 @@ export class ExtensionPlatform {
   windowInput(component: string, input: unknown): void {
     if (!this.controls(component, "ui.notifications") || this.isLocked() || !shell.isScreenOn() ||
         shell.foregroundWindow()?.windowId !== `apk:${component}` || !record(input)) return;
-    if (["click", "double-click", "pointer-click"].includes(String(input.type))) this.lastGesture.set("ui.notifications", Date.now());
+    if (["click", "double-click", "pointer-click", "long-press", "short-then-long-press", "back", "swipe-left"].includes(String(input.type))) this.lastGesture.set("ui.notifications", Date.now());
   }
   surfaceInput(feature: string, input: unknown): void {
     const selected = this.feature(feature); if (!selected || this.isLocked() || !shell.isScreenOn() || !record(input)) return;
@@ -152,14 +153,14 @@ export class ExtensionPlatform {
   }
   private notificationAppCatalog(): { packageName: string; name: string }[] {
     if (Date.now() - this.notificationAppsAt > 30000) {
-      this.notificationAppsAt = Date.now(); this.notificationApps = readNotificationApps().slice(0, 512).map(app => ({ packageName: app.packageName.slice(0, 256), name: app.name.slice(0, 100) }));
-      while (JSON.stringify(this.notificationApps).length > 20000) this.notificationApps.pop();
+      this.notificationAppsAt = Date.now(); this.notificationApps = readNotificationApps().slice(0, 4096).map(app => ({ packageName: app.packageName.slice(0, 255), name: app.name.slice(0, 100) }));
+      // Full catalogs travel in bounded fragments, never an alphabetic prefix.
     }
     return this.notificationApps;
   }
   ownHostState(component?: string): unknown {
     const canRead = component && !this.isLocked() && (this.controls(component, "ui.notifications") || this.native.isExtensionGranted(component, "notification-content"));
-    return { battery: shell.getBatteryLevels(), ...(this.hooks.hostState?.() ?? {}), screenOn: shell.isScreenOn(), ...(canRead ? { notificationApps: this.notificationAppCatalog() } : {}) };
+    return { battery: shell.getBatteryLevels(), ...(this.hooks.hostState?.() ?? {}), screenOn: shell.isScreenOn(), ...(canRead && JSON.stringify(this.notificationAppCatalog()).length <= 20000 ? { notificationApps: this.notificationAppCatalog() } : {}) };
   }
   openNotificationInbox(): boolean {
     const selected = this.feature("ui.notifications"); if (!selected || this.isLocked()) return false;
@@ -193,8 +194,8 @@ export class ExtensionPlatform {
     const selected = this.feature("ui.notifications"); if (!selected || this.isLocked()) return;
     const sources = readActiveNotifications(50, true), leased = this.uiNotifications.update(selected.component, selected.generation, sources);
     let notifications = leased.map(({ id, source }) => this.snapshot(source, id));
-    while (notifications.length && JSON.stringify(notifications).length > 1750000) notifications.pop();
-    const serialized = JSON.stringify(notifications);
+    while (notifications.length && JSON.stringify(notifications).length + JSON.stringify(this.notificationAppCatalog()).length > 2000000) notifications.pop();
+    const serialized = JSON.stringify({ notifications, notificationApps: this.notificationAppCatalog() });
     if (serialized !== this.lastNotificationSnapshot) {
       this.lastNotificationSnapshot = serialized;
       const snapshot = JSON.stringify({ notifications, notificationApps: this.notificationAppCatalog(), revision: ++this.notificationRevision }), snapshotId = newId(), size = 16000, total = Math.ceil(snapshot.length / size);
@@ -213,8 +214,8 @@ export class ExtensionPlatform {
     let state = this.ownNotifications.get(component);
     if (!state) { if (this.ownNotifications.size >= 8) return; state = { leases: new NotificationLeases<AndroidNotification>(newId), snapshot: "" }; this.ownNotifications.set(component, state); }
     const notifications = state.leases.update(component, this.generation, readActiveNotifications(50, true)).map(({ id, source }) => ({ ...this.snapshot(source, id), actions: [] }));
-    while (notifications.length && JSON.stringify(notifications).length > 1750000) notifications.pop();
-    const serialized = JSON.stringify(notifications); if (serialized === state.snapshot) return; state.snapshot = serialized;
+    while (notifications.length && JSON.stringify(notifications).length + JSON.stringify(this.notificationAppCatalog()).length > 2000000) notifications.pop();
+    const serialized = JSON.stringify({ notifications, notificationApps: this.notificationAppCatalog() }); if (serialized === state.snapshot) return; state.snapshot = serialized;
     const snapshot = JSON.stringify({ notifications, notificationApps: this.notificationAppCatalog(), generation: this.generation, revision: ++this.notificationRevision }), snapshotId = newId(), size = 16000, total = Math.ceil(snapshot.length / size);
     for (let index = 0; index < total; index++) this.native.send(component, "own-notification-snapshot-fragment", JSON.stringify({ snapshotId, generation: this.generation, index, total, json: snapshot.slice(index * size, (index + 1) * size) }));
   }
@@ -282,7 +283,7 @@ export class ExtensionPlatform {
       if (action === "notification-dismiss") { result(dismissNotification(source.key, source.postTime)); this.notificationsChanged(); return; }
       if (action === "notification-open") {
         if (source.key.startsWith("apk:")) result(invokeExternalNotification(source.key, 0, source.postTime));
-        else { this.hooks.closeSurface?.(feature); shell.openNotificationModal(source.key, false); result(true); }
+        else { this.hooks.closeSurface?.(feature, false); shell.openNotificationModal(source.key, false); result(true); }
         return;
       }
       const index = data.actionIndex;
@@ -297,11 +298,22 @@ export class ExtensionPlatform {
         let sent = false, unavailable = false;
         const reviewKey = `${component}\n${callId}`;
         if (this.reviews.size) { result(false, "Another review is active"); return; }
-        this.hooks.closeSurface?.(feature);
-        const cancel = shell.openReviewedVoiceInput({ id: "extension-notification", captureTitle: "Reply", capturePrompt: "Speak your reply...", label: `Send reply via ${source.appName}: ${source.title}`.slice(0, 200), onSend: text => {
+        const restoreVisit = this.hooks.notificationReplyReturn?.();
+        let completed = false;
+        const complete = (status: string) => {
+          if (completed) return; completed = true;
+          result(status === "sent" || status === "draft-saved", undefined, status);
+          if (status === "sent" && this.controls(component, feature, generation) && !this.isLocked()) {
+            // A reviewed send authorizes dismissal of only the bound version.
+            dismissNotification(source.key, source.postTime);
+            setTimeout(() => restoreVisit?.(), 0);
+          }
+        };
+        this.hooks.closeSurface?.(feature, false);
+        const cancel = shell.openReviewedVoiceInput({ id: "extension-notification", captureTitle: "Reply", concealUnderlay: true, capturePrompt: "Speak your reply...", label: `Send reply via ${source.appName}: ${source.title}`.slice(0, 200), onSend: text => {
           if (sent || !current()) return; sent = true; this.reviews.delete(reviewKey);
-          if (external) { if (!external.send(text, status => result(status === "sent" || status === "draft-saved", undefined, status))) result(false, "Reply outcome unknown", "unknown"); }
-          else { const accepted = replyToNotification(source.key, index, source.postTime, text); result(accepted, undefined, accepted ? "sent" : "unknown"); }
+          if (external) { if (!external.send(text, status => complete(status))) complete("unknown"); }
+          else { const accepted = replyToNotification(source.key, index, source.postTime, text); complete(accepted ? "sent" : "unknown"); }
         } }, current, () => { unavailable = true; this.reviews.delete(reviewKey); result(false, "Reply unavailable"); }, () => {
           this.reviews.delete(reviewKey);
           setTimeout(() => { if (!sent) result(false, "Reply cancelled", "rejected"); }, 0);

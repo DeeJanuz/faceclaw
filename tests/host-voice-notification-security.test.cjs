@@ -163,3 +163,18 @@ test('APK search cancellation cannot deliver a late query or a send target', asy
   await flush(); const layer = layers[0]; assert.ok(layer.started); assert.equal(layer.options.sendTargets, undefined);
   cancel(); layer.options.onSearch('Stale query'); assert.equal(searches, 0); assert.equal(layers.length, 0);
 });
+
+test('notification reply capture paints one opaque view without painting the reader underneath', () => {
+  let painted;
+  class Image { constructor(width, height, fill) { this.width = width; this.height = height; this.pixels = new Uint8Array(width * height).fill(fill); } }
+  const source = ts.createSourceFile('voice.ts', fs.readFileSync('app/ui/shell/voice-input.ts', 'utf8'), ts.ScriptTarget.Latest);
+  const imports = {}; for (const statement of source.statements) if (ts.isImportDeclaration(statement)) imports[statement.moduleSpecifier.text] = {};
+  imports['../../graphics/image'] = { GrayImage: Image };
+  imports['./input-dialog'] = { paintInputDialog: (image, content) => { painted = { image, content }; } };
+  const { VoiceInputLayer } = load('app/ui/shell/voice-input.ts', imports);
+  const layer = new VoiceInputLayer({ actions: {}, onClosed() {}, dismiss() {}, sendTargets: [{ id: 'reply', label: 'Send reply', captureTitle: 'Reply', concealUnderlay: true, onSend() {} }] });
+  layer.hintText = () => '';
+  layer.paint({ stack: { getBaseSize: () => ({ width: 640, height: 480 }) } }, () => assert.fail('Reader must not be painted under reply capture'));
+  assert.equal(layer.dimUnderneath, 0); assert.equal(painted.content.title, 'Reply'); assert.ok(painted.image.pixels.every(value => value === 1));
+  const ordinary = new VoiceInputLayer({ actions: {}, onClosed() {}, dismiss() {}, sendTargets: [] }); assert.equal(ordinary.dimUnderneath, false);
+});

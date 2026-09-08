@@ -12,7 +12,7 @@ export function readNotificationApps(): NotificationApp[] {
   try {
     const manager = context.getPackageManager();
     const installed = manager.getInstalledApplications(0);
-    for (let index = 0; index < installed.size() && index < 2048; index++) {
+    for (let index = 0; index < installed.size(); index++) {
       const app = installed.get(index);
       const packageName = String(app.packageName);
       if (!packageName || packageName === ownPackage) continue;

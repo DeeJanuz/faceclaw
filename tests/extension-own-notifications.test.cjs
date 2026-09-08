@@ -1,6 +1,7 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),ts=require('typescript');
 const {NotificationLeases}=require('../.test-build/app/apps/external/extension-policy.js');
 function harness(registry = {}) {
+ let catalog=[{packageName:'app.native',name:'Native'}];
  let allowed=true,locked=false,screenOn=true,foreground='apk:owner',seq=0;
  const module={exports:{}},sent=[],dismissed=[],opened=[];
  let sources=[{key:'native-secret',postTime:5,packageName:'app.native',appName:'Native',title:'Native note',actions:[]},{key:'apk:secret',postTime:6,component:'private/component',target:'private-target',replyToken:'SECRET',packageName:'app.external',appName:'External',title:'External note',actions:[{index:0,title:'Open',enabled:true}]}];
@@ -9,13 +10,13 @@ function harness(registry = {}) {
  '../../ui/shell/shell':{shell:{isScreenOn:()=>screenOn,foregroundWindow:()=>({windowId:foreground}),getWindows:()=>[],openNotificationModal:key=>opened.push(key),getBatteryLevels:()=>({})}},
  '../../native/notification-icons':{readActiveNotifications:()=>sources,dismissNotification:(key)=>{dismissed.push(key);return key!=='apk:secret';}},
  '../../native/external-notifications':{invokeExternalNotification:key=>{opened.push(key);return true;}},
- '../../native/notification-apps':{readNotificationApps:()=>[{packageName:'app.native',name:'Native'}]},
+ '../../native/notification-apps':{readNotificationApps:()=>catalog},
  './extension-policy':require('../.test-build/app/apps/external/extension-policy.js'),
  };
  vm.runInNewContext(ts.transpileModule(fs.readFileSync('app/apps/external/extension-platform.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText,{module,exports:module.exports,require:name=>imports[name]||{},java:{util:{UUID:{randomUUID:()=>({toString:()=>`id-${++seq}`})}}}});
  const platform=Object.create(module.exports.ExtensionPlatform.prototype);
  Object.assign(platform,{generation:3,ownNotifications:new Map(),conversationIds:new Map(),notificationRevision:0,notificationAppsAt:0,notificationApps:[],isLocked:()=>locked,native:{isExtensionGranted:()=>allowed,send:(owner,type,json)=>sent.push({owner,type,data:JSON.parse(json)})}});
- return {platform,sent,dismissed,opened,allowed:v=>allowed=v,locked:v=>locked=v,screen:v=>screenOn=v,foreground:v=>foreground=v,sources:v=>sources=v,snapshot:()=>JSON.parse(sent.map(x=>x.data.json).join(''))};
+ return {catalog:v=>{catalog=v;platform.notificationAppsAt=0;},platform,sent,dismissed,opened,allowed:v=>allowed=v,locked:v=>locked=v,screen:v=>screenOn=v,foreground:v=>foreground=v,sources:v=>sources=v,snapshot:()=>JSON.parse(sent.map(x=>x.data.json).join(''))};
 }
 test('own inbox needs explicit content grant and sanitizes foreign capabilities',()=>{
  for(const deny of [h=>h.allowed(false),h=>h.locked(true),h=>h.screen(false)]) {const h=harness();deny(h);h.platform.publishOwnNotifications('owner');assert.equal(h.sent.length,0);}
@@ -69,4 +70,17 @@ test('only host input delivered to the foreground notification owner authorizes 
  }
  h.platform.windowInput('other',{type:'click'});h.platform.windowInput('owner',{type:'scroll-down'});assert.equal(h.platform.lastGesture.size,0);
  h.platform.windowInput('owner',{type:'click'});assert.ok(h.platform.lastGesture.get('ui.notifications')>0);
+});
+
+test('large app catalogs retain Signal and publish catalog-only changes in bounded fragments',()=>{
+ const h=harness();h.platform.hooks={};h.platform.controls=()=>true;
+ const apps=Array.from({length:900},(_,i)=>({packageName:`app.${i}`,name:`Application ${i}`}));
+ apps.push({packageName:'org.thoughtcrime.securesms',name:'Signal'});h.catalog(apps);
+ h.platform.publishOwnNotifications('owner');
+ assert.equal(h.snapshot().notificationApps.length,901);
+ assert.equal(h.snapshot().notificationApps.at(-1).name,'Signal');
+ assert.ok(h.sent.length>1);assert.ok(h.sent.every(x=>x.data.json.length<=16000&&x.data.total<=128));
+ assert.equal(h.platform.ownHostState('owner').notificationApps,undefined);
+ h.sent.length=0;h.catalog([...apps,{packageName:'app.new',name:'Z new'}]);
+ h.platform.publishOwnNotifications('owner');assert.equal(h.snapshot().notificationApps.length,902);
 });

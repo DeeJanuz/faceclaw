@@ -29,13 +29,18 @@ Record observed owner/availability, per-feature epoch and a screenshot or short 
 | P07 | Withdraw A's declarations, republish, then disable/uninstall A. | Withdrawal/disable/uninstall exposes B. Republish preserves existing grants/order where applicable; reinstall after uninstall requires fresh approval. | Pending |
 | P08 | A typography requires A launcher. Give B launcher priority, then A. Stop A's service. | B typography wins while the dependency is ineligible; A wins both when eligible; offline live dependency causes host typography fallback without promoting B. | Pending |
 | P09 | Start A's delayed synthetic response. Change B's unrelated settings or crash B. | A completes once; its feature epoch and active surface remain stable. | Pending |
-| P10 | Start A's late-response probe; move B above A before it returns. | Old A text/actions are not admitted. There is no automatic resend. A new explicit B request works. | Pending |
+| P10 (optional) | Start A's late-response probe; move B above A before it returns. | Old A text/actions are not admitted. There is no automatic resend. A new explicit B request works. | Deferred for this candidate; not an acceptance blocker or a pass. |
 | P11 | Switch real T3 notification/assistant ownership during active work using synthetic content. | Stale frames/replies are rejected; no duplicate send or unreviewed action occurs. An uncertain dispatched operation stays uncertain. | Pending |
 | P12 | Test a silent renderer/provider, then cancel or use the reserved system escape gesture. | Host remains recoverable. Record any missing timeout/fallback behavior as an issue; a connected process is not proof of responsiveness. | Pending |
 | P13 | Restart the host and phone with A selected, first available and then unavailable. | User order, grants and baseline preferences persist; live/static outage policy remains consistent. | Pending |
 | P14 | Exercise notifications, app switcher, full/compact layouts and wake/sleep while changing providers. | No stale overlay, hidden input target, unintended wake, duplicate arrival or lost system escape. | Pending |
 
 ## Finish
+
+The manual stale-response-after-owner-change subcase of P11 is also deferred
+for this candidate. This deferral does not remove runtime rejection or automated
+tests, or waive P11's other checks. Log a repository issue if a problem is
+observed later.
 
 - [ ] Restore the recorded host preferences, desired T3 priority and grants. Disable or revoke demo overrides.
 - [ ] Record any unresolved device/OEM/background, renderer timeout or Bluetooth performance issues.

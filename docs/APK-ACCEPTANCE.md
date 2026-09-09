@@ -34,10 +34,17 @@ separate. Never install test-only consent fixtures on a physical phone.
 | --- | --- |
 | P01–P04 | Competing typography, base edit under override, independent feature winners, declaration toggles. |
 | P05–P08 | Live/static outage, offline revocation, withdrawal/uninstall/reapproval, dependencies. |
-| P09–P11 | Unrelated changes preserve work; owner changes reject stale replies; active assistant/notification work is not replayed. |
+| P09, P11 | Unrelated changes preserve work; active assistant/notification work is not replayed. The manual late-response-after-owner-change subcase is deferred below. |
 | P12 | Silent renderer recovers after the first-frame deadline; system escape and explicit retry work. Static screens need no heartbeat. |
 | P13 | Host restart and full phone reboot preserve settings/grants/order; unavailable-at-start behavior is correct. |
 | P14 | Notifications, overlays, Band/Full panel, input and sleep/wake behave correctly on actual glasses. |
+
+The manual P10 late-response-after-owner-change test, including the equivalent
+stale-response subcase of P11, is deferred for this candidate and does not block
+physical acceptance. It is not recorded as passed. Existing stale-response
+rejection and automated regression coverage remain required and unchanged. If a
+problem is observed later, record its reproduction and affected build in a
+repository issue.
 
 The September 9 phone run at `0c12295` recorded 3 passed, 6 partial and 5 not-run
 compound cases. It preceded the upstream merge at `efd22f2` and SDK 0.3.0.

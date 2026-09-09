@@ -36,7 +36,7 @@ function harness() {
  shell.windows = [window]; shell.focus = 'window';
  shell.config = { requestShellRender() {}, onScreenStateChanged: value => power.push(value) };
  const send = (type, source = 'ring') => shell.receiveInput({ type, source, timestampMs: Date.now() });
- return { shell, window, send, delivered, power, visibility, disable() { enabled = false; } };
+ return { shell, window, send, delivered, power, visibility, policy, disable() { enabled = false; } };
 }
 test('APK double tap powers off before app back or switcher routing, then wakes the app', async () => {
  for (const source of ['ring', 'watch', 'left-arm', 'right-arm']) {
@@ -104,4 +104,55 @@ test('AI Chat hold-to-talk yields to selected APK navigation and restores host g
  await h.send('long-press'); assert.equal(h.delivered[0].type, 'long-press'); assert.equal(h.shell.escapeMenuTimer, null);
  let escapes = 0; h.shell.openEscapeMenu = () => escapes++;
  await h.send('short-then-long-press'); assert.equal(escapes, 1); assert.equal(h.delivered.length, 1);
+});
+
+// The controller pre-wakes the real shell before dispatching firmware wake.
+function wakeController(h) {
+ const source = ts.createSourceFile('controller.ts', fs.readFileSync('app/g2/dashboard-controller.ts', 'utf8'), ts.ScriptTarget.Latest, true);
+ const controller = source.statements.find(n => ts.isClassDeclaration(n) && n.name.text === 'DashboardController');
+ const method = controller.members.find(n => n.name?.getText(source) === 'handleInputEvent');
+ assert.ok(method);
+ const context = {
+  shell: h.shell, navigationPolicy: h.policy,
+  rawInputEventToInputEvent: event => ({ type: event.kind, source: 'ring' }),
+  eventLabel: () => '', wakeWordActionSetting: { get: () => 'off' },
+  EventSourceType: { TOUCH_EVENT_FROM_RING: 1, TOUCH_EVENT_FROM_WATCH: 2 },
+  frameTimings: { startFrame: () => 1, logFrame() {}, annotateFrame() {}, spanStart() {}, spanEnd() {}, finishFrame() {}, spanAsync: (_id, _name, fn) => fn() },
+ };
+ vm.createContext(context);
+ vm.runInContext(ts.transpileModule(`class Harness { ${method.getText(source)} }; globalThis.Harness = Harness;`, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText, context);
+ h.shell.describeInputTarget = () => '';
+ const instance = new context.Harness();
+ Object.assign(instance, { glassesLocked: false, ensureEvenHubSessionActive: async () => true, requestShellRender() {}, appendLog() {} });
+ return instance;
+}
+test('firmware wake restores APK focus and next gesture without phone activity', async () => {
+ const h = harness(), controller = wakeController(h);
+ for (let cycle = 0; cycle < 2; cycle++) {
+  h.shell.sleep();
+  await controller.handleInputEvent({ kind: 'display-wake', frameId: 1 });
+  assert.equal(h.shell.isScreenOn(), true);
+  assert.equal(h.shell.getFocus(), 'window');
+  await h.send('click');
+  assert.equal(h.delivered.at(-1).type, 'click');
+ }
+ assert.deepEqual(h.visibility, [false, true, false, true]);
+});
+test('firmware wake retains default focus and duplicate wake does not steal focus', async () => {
+ const h = harness(), controller = wakeController(h);
+ h.disable(); h.shell.sleep();
+ await controller.handleInputEvent({ kind: 'display-wake', frameId: 1 });
+ assert.equal(h.shell.getFocus(), 'sidebar');
+ h.shell.focus = 'window';
+ await controller.handleInputEvent({ kind: 'display-wake', frameId: 1 });
+ assert.equal(h.shell.getFocus(), 'window');
+ assert.deepEqual(h.visibility, [false, true]);
+});
+test('locked firmware wake keeps host focus and blocks APK input', async () => {
+ const h = harness(), controller = wakeController(h);
+ controller.glassesLocked = true; h.shell.sleep();
+ await controller.handleInputEvent({ kind: 'display-wake', frameId: 1 });
+ assert.equal(h.shell.getFocus(), 'sidebar');
+ await controller.handleInputEvent({ kind: 'click', frameId: 1 });
+ assert.equal(h.delivered.length, 0);
 });

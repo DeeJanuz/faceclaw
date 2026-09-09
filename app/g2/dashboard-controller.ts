@@ -2135,7 +2135,9 @@ class DashboardController {
       let shellPreWoke = false;
       if (wakewordShouldWake || displayShouldWake) {
         if (!shell.isScreenOn()) {
-          shellPreWoke = shell.wake("sidebar");
+          // Match the shell's ordinary wake path. Once pre-woken, its input
+          // handler will not apply the APK's requested wake focus again.
+          shellPreWoke = shell.wake(displayShouldWake ? navigationPolicy().wakeFocus : "sidebar");
         }
         if (shellPreWoke || this.evenHubSessionSuspended || this.evenHubResumePromise) {
           const ready = await frameTimings.spanAsync(frameId, "wake-barrier", () =>

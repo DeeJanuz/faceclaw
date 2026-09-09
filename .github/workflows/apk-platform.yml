@@ -3,7 +3,7 @@ name: APK platform audit
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, fix/apk-platform-readiness]
   workflow_dispatch:
 
 permissions:

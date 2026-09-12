@@ -1,3 +1,5 @@
+import { HostMessaging } from "../../assistant/messaging-runtime";
+import { messagingTools, type MessagingScope } from "../../assistant/messaging";
 import { shell } from "../../ui/shell/shell";
 import { toolRegistry, type ToolResult } from "../../assistant/tool-registry";
 import { readActiveNotifications, onAndroidNotificationPosted, onAndroidNotificationsChanged, onAndroidNotificationRemoved, dismissNotification, invokeNotificationActionAtVersion, replyToNotification, type AndroidNotification } from "../../native/notification-icons";
@@ -18,7 +20,7 @@ export type ExtensionHooks = {
   notificationReplyReturn?: () => (() => void);
   onFrame?: (component: string, feature: string, generation: number, width: number, height: number, pixels: Uint8Array) => void;
 };
-type Pending = { component: string; feature: string; generation: number; resolve: (data: any) => void; reject: (error: Error) => void; progress?: (data: any) => void };
+type Pending = { component: string; feature: string; generation: number; own?: boolean; resolve: (data: any) => void; reject: (error: Error) => void; progress?: (data: any) => void };
 export type ProviderRequest = { requestId: string; promise: Promise<any>; cancel: () => void; event: (data: unknown) => boolean };
 let active: ExtensionPlatform | null = null;
 export function extensionPlatform(): ExtensionPlatform | null { return active; }
@@ -26,6 +28,7 @@ const newId = (): string => String(java.util.UUID.randomUUID().toString());
 
 /** APK code stays in its UID. This adapter alone resolves sensitive host actions. */
 export class ExtensionPlatform {
+  private messaging?: HostMessaging;
   private generation = 0;
   private features: ExtensionFeature[] = [];
   private readonly reviews = new Map<string, { cancel: () => void; current: () => boolean }>();
@@ -44,11 +47,16 @@ export class ExtensionPlatform {
   private lastGesture = new Map<string, number>();
   constructor(private readonly native: any, private readonly hooks: ExtensionHooks, private readonly isLocked: () => boolean, private readonly isProtected: () => boolean = () => false) {
     active = this; initializeSharedHostStyle(); this.refresh();
+    if (typeof global !== 'undefined' && global.isAndroid) {
+      try { this.messaging = new HostMessaging(this.native, owner => !this.isLocked() && !this.isProtected() && this.controls(owner, "device-tools")); }
+      catch { /* Fail closed if encrypted messaging storage cannot be opened. */ }
+    }
+    this.publishTools();
     onAndroidNotificationPosted(key => this.notificationsChanged(key));
     onAndroidNotificationRemoved(() => this.notificationsChanged());
     onAndroidNotificationsChanged(() => this.notificationsChanged());
     toolRegistry.onToolsChanged(() => this.publishTools());
-    setInterval(() => { this.publishState(); this.notificationsChanged(); }, 1000);
+    setInterval(() => { this.publishState(); this.notificationsChanged(); try { this.messaging?.tick(); } catch { /* Storage failure disables messaging. */ } }, 1000);
   }
   feature(feature: string): ExtensionFeature | undefined { return this.features.find(item => item.feature === feature && item.component && item.available); }
   controls(component: string, feature: string, generation?: number): boolean {
@@ -60,17 +68,39 @@ export class ExtensionPlatform {
     let snapshot: any;
     try { snapshot = JSON.parse(String(this.native.extensionsJson())); } catch { snapshot = {}; }
     const generation = Number(snapshot.generation) || 0;
+    const next: ExtensionFeature[] = Array.isArray(snapshot.features) ? snapshot.features : [];
+    const changed = new Set(this.features.filter(previous => {
+      const current = next.find(item => item.feature === previous.feature);
+      return !current || current.generation !== previous.generation || current.component !== previous.component || current.available !== previous.available;
+    }).map(item => item.feature));
+    for (const [id, request] of this.pending) {
+      const current = next.find(item => item.feature === request.feature);
+      if (!current || current.generation !== request.generation || (request.own
+        ? !this.native.isExtensionGranted(request.component, request.feature)
+        : !current.available || current.component !== request.component)) {
+        this.pending.delete(id); request.reject(new Error("Extension unavailable; outcome may be unknown"));
+      }
+    }
+    if (changed.has("ui.notifications")) {
+      for (const review of this.reviews.values()) review.cancel(); this.reviews.clear();
+      this.uiNotifications.clear(); this.lastNotificationSnapshot = "";
+    }
+    if (changed.has("device-tools")) { this.toolNotifications.clear(); this.messaging?.invalidate(); }
+    if (changed.has("ui.app-menu")) this.closeMenu();
+    for (const feature of changed) {
+      this.lastGesture.delete(feature);
+      if (["ui.launcher", "ui.app-menu", "ui.notifications"].includes(feature)) this.hooks.closeSurface?.(feature);
+    }
     if (generation !== this.generation) {
       this.generation = generation;
-      for (const review of this.reviews.values()) review.cancel(); this.reviews.clear();
-      for (const request of this.pending.values()) request.reject(new Error("Extension unavailable; outcome may be unknown"));
-      this.pending.clear(); this.closeMenu(); this.conversationIds.clear(); this.uiNotifications.clear(); this.toolNotifications.clear(); this.ownNotifications.clear(); this.lastGesture.clear(); this.lastState = ""; this.lastNotificationSnapshot = "";
-      for (const feature of ["ui.launcher", "ui.app-menu", "ui.notifications"]) this.hooks.closeSurface?.(feature);
+      // Own-window notification snapshots still use the snapshot revision, not a winning feature epoch.
+      this.ownNotifications.clear(); this.lastState = "";
     }
-    this.features = Array.isArray(snapshot.features) ? snapshot.features : [];
+    this.features = next;
     this.publishState(); this.publishTools(); this.notificationsChanged();
   }
   onNativeEvent(component: string, type: string, data: any): boolean {
+    if (this.messaging?.event(component, type, data)) return true;
     if (type === "extensions-changed") { this.refresh(); return true; }
     if (type !== "extension-event") return false;
     if (!record(data) || typeof data.feature !== "string" || typeof data.generation !== "number") return true;
@@ -89,10 +119,10 @@ export class ExtensionPlatform {
   provider(feature: string, data: Record<string, unknown>, progress?: (data: any) => void, ownComponent?: string): ProviderRequest | null {
     const selected = this.feature(feature), component = ownComponent ?? selected?.component;
     if (!component || (ownComponent ? feature !== "transcription" || !this.native.isExtensionGranted(component, feature) : !selected)) return null;
-    const generation = this.generation, requestId = newId();
+    const generation = this.features.find(item => item.feature === feature)?.generation ?? this.generation, requestId = newId();
     let resolve!: (data: any) => void, reject!: (error: Error) => void;
     const promise = new Promise<any>((yes, no) => { resolve = yes; reject = no; });
-    const pending = { component, feature, generation, resolve, reject, progress }; this.pending.set(requestId, pending);
+    const pending = { component, feature, generation, own: !!ownComponent, resolve, reject, progress }; this.pending.set(requestId, pending);
     const send = (type: string, value: unknown) => Boolean(ownComponent
       ? this.native.sendAppProvider(component, feature, type, JSON.stringify(value))
       : this.native.sendExtension(component, feature, type, JSON.stringify(value)));
@@ -143,6 +173,7 @@ export class ExtensionPlatform {
     this.hooks.onFrame?.(component, feature, generation, width, height, pixels);
   }
   lockChanged(): void {
+    this.messaging?.invalidate();
     if (this.isLocked()) {
       for (const review of this.reviews.values()) review.cancel(); this.reviews.clear();
       for (const feature of ["ui.launcher", "ui.app-menu", "ui.notifications"]) { this.setSurfaceVisibility(feature, false, false); this.hooks.closeSurface?.(feature); }
@@ -247,19 +278,31 @@ export class ExtensionPlatform {
     const outcomes = resolved.map(({ item, source }) => { let ok = false; try { ok = dismissNotification(source.key, source.postTime); } catch { /* Never retry a possibly dispatched dismiss. */ } return { ...item, ok }; });
     return { ok: outcomes.every(item => item.ok), outcomes };
   }
+  revokeMessagingHistory(): void {
+    this.messaging?.broker.revokeHistory(); shell.showAlert("Assistant history access revoked");
+  }
+  private messagingIdentity(component: string, pairing: unknown): string {
+    if (typeof pairing !== "string" || !/^[a-f0-9]{64}$/.test(pairing)) return "";
+    const pin = String(this.native.messagingIdentity(component));
+    return /^[a-f0-9]{64}$/.test(pin) ? `${pin}:${pairing}` : "";
+  }
   private publishTools(): void {
     const selected = this.feature("device-tools"); if (!selected) return;
-    const custom = ["list", "reply", "action", "dismiss"].map(kind => ({ name: `host.notifications.${kind}`, description: `${kind} current Android notifications under this app's device-tool grant. Never retry an uncertain action.`, inputSchema: { type: "object", properties: { key: { type: "string" }, postTime: { type: "integer" }, actionIndex: { type: "integer" }, text: { type: "string" } }, additionalProperties: false } }));
-    const tools = [...toolRegistry.listTools().map(({ name, description, inputSchema }) => ({ name, description, inputSchema })), ...custom];
+    const custom = ["list", "reply", "dismiss"].map(kind => ({ name: `host.notifications.${kind}`, description: `${kind} current Android notifications under this app's device-tool grant. Never retry an uncertain action.`, inputSchema: { type: "object", properties: { key: { type: "string" }, postTime: { type: "integer" }, actionIndex: { type: "integer" }, text: { type: "string" } }, additionalProperties: false } }));
+    const tools = [...toolRegistry.listTools().map(({ name, description, inputSchema }) => ({ name, description, inputSchema })), ...custom, ...(this.messaging ? messagingTools : [])];
     this.event(selected.component, "device-tools", { event: "tool-catalog", tools });
   }
   private async action(component: string, feature: string, generation: number, action: string, data: Record<string, unknown>): Promise<void> {
     const callId = boundedToken(data.callId) ? data.callId : "";
     const result = (ok: boolean, error?: string, status?: string) => { if (this.controls(component, feature, generation)) this.event(component, feature, { event: "action-result", callId, ok, ...(error ? { error } : {}), ...(status ? { status } : {}) }); };
     if (!callId || this.isLocked()) { result(false, "Action unavailable"); return; }
+    if (feature === "device-tools" && action === "messaging-session") {
+      const scope = { owner: component, project: String(data.projectId ?? ""), identity: this.messagingIdentity(component, data.pairingFingerprint), session: String(data.bridgeSession ?? "") };
+      result(this.messaging?.session(scope, data.active === true) ?? false); return;
+    }
     if (feature === "device-tools" && action === "tool-call") {
       if (!this.calls.admit(component, data)) { result(false, "Stale or duplicate tool call"); return; }
-      const output = await this.tool(component, generation, data.name, data.arguments);
+      const output = await this.tool(component, generation, data.name, data.arguments, { owner: component, project: String(data.projectId ?? ""), identity: this.messagingIdentity(component, data.pairingFingerprint), session: String(data.bridgeSession ?? "") });
       if (this.controls(component, feature, generation)) this.event(component, feature, { event: "tool-result", callId, result: output }); return;
     }
     if (feature === "ui.notifications" && action === "notification-cancel-review") {
@@ -343,13 +386,21 @@ export class ExtensionPlatform {
     if (action === "show-app-menu" && window) { shell.openSystemMenu(window.windowId); result(true); return; }
     result(false, "Action target unavailable");
   }
-  private async tool(component: string, generation: number, name: string, args: Record<string, unknown>): Promise<ToolResult> {
+  private async tool(component: string, generation: number, name: string, args: Record<string, unknown>, scope?: MessagingScope): Promise<ToolResult> {
     if (!this.controls(component, "device-tools", generation) || this.isLocked()) return { ok: false, error: "Device tools unavailable" };
+    if (name.startsWith("messaging.")) {
+      if (!scope || !this.messaging) return { ok: false, error: "Update and connect T3 to use messaging" };
+      try { return { ok: true, content: JSON.stringify(await this.messaging.broker.call(scope, name, args)) }; }
+      catch (error) { return { ok: false, error: error instanceof Error ? error.message : "Messaging unavailable" }; }
+    }
+    if (name === "notifications.list") name = "host.notifications.list";
     if (!name.startsWith("host.notifications.")) return toolRegistry.callTool(name, args, { proactive: false });
     const sources = readActiveNotifications(50, false); // APK message content is never sent to generic assistant tools.
     if (name === "host.notifications.list") {
       const leased = this.toolNotifications.update(component, generation, sources);
-      const content = JSON.stringify(leased.map(({ id, source }) => this.snapshot(source, id)));
+      // Generic notification access must not bypass per-conversation history consent.
+      const content = JSON.stringify(leased.map(({ id, source }) => ({ key: id, postTime: source.postTime, appName: source.appName, contentRequiresConversationPermission: true,
+        actions: source.actions.filter(action => action.enabled && action.acceptsText).map(action => ({ index: action.index, acceptsText: true })) })));
       return content.length <= 28000 ? { ok: true, content } : { ok: false, error: "Notification snapshot exceeds tool response limit" };
     }
     const source = this.toolNotifications.resolve(component, generation, args.key, args.postTime, sources, true);
@@ -357,8 +408,12 @@ export class ExtensionPlatform {
     let ok = false;
     if (name === "host.notifications.dismiss") ok = dismissNotification(source.key, source.postTime);
     else if (typeof args.actionIndex === "number" && Number.isSafeInteger(args.actionIndex)) {
-      if (name === "host.notifications.action") ok = invokeNotificationActionAtVersion(source.key, args.actionIndex, source.postTime);
-      else if (name === "host.notifications.reply" && typeof args.text === "string" && args.text.trim() && args.text.length <= 8000) ok = replyToNotification(source.key, args.actionIndex, source.postTime, args.text);
+      if (name === "host.notifications.action") return { ok: false, error: "Agent notification actions require a reviewed messaging reply" };
+      if (name === "host.notifications.reply" && typeof args.text === "string" && args.text.trim() && args.text.length <= 8000) {
+        if (!scope || !this.messaging) return { ok: false, error: "Update and connect T3 for reviewed replies" };
+        try { return { ok: true, content: JSON.stringify(await this.messaging.reviewNotification(scope, source, args.actionIndex, args.text)) }; }
+        catch { return { ok: false, error: "Reply review unavailable; nothing confirmed" }; }
+      }
     }
     return ok ? { ok: true, content: "Completed." } : { ok: false, error: "Notification action stale or outcome unknown; do not retry" };
   }

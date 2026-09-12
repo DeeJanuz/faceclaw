@@ -63,4 +63,3 @@ test('caption names, transcript words and translations share a bounded width', (
   for (const row of rows) assert.ok(mono.measureText(row.prefix || '') + row.indent + mono.measureText(row.text) <= 30);
   assert.equal(rows.filter(row => row.value === 230).map(row => row.text).join(''), 'x'.repeat(90));
 });
-

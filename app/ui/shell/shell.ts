@@ -1,3 +1,5 @@
+import { MessagingReviewLayer } from "./messaging-review";
+import type { MessagingReview } from "../../assistant/messaging";
 import { extensionPlatform } from "../../apps/external/extension-platform";
 import { ExtensionLayer } from "./extension-layer";
 import { voiceControlBridge } from "../../native/voice-control";
@@ -1180,6 +1182,21 @@ class Shell {
       this.activeVoiceLayer = layer; voiceActivity.setActive(true); this.stack.push(layer); layer.startCapture(); this.config.requestShellRender();
     })();
     return cancel;
+  }
+
+  /** Host-owned, paginated exact-text confirmation; never starts a microphone or auto-sends. */
+  startMessagingReview(review: MessagingReview): () => void {
+    let layer: MessagingReviewLayer | null = null;
+    let cancelled = false;
+    const windowId = this.foregroundWindow()?.windowId;
+    const current = review.current;
+    const scoped = { ...review, current: () => !cancelled && current() && this.screenOn && this.foregroundWindow()?.windowId === windowId };
+    void Promise.resolve().then(() => {
+      if (!scoped.current() || this.activeVoiceLayer || this.activeKeyboardLayer || !this.stack.isAtBase()) { review.cancel(); return; }
+      layer = new MessagingReviewLayer(scoped, () => { if (layer) this.stack.removeLayer(layer); });
+      this.stack.push(layer); this.noteUserActivity(); this.config.requestShellRender();
+    });
+    return () => { cancelled = true; if (layer) this.stack.removeLayer(layer); else review.cancel(); };
   }
 
   /** A capability-scoped app review. It has one explicit target and never auto-sends. */

@@ -1,3 +1,4 @@
+import { extensionPlatform } from "../../apps/external/extension-platform";
 import { installedAppSettingsItems, behaviorSettingsItems } from "./app-settings-menus";
 import { knownFolders } from "@nativescript/core";
 import { getDefaultSmallFont } from "../../graphics/ui-fonts";
@@ -86,6 +87,10 @@ export function createSettingsPanelLayer(): SettingsPanelLayer {
 function settingsSections(): SettingsSection[] {
   return [
     { label: "Installed apps", get items() { return installedAppSettingsItems(); } },
+    { label: "Messaging", items: [
+      { label: "Revoke assistant history access", onSelect: () => extensionPlatform()?.revokeMessagingHistory() },
+      { label: "SMS setup", onSelect: () => shell.showAlert("On the phone, open Manage Android applications, then SMS setup") },
+    ] },
     { label: "Priorities", get items() { return behaviorSettingsItems(); } },
     {
       label: "Display",

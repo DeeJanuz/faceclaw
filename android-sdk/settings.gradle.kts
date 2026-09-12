@@ -3,3 +3,4 @@ dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_P
 rootProject.name = "faceclaw-android-sdk"
 include(":sdk")
 include(":fixture", ":host-tests")
+include(":priority-demo")

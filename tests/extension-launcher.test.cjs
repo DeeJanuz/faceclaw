@@ -41,3 +41,10 @@ test('mirror touches use the visible provider instead of hidden host grid cells'
   assert.equal(h.window.hitTest(42, 60), true);
   assert.equal(h.base.at(-1), 'hitTest');
 });
+
+test('unrelated effective settings updates do not reopen the same launcher surface', () => {
+  const h=harness();
+  h.setWinner({component:'example/Service',generation:4});
+  h.setWinner({component:'example/Service',generation:4});
+  assert.equal(h.calls.filter(call=>call[0]==='open').length,1);
+});

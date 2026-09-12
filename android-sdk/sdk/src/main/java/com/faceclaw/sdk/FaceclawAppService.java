@@ -73,6 +73,17 @@ public abstract class FaceclawAppService extends Service {
    } else { b.putByteArray("pixels",pixels); host.send(message); }
   } catch(Exception ignored) { disconnect(); }
  }
+ private volatile boolean messagingAllowed;
+ private final java.util.Map<String,Long> messagingRequests=new java.util.concurrent.ConcurrentHashMap<>();
+ public final boolean messagingRequestCurrent(String requestId) {
+  Long expiry=messagingRequests.get(requestId);
+  return messagingAllowed&&expiry!=null&&expiry>System.currentTimeMillis();
+ }
+ public final boolean reportMessagingResult(String requestId,JSONObject result) {
+  if(!messagingRequestCurrent(requestId)||result==null||result.toString().length()>24000) return false;
+  messagingRequests.remove(requestId);
+  return send("messaging-result",Protocol.object("requestId",requestId,"result",result));
+ }
  private boolean notificationReplyAllowed;
  private final NotificationReplies notificationReplies=new NotificationReplies();
  @Override public void onCreate() { super.onCreate(); approvals=ApprovalStore.open(this,"faceclaw-host"); active=this; }
@@ -122,7 +133,14 @@ public abstract class FaceclawAppService extends Service {
    if(m.what!=Protocol.EVENT) return;
    String type=b.getString("type",""); JSONObject data=Protocol.json(b);
    if(type.equals("shared-style")) { sharedStyle=ExtensionContract.configuration("ui.typography",data); Ui.applySharedStyle(this,sharedStyle); }
-   if(type.equals("extensions")) { extensionSnapshot=new JSONObject(data.toString()); extensionSurfaces.clear(); }
+   if(type.equals("extensions")) {
+    JSONObject next=new JSONObject(data.toString());
+    java.util.Map<String,ExtensionSurface> closed=new java.util.HashMap<>();
+    for(java.util.Map.Entry<String,ExtensionSurface> entry:extensionSurfaces.entrySet())if(!sameFeature(extensionSnapshot,next,entry.getKey()))closed.put(entry.getKey(),entry.getValue());
+    for(String feature:closed.keySet())extensionSurfaces.remove(feature);
+    extensionSnapshot=next;
+    for(java.util.Map.Entry<String,ExtensionSurface> entry:closed.entrySet())onHostEvent("extension-surface",Protocol.object("feature",entry.getKey(),"type","close","generation",entry.getValue().generation));
+   }
    if(type.equals("extension-surface")) extensionSurface(data);
    if(type.equals("revoke")) { disconnect(); return; }
    if(type.equals("open") || type.equals("resize")) {
@@ -132,6 +150,7 @@ public abstract class FaceclawAppService extends Service {
    if(type.equals("close")) { width=height=0; visible=false; latestPixels=null; inFlight=0; }
    if(type.equals("visibility")) { visible=data.optBoolean("visible"); screenOn=data.optBoolean("screenOn"); if(!visible||!screenOn) latestPixels=null; }
    if(type.equals("capabilities")) {
+    messagingAllowed=Boolean.TRUE.equals(data.opt("messaging")); if(!messagingAllowed) messagingRequests.clear();
     notificationReplyAllowed=Boolean.TRUE.equals(data.opt("notifications"))&&Boolean.TRUE.equals(data.opt("dictation"))&&Boolean.TRUE.equals(data.opt("notificationReplies"));
     if(!notificationReplyAllowed) notificationReplies.clear();
    }
@@ -139,11 +158,29 @@ public abstract class FaceclawAppService extends Service {
     if(!notificationReplyAllowed || !Boolean.TRUE.equals(data.opt("confirmed")) || !(data.opt("id") instanceof String) || !(data.opt("target") instanceof String) || !(data.opt("replyToken") instanceof String) || !(data.opt("text") instanceof String) || data.getString("text").trim().isEmpty() || data.getString("text").length()>8000 ||
       !notificationReplies.consume(data.optString("id"),data.optString("target"),data.optString("replyToken"),System.currentTimeMillis())) return;
    }
+   if(type.equals("messaging-cancel")) { messagingRequests.remove(data.optString("requestId")); return; }
+   if(type.equals("messaging-request")) {
+    long now=System.currentTimeMillis(); messagingRequests.entrySet().removeIf(entry->entry.getValue()<=now);
+    String requestId=data.optString("requestId"), method=data.optString("method"); long expiry=data.optLong("expiresAt");
+    if(!messagingAllowed||!ExtensionContract.token(requestId)||messagingRequests.containsKey(requestId)||messagingRequests.size()>=32||expiry<=now||expiry>now+30000||
+       !java.util.Arrays.asList("status","search","resolve","history","send","operation").contains(method)||data.optJSONObject("params")==null) return;
+    messagingRequests.put(requestId,expiry);
+   }
    onHostEvent(type,data);
   } catch(Exception ignored) { /* Malformed or unauthorized IPC never reaches app callbacks. */ }
  }
  String pendingIdentity(String token) {
   return token!=null && token.equals(pendingToken) && SystemClock.elapsedRealtime()<pendingUntil?pendingPin:null;
+ }
+ private static boolean sameFeature(JSONObject before,JSONObject after,String feature) {
+  JSONObject previous=featureState(before,feature),next=featureState(after,feature);
+  return previous!=null&&next!=null&&previous.optLong("generation",-1)==next.optLong("generation",-2)
+   &&previous.optString("component").equals(next.optString("component"))&&next.optBoolean("available");
+ }
+ private static JSONObject featureState(JSONObject snapshot,String feature) {
+  JSONArray values=snapshot.optJSONArray("features");
+  if(values!=null)for(int i=0;i<values.length();i++) { JSONObject value=values.optJSONObject(i); if(value!=null&&feature.equals(value.optString("feature")))return value; }
+  return null;
  }
  void approveHost(String token) {
   try {
@@ -166,6 +203,7 @@ public abstract class FaceclawAppService extends Service {
   onHostConnected();
  }
  private void disconnect() {
+  messagingAllowed=false; messagingRequests.clear();
   extensionSurfaces.clear(); extensionSnapshot=new JSONObject(); sharedStyle=new JSONObject(); Ui.resetSharedStyle();
   notificationReplyAllowed=false; notificationReplies.clear();
   if(host!=null) {

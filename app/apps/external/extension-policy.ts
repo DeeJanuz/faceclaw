@@ -5,7 +5,7 @@ export function record(value: unknown): value is Record<string, unknown> {
 export function boundedToken(value: unknown, maximum = 128): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= maximum && /^[A-Za-z0-9_.:-]+$/.test(value);
 }
-export type ToolCall = { callId: string; name: string; arguments: Record<string, unknown>; issuedAt: number; expiresAt: number };
+export type ToolCall = { pairingFingerprint?: unknown; projectId?: unknown; bridgeSession?: unknown; callId: string; name: string; arguments: Record<string, unknown>; issuedAt: number; expiresAt: number };
 export class ExtensionToolCalls {
   private readonly seen = new Map<string, number>();
   admit(owner: string, value: unknown, now = Date.now()): value is ToolCall {

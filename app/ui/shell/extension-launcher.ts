@@ -30,5 +30,5 @@ export function attachLauncherSurface(window: ShellWindow): void {
   window.relayout = () => { original.relayout?.(); opened = ""; sync(); };
   window.setForeground = on => { visible = on; original.foreground?.(on); sync(); };
   window.setScreenOn = on => { original.screen?.(on); sync(); };
-  onEffectiveExtensionsChanged(() => { opened = ""; window.requestRender(); });
+  onEffectiveExtensionsChanged(() => window.requestRender());
 }

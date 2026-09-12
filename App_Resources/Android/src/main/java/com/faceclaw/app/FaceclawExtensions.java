@@ -13,9 +13,14 @@ final class FaceclawExtensions {
  private Map<String,JSONArray> cachedDeclarations;
  private List<ExtensionPolicy.Candidate> cachedCandidates;
  private Map<String,List<String>> cachedOrders;
+ private JSONObject cachedSnapshot;
+ private String lastSnapshot="";
+ private final Map<String,String> featureSignatures=new HashMap<>();
+ private final Map<String,Long> featureGenerations=new HashMap<>();
  FaceclawExtensions(SharedPreferences prefs,Owners owners) { this.prefs=prefs; this.owners=owners; }
- long generation() { return generation; }
- void changed() { generation++; cachedDeclarations=null; cachedCandidates=null; cachedOrders=null; }
+ long generation() { snapshot(); return generation; }
+ long generation(String feature) { snapshot(); return featureGenerations.getOrDefault(feature,0L); }
+ void changed() { cachedSnapshot=null; cachedDeclarations=null; cachedCandidates=null; cachedOrders=null; }
  boolean publish(String component,JSONArray declarations) {
   try {
    String pin=owners.approved().get(component); if(pin==null) return false;
@@ -90,18 +95,33 @@ final class FaceclawExtensions {
  }
  boolean granted(String component,String feature) { return declaration(component,feature)!=null&&prefs.getBoolean(component+":extension:"+feature,false); }
  ExtensionPolicy.Candidate winner(String feature) { return ExtensionPolicy.winner(feature,candidates(),orders()); }
- boolean controls(String component,String feature) { ExtensionPolicy.Candidate winner=winner(feature); return winner!=null&&winner.component.equals(component)&&winner.available; }
+ boolean controls(String component,String feature) { ExtensionPolicy.Candidate winner=winner(feature); return winner!=null&&winner.component.equals(component)&&winner.available&&ExtensionPolicy.available(feature,candidates(),orders()); }
+ /** Dependencies participate in the epoch even when the selected component is unchanged. */
+ private String signature(String feature,List<ExtensionPolicy.Candidate> candidates,Map<String,List<String>> orders) {
+  ExtensionPolicy.Candidate winner=ExtensionPolicy.winner(feature,candidates,orders);
+  if(winner==null) return "";
+  JSONArray dependencies=new JSONArray();
+  for(String dependency:winner.requires) dependencies.put(Protocol.object("feature",dependency,"state",signature(dependency,candidates,orders)));
+  return Protocol.object("component",winner.component,"configuration",declaration(winner.component,feature).optJSONObject("configuration"),
+   "available",ExtensionPolicy.available(feature,candidates,orders),"requires",dependencies).toString();
+ }
  JSONObject snapshot() {
+  if(cachedSnapshot!=null) return cachedSnapshot;
   JSONArray features=new JSONArray(); List<ExtensionPolicy.Candidate> candidates=candidates(); Map<String,List<String>> orders=orders();
   for(String feature:ExtensionContract.FEATURES) {
+   String signature=signature(feature,candidates,orders);
+   if(!signature.equals(featureSignatures.get(feature))) { featureSignatures.put(feature,signature); featureGenerations.put(feature,generation+1); }
    ExtensionPolicy.Candidate winner=ExtensionPolicy.winner(feature,candidates,orders); JSONArray contenders=new JSONArray();
    for(String component:orderedComponents(feature)) {
     JSONObject item=declaration(component,feature);
     contenders.put(Protocol.object("component",component,"enabled",item.optBoolean("enabled"),"granted",granted(component,feature),"connected",owners.connected(component)));
    }
    boolean live=ExtensionContract.live(feature), available=ExtensionPolicy.available(feature,candidates,orders);
-   features.put(Protocol.object("feature",feature,"component",winner==null?"":winner.component,"configuration",winner==null?new JSONObject():declaration(winner.component,feature).optJSONObject("configuration"),"live",live,"available",available,"generation",generation,"contenders",contenders));
+   features.put(Protocol.object("feature",feature,"component",winner==null?"":winner.component,"configuration",winner==null?new JSONObject():declaration(winner.component,feature).optJSONObject("configuration"),"live",live,"available",available,"generation",featureGenerations.get(feature),"contenders",contenders));
   }
-  return Protocol.object("version",ExtensionContract.VERSION,"generation",generation,"features",features);
+  String value=features.toString();
+  if(!value.equals(lastSnapshot)) { generation++; lastSnapshot=value; }
+  cachedSnapshot=Protocol.object("version",ExtensionContract.VERSION,"generation",generation,"features",features);
+  return cachedSnapshot;
  }
 }

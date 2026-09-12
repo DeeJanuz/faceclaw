@@ -10,22 +10,24 @@ import java.util.concurrent.atomic.*;
 
 /** Real cross-UID IPC; only synthetic fixture packages are approved. */
 public class BoundaryTest extends Instrumentation {
- @Override public void onCreate(Bundle arguments) { super.onCreate(arguments); start(); }
+ private boolean demos; private String only="";
+ @Override public void onCreate(Bundle arguments) { super.onCreate(arguments); demos=Boolean.parseBoolean(arguments.getString("demos","false"));only=arguments.getString("only","");start(); }
  @Override public void onStart() {
   int passed=0,failed=0; StringBuilder output=new StringBuilder();
-  for(java.lang.reflect.Method method:getClass().getMethods()) if(method.getName().startsWith("test")) {
+  for(java.lang.reflect.Method method:getClass().getMethods()) if(method.getName().startsWith("test")&&method.getName().startsWith("testDemo")==demos&&(only.isEmpty()||only.equals(method.getName()))&&(!method.getName().equals("testDemoLateReplyCannotCrossOwnerChange")||!only.isEmpty())) {
    try { setUp(); method.invoke(this); passed++; output.append("PASS ").append(method.getName()).append("\n"); }
    catch(Throwable error) { failed++; Throwable cause=error.getCause()==null?error:error.getCause(); output.append("FAIL ").append(method.getName()).append(": ").append(cause).append("\n"); }
    finally { try { tearDown(); } catch(Exception ignored) {} }
   }
-  Bundle result=new Bundle(); result.putString("stream",output.toString()+measurements+"Passed: "+passed+" Failed: "+failed+"\n"); result.putInt("passed",passed); result.putInt("failed",failed); finish(failed==0?-1:0,result);
+  Bundle result=new Bundle(); result.putString("stream",output.toString()+measurements+"Passed: "+passed+" Failed: "+failed+"\n"); if(passed+failed==0){failed++;result.putString("stream","FAIL No matching tests\n");} result.putInt("passed",passed); result.putInt("failed",failed); finish(failed==0?-1:0,result);
  }
  private Instrumentation getInstrumentation() { return this; }
  private static void assertTrue(String message,boolean value) { if(!value) throw new AssertionError(message); }
  private static void assertFalse(boolean value) { assertTrue("Expected false",!value); }
  private static void assertEquals(Object expected,Object actual) { if(!java.util.Objects.equals(expected,actual)) throw new AssertionError("Expected "+expected+" but got "+actual); }
  static final String PKG="com.faceclaw.sdk.fixture";
- Context context; FaceclawExternalApps manager; AtomicInteger frames,notifications,replyResults,searchRequests,extensionFrames,extensionResults,extensionTimeouts,ownRequests,refineRequests,systemMenuRequests; volatile String systemMenuPayload; volatile int extensionTransparent=-1,extensionBlack=-1,latestFrame=-1,latestExtensionFrame=-1; CountDownLatch connected;
+ Context context; FaceclawExternalApps manager; AtomicInteger messagingResults,frames,notifications,replyResults,searchRequests,extensionFrames,extensionResults,extensionTimeouts,ownRequests,refineRequests,systemMenuRequests; volatile String systemMenuPayload; volatile int extensionTransparent=-1,extensionBlack=-1,latestFrame=-1,latestExtensionFrame=-1; CountDownLatch connected;
+ volatile String extensionResultPayload,extensionActionPayload;
  java.util.List<Double> timings=new java.util.concurrent.CopyOnWriteArrayList<>();
  StringBuilder measurements=new StringBuilder();
  private void clearFixtureGrants() {
@@ -49,12 +51,12 @@ public class BoundaryTest extends Instrumentation {
   } finally { context.unbindService(connection); }
  }
  public void setUp() throws Exception {
-  context=getInstrumentation().getTargetContext(); latestFrame=-1; latestExtensionFrame=-1; selectFixtureHost(); timings.clear(); frames=new AtomicInteger(); ownRequests=new AtomicInteger(); systemMenuRequests=new AtomicInteger(); systemMenuPayload=null; refineRequests=new AtomicInteger(); extensionFrames=new AtomicInteger(); extensionResults=new AtomicInteger(); extensionTimeouts=new AtomicInteger(); notifications=new AtomicInteger(); replyResults=new AtomicInteger(); searchRequests=new AtomicInteger(); connected=new CountDownLatch(1);
+  context=getInstrumentation().getTargetContext(); messagingResults=new AtomicInteger(); extensionResultPayload=null;extensionActionPayload=null; latestFrame=-1; latestExtensionFrame=-1; selectFixtureHost(); timings.clear(); frames=new AtomicInteger(); ownRequests=new AtomicInteger(); systemMenuRequests=new AtomicInteger(); systemMenuPayload=null; refineRequests=new AtomicInteger(); extensionFrames=new AtomicInteger(); extensionResults=new AtomicInteger(); extensionTimeouts=new AtomicInteger(); notifications=new AtomicInteger(); replyResults=new AtomicInteger(); searchRequests=new AtomicInteger(); connected=new CountDownLatch(1);
   getInstrumentation().runOnMainSync(()->{
    clearFixtureGrants();
    manager=FaceclawExternalApps.get(context); manager.refresh();
    manager.setListener(new FaceclawExternalAppListener() {
-    public void onEvent(String component,String type,String json) { if(type.equals("connected")) connected.countDown(); if(type.equals("extension-event")&&json.contains("\"result\"")) extensionResults.incrementAndGet(); if(type.equals("extension-event")&&json.contains("\"timeout\"")) extensionTimeouts.incrementAndGet(); if(type.equals("notification")) notifications.incrementAndGet(); if(type.equals("notification-reply-result")) replyResults.incrementAndGet(); if(type.equals("search-dictation")) searchRequests.incrementAndGet(); if(type.equals("own-notifications")) ownRequests.incrementAndGet(); if(type.equals("request-system-menu")) { systemMenuPayload=json; systemMenuRequests.incrementAndGet(); } if(type.equals("host-refinement")) refineRequests.incrementAndGet(); }
+    public void onEvent(String component,String type,String json) { if(type.equals("messaging-result")) messagingResults.incrementAndGet(); if(type.equals("extension-event")&&json.contains("\"type\":\"action\""))extensionActionPayload=json; if(type.equals("connected")) connected.countDown(); if(type.equals("extension-event")&&json.contains("\"result\"")) { extensionResultPayload=json; extensionResults.incrementAndGet(); } if(type.equals("extension-event")&&json.contains("\"timeout\"")) extensionTimeouts.incrementAndGet(); if(type.equals("notification")) notifications.incrementAndGet(); if(type.equals("notification-reply-result")) replyResults.incrementAndGet(); if(type.equals("search-dictation")) searchRequests.incrementAndGet(); if(type.equals("own-notifications")) ownRequests.incrementAndGet(); if(type.equals("request-system-menu")) { systemMenuPayload=json; systemMenuRequests.incrementAndGet(); } if(type.equals("host-refinement")) refineRequests.incrementAndGet(); }
     public void onExtensionFrame(String component,String feature,long generation,int width,int height,ByteBuffer pixels) { extensionTransparent=pixels.get(0)&255; extensionBlack=pixels.get(1)&255; latestExtensionFrame=pixels.get(pixels.limit()-1)&255; extensionFrames.incrementAndGet(); }
     public void onFrame(String component,int width,int height,ByteBuffer pixels) { if(pixels.remaining()==width*height) {
      latestFrame=pixels.get(pixels.limit()-1)&255; frames.incrementAndGet();
@@ -66,7 +68,7 @@ public class BoundaryTest extends Instrumentation {
    });
   });
  }
- public void tearDown() throws Exception { getInstrumentation().runOnMainSync(()->{ clearFixtureGrants(); manager.refresh(); }); }
+ public void tearDown() throws Exception { if(demos)clearDemoGrants();getInstrumentation().runOnMainSync(()->{ clearFixtureGrants(); manager.refresh(); }); }
  String approve(String service) throws Exception {
   String component=PKG+"/"+PKG+"."+service, identity=PackageIdentity.forPackage(context,PKG);
   getInstrumentation().runOnMainSync(()->{ context.getSharedPreferences("faceclaw-external-apps",0).edit().putString(component+":pin",identity).commit(); manager.refresh(); });
@@ -205,7 +207,7 @@ public class BoundaryTest extends Instrumentation {
   String c=PKG+"/"+PKG+".CanvasService";
   android.content.SharedPreferences prefs=context.getSharedPreferences("faceclaw-external-apps",0);
   java.util.Map<String,?> before=new java.util.HashMap<>(prefs.getAll());
-  boolean[] checked=proposedChoices(c); assertChoices(new boolean[]{true,true,true,true},checked);
+  boolean[] checked=proposedChoices(c); assertChoices(new boolean[]{true,true,true,true,false},checked);
   assertEquals(before,new java.util.HashMap<>(prefs.getAll())); assertFalse(manager.allows(c,"notifications")); assertFalse(manager.isSourceSuppressed(PKG+".source"));
   assertTrue("Approval save",saveApproval(c,PackageIdentity.forPackage(context,PKG),checked));
   assertTrue("Approved fixture handshake",connected.await(5,TimeUnit.SECONDS));
@@ -216,21 +218,21 @@ public class BoundaryTest extends Instrumentation {
   revokeThroughPolicy(c);
   assertFalse(manager.isConnected(c)); assertFalse(manager.isSourceSuppressed(PKG+".source"));
   for(String capability:new String[]{"pin","notifications","dictation","previews","suppress"}) assertFalse(prefs.contains(c+":"+capability));
-  assertChoices(new boolean[]{true,true,true,true},proposedChoices(c));
+  assertChoices(new boolean[]{true,true,true,true,false},proposedChoices(c));
  }
  public void testLegacyAbsentChoicesStayLegacyAcrossRefreshAndReapproval() throws Exception {
   String c=approve("CanvasService");
   android.content.SharedPreferences prefs=context.getSharedPreferences("faceclaw-external-apps",0);
   java.util.Map<String,?> before=new java.util.HashMap<>(prefs.getAll());
-  assertChoices(new boolean[]{false,false,true,false},proposedChoices(c));
+  assertChoices(new boolean[]{false,false,true,false,false},proposedChoices(c));
   runOnMainSync(manager::refresh); assertEquals(before,new java.util.HashMap<>(prefs.getAll()));
   assertFalse(manager.allows(c,"notifications")); assertFalse(manager.allows(c,"dictation")); assertFalse(manager.allows(c,"suppress")); assertTrue("Legacy preview default",manager.allows(c,"previews"));
   assertTrue("Reapproval",saveApproval(c,PackageIdentity.forPackage(context,PKG),proposedChoices(c)));
-  assertChoices(new boolean[]{false,false,true,false},proposedChoices(c));
+  assertChoices(new boolean[]{false,false,true,false,false},proposedChoices(c));
  }
  public void testExplicitUncheckedChoicesSurviveRefreshAndChangedSignerReapproval() throws Exception {
   String c=PKG+"/"+PKG+".CanvasService"; String identity=PackageIdentity.forPackage(context,PKG);
-  boolean[] chosen={false,true,false,false};
+  boolean[] chosen={false,true,false,false,false};
   assertTrue("Unchecked approval",saveApproval(c,identity,chosen)); assertTrue("Fixture handshake",connected.await(5,TimeUnit.SECONDS));
   runOnMainSync(manager::refresh); assertChoices(chosen,proposedChoices(c));
   context.getSharedPreferences("faceclaw-external-apps",0).edit().putString(c+":pin","old-signer").commit(); runOnMainSync(manager::refresh);
@@ -480,5 +482,219 @@ public class BoundaryTest extends Instrumentation {
  }
  public void testRegularQueuedFramesCannotCrossVisibilityGenerationApprovalOrConnection() throws Exception { staleQueuedFrames(false); }
  public void testExtensionQueuedFramesCannotCrossVisibilityGenerationGrantOrConnection() throws Exception { staleQueuedFrames(true); }
+
+ public void testAuditOfflineRevocationImmediatelyClearsEffectiveOverride() throws Exception {
+  String c=approve("CanvasService"); send(c,"test-publish-extensions",declarations("ui.typography","{\"size\":17}")); settle(); grantExtension(c,"ui.typography",true);
+  java.lang.reflect.Method disconnect=FaceclawExternalApps.class.getDeclaredMethod("disconnect",String.class,boolean.class); disconnect.setAccessible(true);
+  runOnMainSync(()->{try{disconnect.invoke(manager,c,false);}catch(Exception e){throw new RuntimeException(e);}});
+  assertFalse(manager.isConnected(c));
+  assertEquals(c,auditOwner("ui.typography"));
+  revokeThroughPolicy(c);
+  assertFalse(context.getSharedPreferences("faceclaw-external-apps",0).contains(c+":pin"));
+  assertEquals("",auditOwner("ui.typography"));
+ }
+ public void testAuditUnchangedRefreshPreservesPendingProviderRequest() throws Exception {
+  String c=approve("CanvasService"); send(c,"test-publish-extensions",declarations("assistant","{}")); settle(); grantExtension(c,"assistant",true);
+  java.lang.reflect.Field connections=FaceclawExternalApps.class.getDeclaredField("connections"); connections.setAccessible(true);
+  AtomicReference<Throwable> failure=new AtomicReference<>();
+  runOnMainSync(()->{try {
+   Object connection=((java.util.Map<?,?>)connections.get(manager)).get(c);
+   java.lang.reflect.Field field=connection.getClass().getDeclaredField("extensionRequests");field.setAccessible(true);
+   java.util.Map<?,?> pending=(java.util.Map<?,?>)field.get(connection);
+   assertTrue("Request admitted",manager.sendExtension(c,"assistant","request","{\"requestId\":\"audit-inflight\"}"));
+   assertTrue("Request pending before refresh",pending.containsKey("audit-inflight"));
+   manager.refresh();
+   assertTrue("Same winner remains connected",manager.isConnected(c));
+   assertTrue("Unchanged refresh must preserve pending request",pending.containsKey("audit-inflight"));
+  }catch(Throwable e){failure.set(e);}});
+  if(failure.get()!=null) throw new AssertionError(failure.get());
+ }
+
+ private String auditOwner(String feature) throws Exception {
+  org.json.JSONArray entries=new org.json.JSONObject(manager.extensionsJson()).getJSONArray("features");
+  for(int i=0;i<entries.length();i++)if(feature.equals(entries.getJSONObject(i).getString("feature")))return entries.getJSONObject(i).getString("component");
+  throw new AssertionError("Feature absent");
+ }
+
+ private static final String DEMO_A="com.faceclaw.demo.a/com.faceclaw.demo.DemoService",DEMO_B="com.faceclaw.demo.b/com.faceclaw.demo.DemoService";
+ private interface Checked { void run() throws Exception; }
+ private void checkedMain(Checked action) throws Exception {
+  AtomicReference<Throwable> error=new AtomicReference<>();
+  runOnMainSync(()->{try{action.run();}catch(Throwable failure){error.set(failure);}});
+  if(error.get()!=null)throw new AssertionError(error.get());
+ }
+ private void clearDemoGrants() throws Exception {
+  checkedMain(()->{
+   android.content.SharedPreferences prefs=context.getSharedPreferences("faceclaw-external-apps",0);
+   android.content.SharedPreferences.Editor edit=prefs.edit();
+   for(String key:prefs.getAll().keySet())if(key.startsWith("com.faceclaw.demo.a/")||key.startsWith("com.faceclaw.demo.b/"))edit.remove(key);
+   edit.commit();manager.refresh();
+  });
+ }
+ private void setupDemos() throws Exception {
+  assertEquals("com.faceclaw.sdk.hosttest",context.getPackageName());
+  assertTrue("Demos must be separate Android UIDs",context.getPackageManager().getApplicationInfo("com.faceclaw.demo.a",0).uid!=context.getPackageManager().getApplicationInfo("com.faceclaw.demo.b",0).uid);
+  clearDemoGrants();
+  checkedMain(()->{
+   android.content.SharedPreferences.Editor edit=context.getSharedPreferences("faceclaw-external-apps",0).edit();
+   for(String component:new String[]{DEMO_A,DEMO_B})edit.putString(component+":pin",PackageIdentity.forPackage(context,component.split("/",2)[0]));
+   edit.commit();manager.refresh();
+  });
+  long deadline=android.os.SystemClock.elapsedRealtime()+5000;
+  while(android.os.SystemClock.elapsedRealtime()<deadline&&(!manager.isConnected(DEMO_A)||!manager.isConnected(DEMO_B)))settle();
+  assertTrue("Prepare both demo test APKs with DemoSetup before this suite",manager.isConnected(DEMO_A)&&manager.isConnected(DEMO_B));settle();
+  for(String component:new String[]{DEMO_A,DEMO_B})for(String feature:new String[]{"ui.typography","ui.navigation","ui.window-layout","ui.launcher","assistant"})grantExtension(component,feature,true);
+ }
+ private org.json.JSONObject demoFeature(String name) throws Exception {
+  org.json.JSONArray features=new org.json.JSONObject(manager.extensionsJson()).getJSONArray("features");
+  for(int i=0;i<features.length();i++)if(name.equals(features.getJSONObject(i).getString("feature")))return features.getJSONObject(i);
+  throw new AssertionError("Missing feature: "+name);
+ }
+ private void priority(String feature,String component) throws Exception { checkedMain(()->assertTrue("Priority accepted",manager.prioritizeExtension(feature,component))); }
+ private void disconnectDemo(String component) throws Exception {
+  java.lang.reflect.Method method=FaceclawExternalApps.class.getDeclaredMethod("disconnect",String.class,boolean.class);method.setAccessible(true);
+  checkedMain(()->method.invoke(manager,component,false));
+ }
+ public void testDemoIndependentPrioritiesAndOfflineRevocation() throws Exception {
+  setupDemos();priority("ui.typography",DEMO_B);priority("assistant",DEMO_B);
+  assertEquals(DEMO_B,auditOwner("ui.typography"));assertEquals(14,demoFeature("ui.typography").getJSONObject("configuration").getInt("size"));
+  priority("ui.typography",DEMO_A);priority("assistant",DEMO_A);
+  assertEquals(DEMO_A,auditOwner("ui.typography"));assertEquals(18,demoFeature("ui.typography").getJSONObject("configuration").getInt("size"));
+  disconnectDemo(DEMO_A);
+  assertEquals(DEMO_A,auditOwner("ui.typography"));assertTrue("Static configuration persists",demoFeature("ui.typography").getBoolean("available"));
+  assertEquals(DEMO_A,auditOwner("assistant"));assertFalse(demoFeature("assistant").getBoolean("available"));
+  revokeThroughPolicy(DEMO_A);
+  assertEquals(DEMO_B,auditOwner("ui.typography"));assertEquals(DEMO_B,auditOwner("assistant"));
+  assertTrue("Next live provider available",demoFeature("assistant").getBoolean("available"));
+  checkedMain(()->assertTrue("B accepts new requests",manager.sendExtension(DEMO_B,"assistant","request","{\"requestId\":\"demo-b-response\",\"text\":\"synthetic\"}")));
+  settle();assertEquals(1,extensionResults.get());assertTrue("B supplied the response",extensionResultPayload.contains("Demo B"));
+  revokeThroughPolicy(DEMO_B);assertEquals("",auditOwner("ui.typography"));assertFalse(demoFeature("ui.typography").getBoolean("available"));
+ }
+ public void testDemoLowerPriorityChangesPreserveWinnerRequestsAndFrames() throws Exception {
+  setupDemos();priority("assistant",DEMO_A);priority("ui.launcher",DEMO_A);priority("ui.navigation",DEMO_A);
+  checkedMain(()->{assertTrue("Open A surface",manager.openExtensionSurface(DEMO_A,"ui.launcher",576,260));manager.setExtensionSurfaceVisibility(DEMO_A,"ui.launcher",true,true);});
+  settle();assertTrue("A rendered",extensionFrames.get()>0);int before=extensionFrames.get();
+  long epoch=demoFeature("assistant").getLong("generation"),surfaceEpoch=demoFeature("ui.launcher").getLong("generation");
+  checkedMain(()->{
+   assertTrue("A request dispatched",manager.sendExtension(DEMO_A,"assistant","request","{\"requestId\":\"winner-inflight\",\"text\":\"synthetic\"}"));
+   context.getSharedPreferences("faceclaw-external-apps",0).edit().putBoolean(DEMO_B+":extension:ui.navigation",false).commit();manager.refresh();
+   manager.setExtensionSurfaceVisibility(DEMO_A,"ui.launcher",true,true);
+  });
+  settle();assertEquals(epoch,demoFeature("assistant").getLong("generation"));assertEquals(surfaceEpoch,demoFeature("ui.launcher").getLong("generation"));
+  assertEquals(1,extensionResults.get());assertTrue("A response survived unrelated change",extensionResultPayload.contains("Demo A"));
+  assertTrue("SDK retained A surface across the snapshot",extensionFrames.get()>before);
+  disconnectDemo(DEMO_B);assertEquals(epoch,demoFeature("assistant").getLong("generation"));
+ }
+ public void testDemoFeatureGrantsAreIndependentAndReconnectKeepsOrder() throws Exception {
+  setupDemos();priority("ui.typography",DEMO_A);priority("ui.navigation",DEMO_B);priority("assistant",DEMO_A);
+  assertEquals(DEMO_A,auditOwner("ui.typography"));assertEquals(DEMO_B,auditOwner("ui.navigation"));
+  grantExtension(DEMO_A,"ui.typography",false);assertEquals(DEMO_B,auditOwner("ui.typography"));assertEquals(DEMO_A,auditOwner("assistant"));
+  disconnectDemo(DEMO_A);assertFalse(demoFeature("assistant").getBoolean("available"));
+  checkedMain(()->manager.refresh());long deadline=android.os.SystemClock.elapsedRealtime()+5000;
+  while(!manager.isConnected(DEMO_A)&&android.os.SystemClock.elapsedRealtime()<deadline)settle();
+  assertTrue("A reconnected",manager.isConnected(DEMO_A));assertEquals(DEMO_A,auditOwner("assistant"));assertTrue("A live again",demoFeature("assistant").getBoolean("available"));
+  assertEquals(DEMO_B,auditOwner("ui.typography"));
+ }
+ public void testDemoLauncherInputSuppliesBoundedActionIdentity() throws Exception {
+  setupDemos();priority("ui.launcher",DEMO_A);
+  checkedMain(()->{
+   assertTrue("Open launcher",manager.openExtensionSurface(DEMO_A,"ui.launcher",576,260));
+   manager.setExtensionSurfaceVisibility(DEMO_A,"ui.launcher",true,true);
+   manager.sendExtension(DEMO_A,"ui.launcher","event","{\"event\":\"host-state\",\"apps\":[{\"appId\":\"synthetic-app\",\"title\":\"Synthetic app\"}]}");
+  });settle();
+  checkedMain(()->assertTrue("Header input delivered",manager.sendExtensionPointer(DEMO_A,"ui.launcher",20,20,576,260)));settle();assertEquals(null,extensionActionPayload);
+  checkedMain(()->assertTrue("Row input delivered",manager.sendExtensionPointer(DEMO_A,"ui.launcher",20,70,576,260)));settle();
+  assertTrue("Semantic action received",extensionActionPayload!=null);
+  org.json.JSONObject action=new org.json.JSONObject(extensionActionPayload);assertEquals("open-app",action.getString("action"));
+  assertEquals("synthetic-app",action.getJSONObject("data").getString("appId"));
+  assertTrue("Host action adapter requires callId",ExtensionContract.token(action.getJSONObject("data").getString("callId")));
+ }
+ private void configureDemoA(String option,String value) throws Exception {
+  if(!java.util.Arrays.asList("enabled","withdraw","dependency").contains(option)||!java.util.Arrays.asList("true","false").contains(value))throw new IllegalArgumentException();
+  // Shell-installed test instrumentation is separate from the ordinary demo APK.
+  String command="am instrument -w -e "+option+" "+value+" com.faceclaw.demo.a.test/com.faceclaw.demo.DemoSetup";
+  try(android.os.ParcelFileDescriptor descriptor=getUiAutomation().executeShellCommand(command);
+      java.io.InputStream stream=new java.io.FileInputStream(descriptor.getFileDescriptor());
+      java.io.ByteArrayOutputStream output=new java.io.ByteArrayOutputStream()) {
+   byte[] block=new byte[1024];int count;
+   while((count=stream.read(block))!=-1) {output.write(block,0,count);if(output.size()>32768)throw new AssertionError("Unbounded instrumentation output");}
+   assertTrue("Demo settings instrumentation failed: "+output,output.toString("UTF-8").contains("Prepared com.faceclaw.demo.a"));
+  }
+  checkedMain(()->manager.refresh());long deadline=android.os.SystemClock.elapsedRealtime()+6000;
+  while(!manager.isConnected(DEMO_A)&&android.os.SystemClock.elapsedRealtime()<deadline)settle();
+  assertTrue("A returned after app-side settings change",manager.isConnected(DEMO_A));settle();
+ }
+ public void testDemoAppSideDisableAndWithdrawalReachTheHost() throws Exception {
+  setupDemos();priority("ui.typography",DEMO_A);assertEquals(DEMO_A,auditOwner("ui.typography"));
+  configureDemoA("enabled","false");assertEquals(DEMO_B,auditOwner("ui.typography"));
+  configureDemoA("withdraw","true");assertEquals(DEMO_B,auditOwner("ui.typography"));
+  org.json.JSONArray contenders=demoFeature("ui.typography").getJSONArray("contenders");
+  for(int i=0;i<contenders.length();i++)assertFalse(DEMO_A.equals(contenders.getJSONObject(i).getString("component")));
+  configureDemoA("enabled","true");assertEquals(DEMO_A,auditOwner("ui.typography"));
+ }
+ public void testDemoDependencyControlsEligibilityAndOfflineAvailability() throws Exception {
+  setupDemos();priority("ui.typography",DEMO_A);priority("ui.launcher",DEMO_B);
+  configureDemoA("dependency","true");assertEquals(DEMO_B,auditOwner("ui.typography"));
+  priority("ui.launcher",DEMO_A);assertEquals(DEMO_A,auditOwner("ui.typography"));
+  long epoch=demoFeature("ui.typography").getLong("generation");
+  disconnectDemo(DEMO_A);
+  assertEquals(DEMO_A,auditOwner("ui.typography"));assertFalse(demoFeature("ui.typography").getBoolean("available"));
+  assertTrue("Dependent epoch follows live availability",demoFeature("ui.typography").getLong("generation")>epoch);
+  configureDemoA("dependency","false");assertEquals(DEMO_A,auditOwner("ui.typography"));assertTrue("Independent static feature restored",demoFeature("ui.typography").getBoolean("available"));
+ }
+ public void testDemoLateReplyCannotCrossOwnerChange() throws Exception {
+  setupDemos();priority("assistant",DEMO_A);
+  checkedMain(()->assertTrue("Delayed request accepted",manager.sendExtension(DEMO_A,"assistant","request","{\"requestId\":\"stale-demo-response\",\"text\":\"synthetic\"}")));
+  settle();priority("assistant",DEMO_B);
+  // Run this case with Demo A configured through DemoSetup -e mode late.
+  Thread.sleep(16000);waitForIdleSync();assertEquals(0,extensionResults.get());
+  checkedMain(()->assertTrue("B handles only a new explicit request",manager.sendExtension(DEMO_B,"assistant","request","{\"requestId\":\"fresh-demo-response\",\"text\":\"synthetic\"}")));
+  settle();assertEquals(1,extensionResults.get());assertTrue("Only B response admitted",extensionResultPayload.contains("Demo B"));
+ }
+ public void testMessagingRequiresExplicitCapabilityAndCancelledRequestsCannotReply() throws Exception {
+  String c=approve("CanvasService");
+  String request=Protocol.object("requestId","synthetic-message-request","method","status","expiresAt",System.currentTimeMillis()+20000,"params",new org.json.JSONObject()).toString();
+  send(c,"messaging-request",request);settle();assertEquals(0,messagingResults.get());
+  runOnMainSync(()->context.getSharedPreferences("faceclaw-external-apps",0).edit().putBoolean(c+":messaging",true).commit());
+  send(c,"capabilities",Protocol.object("messaging",true).toString());
+  send(c,"messaging-request",request);settle();assertEquals(1,messagingResults.get());
+  String delayed=Protocol.object("requestId","synthetic-delayed","method","status","expiresAt",System.currentTimeMillis()+20000,"params",Protocol.object("delay",true)).toString();
+  send(c,"messaging-request",delayed);settle();
+  send(c,"messaging-cancel",Protocol.object("requestId","synthetic-delayed").toString());send(c,"test-messaging-complete","{}");settle();assertEquals(1,messagingResults.get());
+  send(c,"messaging-request",delayed.replace("synthetic-delayed","synthetic-revoked"));settle();
+  send(c,"capabilities",Protocol.object("messaging",false).toString());send(c,"test-messaging-complete","{}");settle();assertEquals(1,messagingResults.get());
+ }
+ public void testMessagingEncryptedStorageAndSmsPermissionProbe() throws Exception {
+  FaceclawMessagingStore store=new FaceclawMessagingStore(context,"test-drafts");
+  String original="[{\"text\":\"Synthetic private draft\"}]";store.write(original);assertEquals(original,store.read());
+  java.io.File file=new java.io.File(context.getNoBackupFilesDir(),"messaging-test-drafts.bin");
+  byte[] bytes=java.nio.file.Files.readAllBytes(file.toPath());assertFalse(new String(bytes,java.nio.charset.StandardCharsets.UTF_8).contains("Synthetic private draft"));
+  bytes[bytes.length-1]^=1;java.nio.file.Files.write(file.toPath(),bytes);boolean rejected=false;
+  try { store.read(); } catch(IllegalStateException expected) { rejected=true; } finally { store.write("[]"); }
+  assertTrue("Tampered encrypted store must fail closed",rejected);
+  CountDownLatch response=new CountDownLatch(1);AtomicReference<String> json=new AtomicReference<>();
+  FaceclawSms.get(context).request("status","{}",value->{json.set(value);response.countDown();});
+  assertTrue("SMS status callback",response.await(5,TimeUnit.SECONDS));
+  org.json.JSONObject status=new org.json.JSONObject(json.get());assertFalse(status.has("error"));
+  measurements.append("SMS emulator probe: sendPermission=").append(status.getBoolean("available")).append(" historyPermission=").append(status.getBoolean("history")).append(" SIMs=").append(status.getJSONArray("accounts").length()).append("; no send attempted\n");
+ }
+
+ public void testMessagingSmsMultipartResultsSurviveRestartWithoutReplay() throws Exception {
+  FaceclawMessagingStore store=new FaceclawMessagingStore(context,"sms-operations");String original=store.read();
+  try {
+   org.json.JSONObject operation=Protocol.object("id","synthetic-multipart","accountId","sms:test","recipientId","sms:+15550001111","status","submitting","parts",2,"results",new org.json.JSONObject());
+   store.write(new org.json.JSONArray().put(operation).toString());
+   java.lang.reflect.Constructor<FaceclawSms> constructor=FaceclawSms.class.getDeclaredConstructor(Context.class);constructor.setAccessible(true);
+   FaceclawSms sms=constructor.newInstance(context);
+   assertEquals("unknown",new org.json.JSONArray(store.read()).getJSONObject(0).getString("status"));
+   java.lang.reflect.Method receive=FaceclawSms.class.getDeclaredMethod("received",String.class,int.class,int.class);receive.setAccessible(true);
+   receive.invoke(sms,"synthetic-multipart",0,android.app.Activity.RESULT_OK);
+   receive.invoke(sms,"synthetic-multipart",0,android.app.Activity.RESULT_CANCELED);
+   receive.invoke(sms,"synthetic-multipart",1,android.app.Activity.RESULT_CANCELED);
+   org.json.JSONObject saved=new org.json.JSONArray(store.read()).getJSONObject(0);
+   assertEquals("partial",saved.getString("status"));assertTrue("First result is immutable",saved.getJSONObject("results").getBoolean("0"));
+   constructor.newInstance(context);assertEquals("partial",new org.json.JSONArray(store.read()).getJSONObject(0).getString("status"));
+  } finally { store.write(original); }
+ }
 
 }

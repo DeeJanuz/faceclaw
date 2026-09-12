@@ -18,7 +18,7 @@ An Android application may include this build in `settings.gradle.kts`:
 includeBuild("../faceclaw-app-platform/android-sdk")
 ```
 
-Then depend on `implementation("com.faceclaw:sdk:0.1.0")`. Public artifact publication is a separate release task. Faceclaw's NativeScript build compiles the same SDK Java sources through `App_Resources/Android/app.gradle`.
+Then depend on `implementation("com.faceclaw:sdk:0.1.0")`. This is a source-coupled preview: build host and clients from the same SDK checkout. The `0.1.0` coordinate and `extensions: 1` capability do not distinguish preview revisions; version/capability negotiation must be settled before independently distributed releases. Public artifact publication is a separate release task. Faceclaw's NativeScript build compiles the same SDK Java sources through `App_Resources/Android/app.gradle`.
 
 Declare one service extending `com.faceclaw.sdk.FaceclawAppService`:
 
@@ -114,9 +114,13 @@ The `upstream` and `t3` instrumentation flavors target already-installed, debug-
 
 ## Global customizations and providers
 
+The [independent priority demos](priority-demo/README.md) provide two installable SDK applications, an emulator test runner, and a [phone/glasses checklist](priority-demo/DEVICE-CHECKLIST.md). They exercise declaration changes, competing owners, offline revocation, dependencies and stale replies without T3 or a backend.
+
 Hosts advertising `extensions: 1` accept `publishExtensions(JSONArray)` declarations. Each item has `{feature, enabled, configuration, requires?}`. Declaration publishes an app-owned candidate; it does **not** grant permission, change another app's toggle, set priority, or write a host preference. The host's **Global customizations and providers** screen grants each feature separately and lets the user move contenders to the top of that feature's priority list. New contenders append below existing choices. Eight installed app owners may publish declarations at once.
 
 The known features are `ui.launcher`, `ui.navigation`, `ui.app-menu`, `ui.window-layout`, `ui.typography`, `ui.notifications`, `assistant`, `transcription`, `refinement`, `device-tools`, and `notification-content`. Bundles may partly win. `requires` lists other features that must also be won by the same app; missing/cyclic declarations are rejected. An enabled, approved loser becomes active when the winner is disabled, revoked, or removed. An ordinary live-service outage keeps the selected winner and falls back to host behavior. Persistent navigation/layout/type configuration remains effective while its signed app is installed and approved, unless it depends on an unavailable live feature. No override edits underlying host settings.
+
+Each feature's `generation` is its authority epoch. It changes when that feature's selected owner, configuration, effective availability or declared dependency state changes. Unrelated contenders and feature changes do not invalidate an unchanged winner's requests, surfaces or reviews. Revocation invalidates effective configuration even if its app is already disconnected. The top-level snapshot `generation` is a revision for the complete settings snapshot and may change without changing a particular feature's epoch. Use the feature epoch for `extension-event` replies/actions and `extensionGeneration` on surfaces; do not substitute the top-level revision. Own-window notification fragments retain their explicitly supplied snapshot generation. SDK clients should retain unaffected surfaces and partial feature snapshots across unrelated updates.
 
 Configurations have closed typed schemas. Unknown fields, values and feature IDs are rejected:
 
@@ -166,3 +170,9 @@ An APK with its own window menu calls `setWindowMenuAvailable(true)` after `open
 A selected `ui.launcher` provider receives folder-tool requests `{requestId,operation:"folder-tool",name,arguments}` for `apps.list_folders`, `apps.move_to_folder`, `apps.remove_from_folder` and `apps.disband_folder`. Handle these using that APK's local folder state and return `{ok,content?,error?}` through `respondExtension`. Host validation limits app IDs to its current catalog and folder names to the existing host limit. An unavailable or uncertain selected-provider outcome does not mutate fallback host folders. `uninstall-app` is available only to the winning launcher after a fresh gesture and only when the current host catalog marks that entry `uninstallable:true`; it routes through the existing EvenHub uninstall operation.
 
 Mirror pointer input is a host-generated `input` event with `{type:"pointer-click",x,y}`. The host consumes the visible provider surface hit test, bounds integer coordinates to the exact current native viewport, and requires that surface to remain selected, visible and awake before granting fresh UI action authority. A hidden fallback launcher never receives a visible provider's pointer click.
+
+## Reviewed assistant messaging
+
+The optional `messaging` capability is a separate, default-off host approval. Signal providers declare `com.faceclaw.MESSAGING=signal`. A selected approved host may send a bounded `messaging-request` with a unique request ID, method, params and at most 30 seconds of validity. Providers check `messagingRequestCurrent(requestId)` before work and again before dispatch, and use `reportMessagingResult` to answer once. Capability loss, host loss, cancellation and expiry invalidate pending requests. No provider owner/admin API is exported.
+
+T3's device-tool extension uses `messaging-session` heartbeats, a non-secret pairing fingerprint and project binding. The host reviews outgoing text and owns Send authority; tool arguments never carry an approval flag. See [assistant messaging](../docs/ASSISTANT-MESSAGING.md) for setup, exact review and failure behavior.

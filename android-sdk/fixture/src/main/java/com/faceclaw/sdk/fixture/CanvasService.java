@@ -5,8 +5,13 @@ import android.os.SystemClock;
 import org.json.JSONObject;
 /** Test APK only: pins its synthetic host without a user setup prompt. Never ship this subclass. */
 public class CanvasService extends FaceclawAppService {
- int width=32,height=16;
+ int width=32,height=16; private String messagingRequest="";
  @Override protected void onHostEvent(String type,JSONObject data) {
+  if(type.equals("messaging-request")) {
+   messagingRequest=data.optString("requestId");
+   if(!data.optJSONObject("params").optBoolean("delay")) reportMessagingResult(messagingRequest,Protocol.object("status","fixture"));
+  }
+  if(type.equals("test-messaging-complete")) reportMessagingResult(messagingRequest,Protocol.object("status","fixture"));
   if(type.equals("test-publish-extensions")) publishExtensions(data.optJSONArray("declarations"));
   if(type.equals("extension-event")&&data.optString("type").equals("request")) {
    JSONObject request=data.optJSONObject("data"); respondExtension(data.optString("feature"),data.optLong("generation"),request.optString("requestId"),Protocol.object("ok",true));

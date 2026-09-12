@@ -30,6 +30,7 @@
     "../app/apps/timer/timer-model.ts",
     "../app/apps/teleprompter/script-tracker.ts",
     "../app/native/external-notifications.ts",
-    "../app/apps/external/extension-policy.ts"
+    "../app/apps/external/extension-policy.ts",
+    "../app/assistant/messaging.ts"
   ]
 }

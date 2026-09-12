@@ -63,6 +63,20 @@ test('explicit device-tool grant preserves ordinary proactive and current availa
  assert.equal((await registry.toolRegistry.callTool('apps.launch',{}, {proactive:true})).ok,false);assert.equal(calls,1);
 });
 
+test('generic notification tools redact content and cannot dispatch an unreviewed reply',async()=>{
+ const h=harness();h.platform.controls=()=>true;h.platform.toolNotifications=new NotificationLeases(()=> 'opaque-reply');
+ h.sources([{key:'native',postTime:5,appName:'Messages',title:'Secret sender',text:'Secret message',actions:[{index:0,title:'Reply',enabled:true,acceptsText:true}]}]);
+ const listed=await h.platform.tool('owner',3,'notifications.list',{});assert.equal(listed.ok,true);
+ assert.equal(listed.content.includes('Secret'),false);assert.equal(listed.content.includes('native'),false);
+ const entry=JSON.parse(listed.content)[0];
+ assert.equal((await h.platform.tool('owner',3,'host.notifications.reply',{key:entry.key,postTime:5,actionIndex:0,text:'Hi'})).ok,false);
+ let reviews=0;h.platform.messaging={reviewNotification:async()=>{reviews++;return {status:'pending'};}};
+ const scope={owner:'owner',project:'project',identity:'identity',session:'session'};
+ const result=await h.platform.tool('owner',3,'host.notifications.reply',{key:entry.key,postTime:5,actionIndex:0,text:'Hi'},scope);
+ assert.equal(reviews,1);assert.equal(JSON.parse(result.content).status,'pending');
+ assert.equal((await h.platform.tool('owner',3,'host.notifications.action',{key:entry.key,postTime:5,actionIndex:0},scope)).ok,false);
+});
+
 test('only host input delivered to the foreground notification owner authorizes its reader actions',()=>{
  const h=harness();h.platform.controls=(owner,feature)=>owner==='owner'&&feature==='ui.notifications';h.platform.lastGesture=new Map();
  for(const deny of [()=>h.foreground('apk:other'),()=>h.locked(true),()=>h.screen(false)]) {

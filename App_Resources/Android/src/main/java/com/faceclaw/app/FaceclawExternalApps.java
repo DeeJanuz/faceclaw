@@ -22,15 +22,17 @@ public final class FaceclawExternalApps {
  private FaceclawExternalAppListener listener;
  private final SharedPreferences prefs;
  private final FaceclawExtensions extensions;
+ private final Map<String,Long> publishedFeatureGenerations=new HashMap<>();
+ private String publishedExtensionSnapshot="";
  private JSONObject sharedStyle=new JSONObject();
- private static final String[] APPROVAL_CAPABILITIES={"notifications","dictation","previews","suppress"};
+ private static final String[] APPROVAL_CAPABILITIES={"notifications","dictation","previews","suppress","messaging"};
  private FaceclawExternalApps(Context c) {
   context=c; prefs=ApprovalStore.open(c,"faceclaw-external-apps");
   extensions=new FaceclawExtensions(prefs,new FaceclawExtensions.Owners() {
    public Map<String,String> approved() { Map<String,String> owners=new TreeMap<>(); for(ResolveInfo r:discover()) if(FaceclawExternalApps.this.approved(r.serviceInfo)) owners.put(key(r.serviceInfo),prefs.getString(key(r.serviceInfo)+":pin","")); return owners; }
    public boolean connected(String component) { Connection current=connections.get(component); return current!=null&&current.ready; }
   });
-  IntentFilter filter=new IntentFilter(); filter.addAction(Intent.ACTION_PACKAGE_ADDED); filter.addAction(Intent.ACTION_PACKAGE_REMOVED); filter.addAction(Intent.ACTION_PACKAGE_REPLACED); filter.addDataScheme("package");
+  IntentFilter filter=new IntentFilter(); filter.addAction(Intent.ACTION_PACKAGE_ADDED); filter.addAction(Intent.ACTION_PACKAGE_REMOVED); filter.addAction(Intent.ACTION_PACKAGE_REPLACED); filter.addAction(Intent.ACTION_PACKAGE_CHANGED); filter.addDataScheme("package");
   c.registerReceiver(new BroadcastReceiver() { public void onReceive(Context ignored,Intent intent) {
    if(Intent.ACTION_PACKAGE_REMOVED.equals(intent.getAction()) && !intent.getBooleanExtra(Intent.EXTRA_REPLACING,false) && intent.getData()!=null) {
     String pkg=intent.getData().getSchemeSpecificPart(); SharedPreferences.Editor edit=prefs.edit();
@@ -50,7 +52,7 @@ public final class FaceclawExternalApps {
   JSONArray result=new JSONArray();
   for(ResolveInfo r:discover()) if(approved(r.serviceInfo)) {
    Connection c=connections.get(key(r.serviceInfo));
-   result.put(Protocol.object("component",key(r.serviceInfo),"name",r.loadLabel(context.getPackageManager()).toString(),"connected",c!=null&&c.ready));
+   result.put(Protocol.object("component",key(r.serviceInfo),"name",r.loadLabel(context.getPackageManager()).toString(),"connected",c!=null&&c.ready,"messaging",allows(key(r.serviceInfo),"messaging")?r.serviceInfo.metaData.getString("com.faceclaw.MESSAGING",""):""));
   }
   return result.toString();
  }
@@ -67,7 +69,19 @@ public final class FaceclawExternalApps {
  }
  private void emit(String component,String type,JSONObject data) { if(listener!=null) listener.onEvent(component,type,data.toString()); }
  public boolean isConnected(String component) { Connection c=connections.get(component); return c!=null&&c.ready&&approved(c.service); }
+ public String messagingIdentity(String component) {
+  if(!isConnected(component)) return "";
+  try {
+   byte[] digest=java.security.MessageDigest.getInstance("SHA-256").digest(prefs.getString(component+":pin","").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+   StringBuilder hex=new StringBuilder(); for(byte value:digest) hex.append(String.format("%02x",value)); return hex.toString();
+  } catch(Exception error) { return ""; }
+ }
  public boolean allows(String component,String capability) { return Arrays.asList(APPROVAL_CAPABILITIES).contains(capability)&&isConnected(component)&&prefs.getBoolean(component+":"+capability,"previews".equals(capability)); }
+ private boolean hasVisibleSurface(Connection c,String feature) {
+  if(c==null) return false;
+  Surface surface=c.surfaces.get(feature);
+  return surface!=null&&surface.visible&&surface.screenOn;
+ }
  public boolean replyToNotification(String component,String json) {
   if(json==null||json.length()>Protocol.MAX_JSON||!allows(component,"notifications")||!allows(component,"dictation")) return false;
   Connection c=connections.get(component);
@@ -83,6 +97,7 @@ public final class FaceclawExternalApps {
   Connection c=connections.get(component); if(c==null||!c.ready||!approved(c.service)) return;
   try {
    JSONObject data=new JSONObject(json);
+   if(type.equals("messaging-request")&&!allows(component,"messaging")) return;
    if(type.equals("open")||type.equals("resize")) {
     c.width=data.getInt("width"); c.height=data.getInt("height"); Protocol.frameSize(c.width,c.height); data.put("generation",++c.generation); c.open=true;
     c.frames.clear();
@@ -93,7 +108,7 @@ public final class FaceclawExternalApps {
   } catch(Exception e) { disconnect(component,true); }
  }
  private void publishCapabilities(String component) {
-  send(component,"capabilities",Protocol.object("notifications",allows(component,"notifications"),"dictation",allows(component,"dictation"),"previews",allows(component,"previews"),"maxWidth",Protocol.MAX_WIDTH,"maxHeight",Protocol.MAX_HEIGHT,"maxText",8000,"maxNotificationText",4096,"notificationReplies",true,"searchDictation",true,"extensions",ExtensionContract.VERSION,"windowMenus",true).toString());
+  send(component,"capabilities",Protocol.object("notifications",allows(component,"notifications"),"dictation",allows(component,"dictation"),"previews",allows(component,"previews"),"maxWidth",Protocol.MAX_WIDTH,"maxHeight",Protocol.MAX_HEIGHT,"maxText",8000,"maxNotificationText",4096,"notificationReplies",true,"searchDictation",true,"extensions",ExtensionContract.VERSION,"windowMenus",true,"messaging",allows(component,"messaging")).toString());
  }
  private void disconnect(String component,boolean retry) {
   Connection c=connections.remove(component); if(c==null) return;
@@ -122,7 +137,7 @@ public final class FaceclawExternalApps {
   java.lang.ref.WeakReference<Activity> selectionActivity; long selectionUntil;
   final Map<String,Surface> surfaces=new HashMap<>(); final Map<String,String> extensionRequests=new HashMap<>(); final Set<String> actionIds=new HashSet<>();
   final FrameDelivery frames=new FrameDelivery();
-  Messenger remote; PendingIntent consent; boolean ready,open,visible,screenOn=true; int width,height; long generation,sequence,rateStart,lastOpenRequest; int rate;
+  Messenger remote; PendingIntent consent; boolean ready,open,visible,screenOn=true; int width,height; long generation,sequence,rateStart,lastOpenRequest; int rate; String lastExtensionSnapshot="";
   Connection(ServiceInfo service) { this.service=service; component=key(service); inbox=new Messenger(new Handler(Looper.getMainLooper(),m->{ receive(m); return true; })); }
   public void onServiceConnected(ComponentName name,IBinder binder) {
    if(connections.get(component)!=this || !approved(service)) return;
@@ -183,6 +198,7 @@ public final class FaceclawExternalApps {
      long before=extensions.generation(); if(extensions.publish(component,data.getJSONArray("declarations"))&&before!=extensions.generation()) extensionsChanged(); return;
     }
     if(type.equals("extension-result")||type.equals("extension-progress")||type.equals("extension-action")) { receiveExtensionControl(this,type,data); return; }
+    if(type.equals("messaging-result")) { if(allows(component,"messaging")) emit(component,type,data); return; }
     if(type.equals("window-menu-state")) { if(open&&data.opt("available") instanceof Boolean) emit(component,type,Protocol.object("available",data.getBoolean("available"))); return; }
     if(type.equals("window-protection")) { if(open&&data.opt("protected") instanceof Boolean) emit(component,type,Protocol.object("protected",data.getBoolean("protected"))); return; }
     if(type.equals("own-notifications")||type.equals("own-notification-action")) {
@@ -195,7 +211,7 @@ public final class FaceclawExternalApps {
     if(type.equals("sleep")) { if(open&&visible&&screenOn) emit(component,type,new JSONObject()); return; }
     if(type.equals("request-system-menu")) { if(open&&visible&&screenOn) emit(component,type,new JSONObject()); return; }
     if(type.equals("notification")||type.equals("remove-notification")||type.equals("notification-reply-result")) { if(!allows(component,"notifications")) return; }
-    else if(type.equals("dictation")||type.equals("cancel-dictation")||type.equals("search-dictation")||type.equals("cancel-search-dictation")||type.equals("capture-dictation")||type.equals("finish-capture-dictation")||type.equals("cancel-capture-dictation")||type.equals("host-refinement")||type.equals("cancel-host-refinement")) { if(!allows(component,"dictation")||!open||!visible||!screenOn) {
+    else if(type.equals("dictation")||type.equals("cancel-dictation")||type.equals("search-dictation")||type.equals("cancel-search-dictation")||type.equals("capture-dictation")||type.equals("finish-capture-dictation")||type.equals("cancel-capture-dictation")||type.equals("host-refinement")||type.equals("cancel-host-refinement")) { if(!allows(component,"dictation")||!(open&&visible&&screenOn||hasVisibleSurface(this,"ui.notifications"))) {
       if(type.equals("host-refinement")||type.equals("capture-dictation")) remote.send(Protocol.message(Protocol.EVENT,session,type.equals("host-refinement")?"host-refinement-rejected":"capture-dictation-closed",Protocol.object("requestId",data.optString("requestId","").substring(0,Math.min(128,data.optString("requestId","").length())),"reason","Permission or visible window required")));
       if(type.equals("dictation")||type.equals("search-dictation")) remote.send(Protocol.message(Protocol.EVENT,session,type.equals("search-dictation")?"search-dictation-rejected":"dictation-rejected",Protocol.object("requestId",data.optString("requestId","").substring(0,Math.min(128,data.optString("requestId","").length())),"reason","Dictation permission or visible window required")));
       return;
@@ -275,7 +291,7 @@ public final class FaceclawExternalApps {
   if(activity==null) return; refresh(); List<ResolveInfo> apps=discover();
   String[] labels=new String[apps.size()]; for(int i=0;i<apps.size();i++) { ResolveInfo r=apps.get(i); labels[i]=r.loadLabel(context.getPackageManager())+(approved(r.serviceInfo)?" (approved)":""); }
   new AlertDialog.Builder(activity).setTitle("Installed Faceclaw apps").setItems(labels,(d,index)->openAppInterface(activity,apps.get(index)))
-   .setNeutralButton("Permissions and priority",(d,w)->showPermissionsManager(activity)).setNegativeButton("Close",null).show();
+   .setPositiveButton("SMS setup",(d,w)->FaceclawSms.showPermissions(activity)).setNeutralButton("Permissions and priority",(d,w)->showPermissionsManager(activity)).setNegativeButton("Close",null).show();
  }
  private void showPermissionsManager(Activity activity) {
   List<ResolveInfo> apps=discover(); String[] labels=new String[apps.size()];
@@ -347,7 +363,7 @@ public final class FaceclawExternalApps {
   boolean[] choices=new boolean[APPROVAL_CAPABILITIES.length];
   for(int i=0;i<choices.length;i++) {
    String capability=APPROVAL_CAPABILITIES[i];
-   choices[i]=prefs.getBoolean(component+":"+capability,!existing || capability.equals("previews"));
+   choices[i]=prefs.getBoolean(component+":"+capability,!capability.equals("messaging") && (!existing || capability.equals("previews")));
   }
   return choices;
  }
@@ -368,7 +384,7 @@ public final class FaceclawExternalApps {
   SharedPreferences.Editor edit=prefs.edit().remove(component+":pin");
   for(String capability:APPROVAL_CAPABILITIES) edit.remove(component+":"+capability);
   for(String key:prefs.getAll().keySet()) if(key.startsWith(component+":extension")) edit.remove(key);
-  edit.apply(); disconnect(component,false); emit(component,"changed",new JSONObject());
+  edit.apply(); disconnect(component,false); extensionsChanged(); emit(component,"changed",new JSONObject());
  }
  private void showApp(Activity a,ResolveInfo resolved) {
   ServiceInfo s=resolved.serviceInfo; String k=key(s);
@@ -381,7 +397,7 @@ public final class FaceclawExternalApps {
     LinearLayout content=new LinearLayout(a); content.setOrientation(LinearLayout.VERTICAL); content.setPadding(padding,padding,padding,0);
     TextView explanation=new TextView(a); explanation.setText("Allow this independently installed app to show a glasses window, receive input, and read the battery/weather displayed by the host? Checked permissions will be enabled when you approve. You can uncheck any permission now or change it later."); content.addView(explanation);
     String source=s.metaData.getString("com.faceclaw.SUPPRESS_PACKAGE","");
-    String[] labels={"Notifications on glasses","Dictation and review","Message text previews","Suppress declared source on glasses"};
+    String[] labels={"Notifications on glasses","Dictation and review","Message text previews","Suppress declared source on glasses","Assistant messaging (separate history consent and reviewed sends)"};
     for(int i=0;i<choices.length;i++) {
      final int index=i; CheckBox choice=new CheckBox(a); choice.setText(labels[i]); choice.setChecked(choices[i]); choice.setFilterTouchesWhenObscured(true);
      choice.setOnCheckedChangeListener((button,checked)->choices[index]=checked); content.addView(choice);
@@ -402,17 +418,18 @@ public final class FaceclawExternalApps {
   options.add("Notifications: "+prefs.getBoolean(k+":notifications",false)); options.add("Dictation/review: "+prefs.getBoolean(k+":dictation",false));
   options.add("Message text previews: "+prefs.getBoolean(k+":previews",true));
   options.add("Suppress declared source on glasses: "+prefs.getBoolean(k+":suppress",false));
+  options.add("Assistant messaging: "+prefs.getBoolean(k+":messaging",false));
   options.add("Configure bridge connection"); options.add("Global customizations and providers"); options.add("Revoke app approval");
   new AlertDialog.Builder(a).setTitle(resolved.loadLabel(context.getPackageManager())).setItems(options.toArray(new String[0]),(d,index)->{
    if(index==0) requestHostSelection(a,k);
-   else if(index>=1&&index<=4) {
-    String flag=new String[]{"","notifications","dictation","previews","suppress"}[index];
+   else if(index>=1&&index<=5) {
+    String flag=new String[]{"","notifications","dictation","previews","suppress","messaging"}[index];
     String source=s.metaData.getString("com.faceclaw.SUPPRESS_PACKAGE","");
     if(index==4&&source.isEmpty()) return;
     boolean enabled=prefs.getBoolean(k+":"+flag,flag.equals("previews"));
     Runnable change=()->{ prefs.edit().putBoolean(k+":"+flag,!enabled).apply(); emit(k,"grants-changed",new JSONObject()); publishCapabilities(k); };
     if(!enabled) new AlertDialog.Builder(a).setMessage(index==4?"Suppress only "+source+" notifications on glasses while this app is connected? Phone notifications stay unchanged.":"Enable "+options.get(index).split(":")[0]+" for this app?").setNegativeButton("Cancel",null).setPositiveButton("Enable",(dialog,which)->change.run()).show(); else change.run();
-   } else if(index==5) configure(a,k,s); else if(index==6) showExtensions(a,k); else revokeApproval(k);
+   } else if(index==6) configure(a,k,s); else if(index==7) showExtensions(a,k); else revokeApproval(k);
   }).setNegativeButton("Close",null).show();
  }
  public boolean publishSharedStyle(String json) {
@@ -426,10 +443,24 @@ public final class FaceclawExternalApps {
  public String extensionsJson() { return extensions.snapshot().toString(); }
  private void extensionsChanged() {
   extensions.changed();
-  for(Connection c:connections.values()) { c.extensionRequests.clear(); for(Surface surface:c.surfaces.values())surface.frames.clear(); c.surfaces.clear(); }
+  Set<String> changed=new HashSet<>();
+  for(String feature:ExtensionContract.FEATURES) {
+   long epoch=extensions.generation(feature);
+   if(!Long.valueOf(epoch).equals(publishedFeatureGenerations.put(feature,epoch))) changed.add(feature);
+  }
+  for(Connection c:connections.values()) {
+   c.extensionRequests.entrySet().removeIf(entry->changed.contains(entry.getValue()) || (entry.getValue().equals("transcription")&&!isExtensionGranted(c.component,"transcription")));
+   for(String feature:changed) { Surface surface=c.surfaces.remove(feature); if(surface!=null)surface.frames.clear(); }
+  }
   String snapshot=extensionsJson();
+  for(Connection c:connections.values()) if(c.ready&&!snapshot.equals(c.lastExtensionSnapshot)) {
+   c.lastExtensionSnapshot=snapshot;send(c.component,"extensions",snapshot);
+   // A failed send can synchronously disconnect and publish a newer snapshot.
+   if(!snapshot.equals(extensionsJson()))return;
+  }
+  if(snapshot.equals(publishedExtensionSnapshot))return;
+  publishedExtensionSnapshot=snapshot;
   FaceclawSettings.getInstance(context).setString("apps.extensions.effective",snapshot);
-  for(Connection c:connections.values()) if(c.ready) send(c.component,"extensions",snapshot);
   emit("","extensions-changed",extensions.snapshot());
  }
  /** Local host API. This is never exposed as an external IPC setter. */
@@ -443,12 +474,12 @@ public final class FaceclawExternalApps {
   if(!isConnected(component)||(!ownProvider&&!extensions.controls(component,feature))||json==null||json.length()>Protocol.MAX_JSON/2||!Arrays.asList("request","event","cancel","input").contains(type)) return false;
   Connection c=connections.get(component); if(c==null) return false;
   try {
-   JSONObject data=new JSONObject(json); long generation=extensions.generation();
+   JSONObject data=new JSONObject(json); long generation=extensions.generation(feature);
    if(type.equals("request")) {
     String id=data.getString("requestId"); if(!ExtensionContract.token(id)||c.extensionRequests.size()>=32||c.extensionRequests.containsKey(id)) return false;
     c.extensionRequests.put(id,feature);
     main.postDelayed(()->{
-     if(connections.get(component)==c&&generation==extensions.generation()&&feature.equals(c.extensionRequests.remove(id)))
+     if(connections.get(component)==c&&generation==extensions.generation(feature)&&feature.equals(c.extensionRequests.remove(id)))
       emit(component,"extension-event",Protocol.object("feature",feature,"generation",generation,"type","timeout","requestId",id));
     },feature.equals("assistant")?600000:feature.equals("transcription")?390000:feature.equals("refinement")?120000:20000);
    }
@@ -466,7 +497,7 @@ public final class FaceclawExternalApps {
  private void receiveExtensionControl(Connection c,String type,JSONObject data) throws Exception {
   String feature=data.getString("feature"); long generation=data.getLong("generation");
   boolean pending=feature.equals(c.extensionRequests.get(data.optString("requestId")));
-  if(generation!=extensions.generation()||(!extensions.controls(c.component,feature)&&!(pending&&feature.equals("transcription")&&isExtensionGranted(c.component,feature)))) return;
+  if(generation!=extensions.generation(feature)||(!extensions.controls(c.component,feature)&&!(pending&&feature.equals("transcription")&&isExtensionGranted(c.component,feature)))) return;
   JSONObject payload=data.getJSONObject("data"); if(payload.toString().length()>Protocol.MAX_JSON/2) return;
   if(type.equals("extension-result")||type.equals("extension-progress")) {
    String id=data.getString("requestId"); if(!feature.equals(c.extensionRequests.get(id))) return;
@@ -497,7 +528,7 @@ public final class FaceclawExternalApps {
   if(!ExtensionContract.surface(feature)||!isConnected(component)||!extensions.controls(component,feature)) return false;
   try {
    Protocol.frameSize(width,height); Connection c=connections.get(component); Surface surface=new Surface(width,height,++nextSurfaceGeneration); Surface previous=c.surfaces.put(feature,surface); if(previous!=null)previous.frames.clear();
-   c.remote.send(Protocol.message(Protocol.EVENT,c.session,"extension-surface",Protocol.object("feature",feature,"type","open","width",width,"height",height,"generation",surface.generation,"extensionGeneration",extensions.generation(),"visible",false,"screenOn",false))); return true;
+   c.remote.send(Protocol.message(Protocol.EVENT,c.session,"extension-surface",Protocol.object("feature",feature,"type","open","width",width,"height",height,"generation",surface.generation,"extensionGeneration",extensions.generation(feature),"visible",false,"screenOn",false))); return true;
   } catch(Exception ignored) { return false; }
  }
  public void setExtensionSurfaceVisibility(String component,String feature,boolean visible,boolean screenOn) {

@@ -28,4 +28,3 @@ export type AndroidNotification = {
   when: number;
   actions: AndroidNotificationAction[];
 };
-

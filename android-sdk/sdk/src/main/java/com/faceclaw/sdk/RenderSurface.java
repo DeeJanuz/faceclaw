@@ -37,6 +37,7 @@ public final class RenderSurface implements AutoCloseable {
  synchronized void cancel(FrameLease lease){Slot slot=slot(lease.slotId);if(slot!=null)slot.busy=false;invalidate(InvalidateReason.STATE);}
  synchronized void release(int slotId,long sequence){Slot slot=slot(slotId);if(slot!=null)slot.busy=false;dispatchIfReady();}
  synchronized void suspend(){credit=null;for(Slot slot:slots)slot.busy=false;}
+ synchronized void consumeSceneCredit(){credit=null;}
  synchronized void replayScene(){scene.replay();}
  private Slot slot(int id){return id>=0&&id<slots.length?slots[id]:null;}
  @Override public synchronized void close(){if(closed)return;closed=true;session.unregisterSurface(this);closePool();credit=null;canvasBitmap=null;canvasPixels=null;}

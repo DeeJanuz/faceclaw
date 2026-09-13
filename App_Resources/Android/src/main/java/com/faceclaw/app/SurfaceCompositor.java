@@ -191,6 +191,10 @@ public final class SurfaceCompositor {
     private boolean retainedValid;
     private final boolean compareDirtyWithFull = Boolean.getBoolean("faceclaw.compositor.compareDirty");
 
+    public int packedFrameSize() {
+        synchronized (lock) { requireScreenConfiguredLocked(); return ((screenWidth + 1) >> 1) * screenHeight; }
+    }
+
     /** Set the output frame size. Must be called before any surface work. */
     public void configureScreen(int width, int height) {
         if (width <= 0 || height <= 0) {
@@ -354,8 +358,10 @@ public final class SurfaceCompositor {
             String contentFingerprint,ByteBuffer draws,byte[] packedTarget) {
         ScreenDraw[] parsed=parseDraws(draws);
         synchronized(lock){
+            requireScreenConfiguredLocked();
+            int size=((screenWidth+1)>>1)*screenHeight;
+            if(packedTarget==null||packedTarget.length!=size)throw new IllegalArgumentException("Invalid packed target");
             Composite composite=applyDamageAndCompositeLocked(surfaceId,fullPixels,damage,contentFingerprint,parsed,false);
-            int size=((composite.width+1)>>1)*composite.height;if(packedTarget==null||packedTarget.length!=size)throw new IllegalArgumentException("Invalid packed target");
             System.arraycopy(retainedPacked,0,packedTarget,0,size);
             return new PackedComposite(composite,packedTarget);
         }

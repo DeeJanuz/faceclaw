@@ -11,6 +11,7 @@ final class RenderBroker {
     private final SurfaceCompositor compositor = new SurfaceCompositor();
 
     void configureScreen(int width,int height){compositor.configureScreen(width,height);}
+    int packedFrameSize(){return compositor.packedFrameSize();}
     void configureSurface(String id,int x,int y,int width,int height,int zOrder,int transparency){compositor.configureSurface(id,x,y,width,height,zOrder,transparency);}
     void removeSurface(String id){compositor.removeSurface(id);}
     void setSurfaceVisible(String id,boolean visible){compositor.setSurfaceVisible(id,visible);}

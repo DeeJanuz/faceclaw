@@ -64,5 +64,22 @@ public final class NotificationCompositorCheck {
             ByteBuffer.wrap(changed), new int[]{1, 1, 1, 1}, "two", null, nextTarget);
         byte[] expected = BmpUtil.pack4bppFromGray8(changed, 4, 2);
         if (!java.util.Arrays.equals(second.packed, expected)) throw new AssertionError("dirty packed output diverged from full packing");
+
+        // An APK viewport excludes shell chrome. Reject a viewport-sized output
+        // before changing either retained pixels or dirty state.
+        SurfaceCompositor windowed = new SurfaceCompositor();
+        windowed.configureScreen(4, 3);
+        windowed.configureSurface("apk", 0, 1, 4, 2, 0, SurfaceCompositor.TRANSPARENCY_OPAQUE);
+        windowed.applyAndComposite("apk", ByteBuffer.wrap(new byte[8]), 0, 0, 4, 2, "empty");
+        if (windowed.packedFrameSize() != 6) throw new AssertionError("packed size must use display geometry");
+        byte[] white = new byte[8]; java.util.Arrays.fill(white, (byte)255);
+        try {
+            windowed.applyDamageAndCompositePacked("apk", ByteBuffer.wrap(white), null, "invalid", null, new byte[4]);
+            throw new AssertionError("accepted a window-sized packed buffer");
+        } catch (IllegalArgumentException expectedFailure) { }
+        pixels(windowed.previewComposite(), 0,0,0,0,0,0,0,0,0,0,0,0);
+        SurfaceCompositor.PackedComposite valid = windowed.applyDamageAndCompositePacked("apk", ByteBuffer.wrap(white), null, "valid", null, new byte[windowed.packedFrameSize()]);
+        if (valid.composite.damage.length == 0) throw new AssertionError("failed submission consumed damage");
+        pixels(windowed.previewComposite(), 0,0,0,0,255,255,255,255,255,255,255,255);
     }
 }

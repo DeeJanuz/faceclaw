@@ -1077,7 +1077,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         if (outcome != null) externalFrameOutcomes.put(frameId, outcome);
         try {
             synchronized(brokerIngressLock){
-                byte[] target;int packedSize=((width+1)>>1)*height;
+                byte[] target;int packedSize=compositor.packedFrameSize();
                 synchronized(lock){synchronized(desiredTilesLock){target=acquireBrokerPackedLocked(packedSize);}}
                 int damageArea=0;if(damage!=null)for(int i=0;i+3<damage.length;i+=4)damageArea+=Math.max(0,damage[i+2])*Math.max(0,damage[i+3]);
                 FrameTimings.getInstance().log(frameId,"broker damageArea="+damageArea+" packedBytes="+packedSize+" retainedPool=true");

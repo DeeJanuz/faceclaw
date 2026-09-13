@@ -189,6 +189,7 @@ public final class FaceclawExternalApps {
  private boolean complete(Connection c,String id,long clientFrameId,long contentVersion,FrameOutcome.Status status,String trace,String diagnostic,boolean metadataDropped){if(c.pendingFrames.remove(id+":"+clientFrameId)==null)return false;outcome(c,id,clientFrameId,contentVersion,status,trace,diagnostic,metadataDropped);return true;}
  private void invalidFrame(Connection c){long now=SystemClock.elapsedRealtime();synchronized(c){if(now-c.invalidWindowStart>10000){c.invalidWindowStart=now;c.invalidFrames=0;}if(++c.invalidFrames>32)main.post(()->disconnect(c.component,false));}}
  private void deliverFrame(Connection c,Surface surface,ByteBuffer pixels,int[] damage,byte[] draws,long clientFrameId,long contentVersion,String trace,boolean metadataDropped){
+  surface.rasterSinceScene=true;
   if(connections.get(c.component)!=c||!c.ready||!surface.visible||!surface.screenOn){complete(c,surface.id,clientFrameId,contentVersion,FrameOutcome.Status.HIDDEN,trace,"Surface no longer visible",metadataDropped);return;}
   String compositorId="window".equals(surface.id)?"window:apk:"+c.component:"extension:"+c.component+":"+surface.id.substring(10);FaceclawBleCommunicator display=FaceclawBleCommunicator.getActive();
   if(display!=null){display.submitExternalSurfaceFrame(pixels,compositorId,surface.width,surface.height,damage,"apk:"+c.component+":"+contentVersion,draws==null?null:ByteBuffer.wrap(draws),(status,detail)->complete(c,surface.id,clientFrameId,contentVersion,status,trace,detail,metadataDropped),trace);return;}
@@ -200,21 +201,24 @@ public final class FaceclawExternalApps {
  private void receiveResource(Connection c,ResourceRegistration resource){try{if(resource==null)return;int id=resource.id,width=resource.width,height=resource.height;String type=resource.type,hash=resource.sha256;byte[] pixels=resource.pixels;if(id<=0||id>Protocol.MAX_RESOURCES||!(type.equals("IMAGE")||type.equals("GLYPH"))||pixels==null||pixels.length!=Protocol.frameSize(width,height)||width>255||height>255||!hash.equals(resourceHash(type,width,height,pixels)))return;HostResource existing=c.resources.get(id);if(existing!=null){if(existing.type.equals(type)&&existing.sha256.equals(hash))return;else return;}int total=c.resources.values().stream().mapToInt(value->value.pixels.length).sum();if(c.resources.size()>=Protocol.MAX_RESOURCES||total+pixels.length>Protocol.MAX_RESOURCE_BYTES)return;int encoding=0,atlasId=type.equals("GLYPH")?GlyphAtlas.ensureGray(c.component+":"+hash,encoding,width,height,ByteBuffer.wrap(pixels)):ImageAtlas.ensure(c.component+":"+hash,width,height,ByteBuffer.wrap(pixels));c.resources.put(id,new HostResource(id,type,width,height,hash,pixels.clone(),atlasId,encoding));}catch(Exception ignored){}}
  private String resourceHash(String type,int width,int height,byte[] pixels)throws Exception{java.security.MessageDigest digest=java.security.MessageDigest.getInstance("SHA-256");digest.update((byte)("GLYPH".equals(type)?1:0));digest.update((byte)(width>>8));digest.update((byte)width);digest.update((byte)(height>>8));digest.update((byte)height);byte[] value=digest.digest(pixels);StringBuilder out=new StringBuilder();for(byte item:value)out.append(String.format(Locale.US,"%02x",item));return out.toString();}
  private void receiveScene(Connection c,SceneSubmission transaction){
-  if(transaction==null)return;Surface surface=surface(c,transaction.surfaceId);if(surface==null||surface.generation!=transaction.generation)return;
+  if(transaction==null)return;Surface surface=surface(c,transaction.surfaceId);
   try{
+   if(surface==null||surface.generation!=transaction.generation)throw new IllegalArgumentException("Stale scene surface");
    Parcel parcel=Parcel.obtain();int parcelBytes;try{transaction.writeToParcel(parcel,0);parcelBytes=parcel.dataSize();}finally{parcel.recycle();}if(parcelBytes>Protocol.MAX_COMMAND_BYTES)throw new IllegalArgumentException("Scene command batch too large");
    synchronized(surface){
-    long version=transaction.sceneVersion;if(version<=surface.sceneVersion)return;
+    long version=transaction.sceneVersion;if(version<=surface.sceneVersion)throw new IllegalArgumentException("Stale scene version");
     Map<Long,Bundle> next=transaction.clear?new HashMap<>():new HashMap<>(surface.nodes);ArrayList<Long> nextOrder=transaction.clear?new ArrayList<>():new ArrayList<>(surface.sceneOrder);
     for(long id:transaction.removes){next.remove(id);nextOrder.remove(id);}
     for(Bundle node:transaction.upserts){long id=node.getLong("id");validateSceneNode(c,node,id);next.put(id,new Bundle(node));if(!nextOrder.contains(id))nextOrder.add(id);}
     if(next.size()>Protocol.MAX_SCENE_NODES)throw new IllegalArgumentException("Scene node quota exceeded");validateSceneGraph(next);
     long[] explicit=transaction.order;if(explicit.length>0){LinkedHashSet<Long> ordered=new LinkedHashSet<>();for(long id:explicit)if(next.containsKey(id))ordered.add(id);for(long id:nextOrder)if(next.containsKey(id))ordered.add(id);nextOrder=new ArrayList<>(ordered);}
-    byte[] nextPixels=renderScene(c,surface,next,nextOrder);int[] damage=changedBounds(surface.pixels,nextPixels,surface.width,surface.height);
+    byte[] nextPixels=renderScene(c,surface,next,nextOrder);int[] damage=surface.rasterSinceScene?new int[]{0,0,surface.width,surface.height}:changedBounds(surface.pixels,nextPixels,surface.width,surface.height);
     surface.nodes=next;surface.sceneOrder=nextOrder;surface.sceneVersion=version;surface.pixels=nextPixels;surface.draws=null;surface.creditOutstanding=false;
+    surface.rasterSinceScene=false;
     if(damage.length!=0)deliverSceneFrame(c,surface,ByteBuffer.wrap(nextPixels),damage,"scene-"+version);
+    c.sendControl("scene-result",Protocol.object("surfaceId",surface.id,"generation",surface.generation,"sceneVersion",version,"accepted",true));
    }
-  }catch(Exception ignored){}
+  }catch(Exception rejected){try{c.sendControl("scene-result",Protocol.object("surfaceId",transaction.surfaceId,"generation",transaction.generation,"sceneVersion",transaction.sceneVersion,"accepted",false));}catch(RemoteException disconnected){/* Binder recovery owns session loss. */}}
  }
  private void validateSceneNode(Connection c,Bundle node,long id){String kind=node.getString("kind","");if(id==0||node.getLong("parentId")==id||!Arrays.asList("group","rect","rounded-rect","line","glyph","image","raster-patch").contains(kind))throw new IllegalArgumentException("Invalid scene node");int brightness=node.getInt("brightness",255),opacity=node.getInt("opacity",255);if(brightness<0||brightness>255||opacity<0||opacity>255)throw new IllegalArgumentException("Invalid scene color");if(Arrays.asList("glyph","image").contains(kind)&&!c.resources.containsKey(node.getInt("resourceId")))throw new IllegalArgumentException("Unknown scene resource");if("raster-patch".equals(kind)){byte[] pixels=node.getByteArray("pixels");if(pixels==null){if(!c.resources.containsKey(node.getInt("resourceId")))throw new IllegalArgumentException("Unknown scene resource");}else if(pixels.length!=Protocol.frameSize(node.getInt("width"),node.getInt("height")))throw new IllegalArgumentException("Invalid inline raster patch");}}
  private void validateSceneGraph(Map<Long,Bundle> nodes){for(Bundle node:nodes.values()){Set<Long> seen=new HashSet<>();long parent=node.getLong("parentId");while(parent!=0){if(!seen.add(parent))throw new IllegalArgumentException("Scene group cycle");Bundle group=nodes.get(parent);if(group==null||!"group".equals(group.getString("kind")))throw new IllegalArgumentException("Invalid scene parent");parent=group.getLong("parentId");}}}
@@ -618,7 +622,7 @@ public final class FaceclawExternalApps {
  }
  private final class Surface {
   final String id;
-  int width,height; long generation,sequence,contentVersion,clientFrameId,creditId,sceneVersion; boolean visible,screenOn,creditOutstanding;
+  int width,height; long generation,sequence,contentVersion,clientFrameId,creditId,sceneVersion; boolean visible,screenOn,creditOutstanding,rasterSinceScene;
   SharedMemory[] memories=new SharedMemory[0];ByteBuffer[] mappings=new ByteBuffer[0];byte[] pixels,draws;Map<Long,Bundle> nodes=new HashMap<>();ArrayList<Long> sceneOrder=new ArrayList<>();
   Surface(String id,int width,int height,long generation) { this.id=id;this.width=width;this.height=height;this.generation=generation;this.pixels=width>0&&height>0?new byte[width*height]:null; }
   synchronized void reset(int width,int height,long generation){this.width=width;this.height=height;this.generation=generation;this.sequence=0;this.contentVersion=0;this.clientFrameId=0;this.creditOutstanding=false;this.sceneVersion=0;this.nodes.clear();this.sceneOrder.clear();this.pixels=width>0&&height>0?new byte[width*height]:null;closePool();}
@@ -665,7 +669,11 @@ public final class FaceclawExternalApps {
  }
  private void showExtensions(Activity activity,String component) {
   ArrayList<String> features=new ArrayList<>(),labels=new ArrayList<>();
-  for(String feature:ExtensionContract.FEATURES) if(extensions.declaration(component,feature)!=null) { features.add(feature); labels.add(extensionLabel(feature)+": "+(extensions.granted(component,feature)?"allowed":"not allowed")); }
+  for(String feature:ExtensionContract.FEATURES) if(extensions.declaration(component,feature)!=null) {
+   features.add(feature);
+   String state=!extensions.granted(component,feature)?"Permission needed":extensions.controls(component,feature)?"Active":!extensions.declaration(component,feature).optBoolean("enabled")?"Disabled by app":!isConnected(component)?"Waiting for connection":"Allowed; another provider or dependency takes priority";
+   labels.add(extensionLabel(feature)+": "+state);
+  }
   if(features.isEmpty()) { new AlertDialog.Builder(activity).setMessage("This app has not published customization features. Open its settings and connect it first.").setPositiveButton("OK",null).show(); return; }
   new AlertDialog.Builder(activity).setTitle("Global customizations").setItems(labels.toArray(new String[0]),(d,index)->{
    String feature=features.get(index); boolean granted=extensions.granted(component,feature);

@@ -108,7 +108,10 @@ export class ExtensionPlatform {
   }
   onNativeEvent(component: string, type: string, data: any): boolean {
     if (["capabilities-changed", "capability-result", "capability-progress"].includes(type)) return this.appCapabilities.event(component, type, data);
-    if (type === "disconnected" || type === "changed") this.appCapabilities.remove(component);
+    if (type === "disconnected" || type === "changed") {
+      this.appCapabilities.remove(component);
+      if (this.feature("ui.notifications")?.component === component) this.lastNotificationSnapshot = "";
+    }
     if (this.messaging?.event(component, type, data)) return true;
     if (type === "extensions-changed") { this.refresh(); return true; }
     if (type !== "extension-event") return false;
@@ -186,7 +189,7 @@ export class ExtensionPlatform {
     if (this.isLocked()) {
       for (const review of this.reviews.values()) review.cancel(); this.reviews.clear();
       for (const feature of ["ui.launcher", "ui.app-menu", "ui.notifications"]) { this.setSurfaceVisibility(feature, false, false); this.hooks.closeSurface?.(feature); }
-      this.lastGesture.clear(); this.uiNotifications.clear(); this.ownNotifications.clear();
+      this.lastGesture.clear(); this.uiNotifications.clear(); this.ownNotifications.clear(); this.lastNotificationSnapshot = "";
     }
     this.lastState = ""; this.publishState();
   }
@@ -244,9 +247,14 @@ export class ExtensionPlatform {
     while (notifications.length && JSON.stringify(notifications).length + JSON.stringify(this.notificationAppCatalog()).length > 2000000) notifications.pop();
     const serialized = JSON.stringify({ notifications, notificationApps: this.notificationAppCatalog() });
     if (serialized !== this.lastNotificationSnapshot) {
-      this.lastNotificationSnapshot = serialized;
       const snapshot = JSON.stringify({ notifications, notificationApps: this.notificationAppCatalog(), revision: ++this.notificationRevision }), snapshotId = newId(), size = 16000, total = Math.ceil(snapshot.length / size);
-      for (let index = 0; index < total; index++) this.event(selected.component, "ui.notifications", { event: "notification-snapshot-fragment", snapshotId, index, total, json: snapshot.slice(index * size, (index + 1) * size) });
+      let delivered = true;
+      for (let index = 0; index < total; index++) {
+        if (!this.event(selected.component, "ui.notifications", { event: "notification-snapshot-fragment", snapshotId, index, total, json: snapshot.slice(index * size, (index + 1) * size) })) { delivered = false; break; }
+      }
+      // A disconnected recipient may reject the catalog. The next bounded poll
+      // must resend a complete snapshot rather than suppressing unchanged data.
+      if (delivered) this.lastNotificationSnapshot = serialized;
     }
     const item = arrival && leased.find(entry => entry.source.key === arrival);
     if (item && !this.isProtected()) {

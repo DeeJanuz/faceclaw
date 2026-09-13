@@ -111,3 +111,16 @@ test('locked startup and rejected delivery do not suppress the launcher catalog 
  h.platform.native.openExtensionSurface=()=>true;assert.equal(h.platform.openSurface('ui.launcher',576,260),true);
  assert.equal(h.sent.length,3,'reopening resends the current catalog');
 });
+test('notification catalog retries a rejected fragment and resends after recipient disconnects',()=>{
+ const h=harness();let accepted=false;
+ Object.assign(h.platform,{reviews:new Map(),uiNotifications:new NotificationLeases(()=>`lease`),lastNotificationSnapshot:'',isProtected:()=>false,appCapabilities:{remove(){}}});
+ h.sources([]);h.catalog(Array.from({length:901},(_,i)=>({packageName:`app.${i}`,name:`Application ${i}`})));
+ h.platform.feature=feature=>feature==='ui.notifications'?{component:'owner',generation:3}:undefined;
+ h.platform.native.sendExtension=(_owner,_feature,_type,json)=>{h.sent.push(JSON.parse(json));return accepted;};
+ h.platform.notificationsChanged();assert.equal(h.platform.lastNotificationSnapshot,'');
+ accepted=true;h.sent.length=0;h.platform.notificationsChanged();assert.ok(h.sent.length>1);
+ assert.equal(JSON.parse(h.sent.map(x=>x.json).join('')).notificationApps.length,901);
+ const count=h.sent.length;h.platform.notificationsChanged();assert.equal(h.sent.length,count);
+ h.platform.onNativeEvent('owner','disconnected',{});h.sent.length=0;h.platform.notificationsChanged();
+ assert.equal(JSON.parse(h.sent.map(x=>x.json).join('')).notificationApps.length,901);
+});

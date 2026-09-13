@@ -7,7 +7,7 @@ Recorded September 8, 2026. These results support a draft upstream review. They 
 | Check | Result |
 | --- | --- |
 | Native host/SDK boundaries | 38 passed on an Android emulator, including offline revocation and unrelated refresh regressions. |
-| Separate Demo A/B APK scenarios | 7 passed after the example polish. Real Messenger connections and separate Android UIDs; synthetic consent exists only in the separate instrumentation APK. |
+| Separate Demo A/B APK scenarios | 7 passed after the example polish. Real AIDL sessions and separate Android UIDs; synthetic consent exists only in the separate instrumentation APK. |
 | SDK unit tests | 15 passed. |
 | Demo builds and lint | Both debug and release variants built. Both debug lint tasks passed with the existing SDK 35 `OldTargetApi` warning. |
 | Host TypeScript suite before upstream update | 354/357 passed. |
@@ -38,7 +38,7 @@ After testing, original T3 grants and recorded priority lists were restored, as 
 
 ## Remaining release acceptance
 
-- Finalize SDK version/capability negotiation before independently distributed host/client releases. Preview `0.1.0` and `extensions: 1` do not identify the per-feature epoch revision.
+- Confirm coordinated SDK 1.0/protocol-2 upgrades on each physical target before distribution.
 - Decide and test renderer health behavior. A connected provider that stops delivering frames stays selected/available and can leave a blank surface; no automatic frame-health fallback was observed.
 - Complete controlled T3 notification/assistant ownership changes during active synthetic work (P11).
 - Complete full phone reboot and unavailable-at-start variants (P13). The completed restart test covered the host process with available providers.

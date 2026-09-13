@@ -47,9 +47,11 @@ public final class FaceclawSms {
  }
  private List<SubscriptionInfo> subscriptions() {
   if(!has(Manifest.permission.READ_PHONE_STATE)) return Collections.emptyList();
-  List<SubscriptionInfo> list=context.getSystemService(SubscriptionManager.class).getActiveSubscriptionInfoList(); return list==null?Collections.emptyList():list;
+  try {
+   List<SubscriptionInfo> list=context.getSystemService(SubscriptionManager.class).getActiveSubscriptionInfoList(); return list==null?Collections.emptyList():list;
+  } catch(SecurityException revoked) { return Collections.emptyList(); }
  }
- private String account(SubscriptionInfo s) { return "sms:"+s.getSubscriptionId()+":"+s.getSimSlotIndex()+":"+(Build.VERSION.SDK_INT>=28?s.getCarrierId():0); }
+ private String account(SubscriptionInfo s) { return "sms:"+s.getSubscriptionId()+":"+s.getSimSlotIndex()+":"+(Build.VERSION.SDK_INT>=29?s.getCarrierId():0); }
  private SubscriptionInfo subscription(String id) { for(SubscriptionInfo s:subscriptions()) if(account(s).equals(id)) return s; throw new IllegalArgumentException("SIM changed"); }
  private String number(String raw) {
   String value=PhoneNumberUtils.normalizeNumber(raw);

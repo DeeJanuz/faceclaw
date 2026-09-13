@@ -29,7 +29,7 @@ import java.util.Locale;
 import java.util.Map;
 
 @SuppressLint("MissingPermission")
-public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
+public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, DisplayTransport {
     private static final String TAG = "FaceclawComm";
 
     // The EvenHub image container is a memory carrier only. Its 576x288 geometry
@@ -195,6 +195,8 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
     private int lastEnqueuedHeight;
     private String lastEnqueuedFingerprint = "";
     private final Map<Integer, BleImageOptimizer.ImageUpdateStats> imageUpdateStats = new HashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<Integer, ExternalFrameOutcomeListener> externalFrameOutcomes =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     private final Object desiredTilesLock = new Object();
     private String desiredFingerprint = "";
@@ -204,11 +206,15 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
     private int desiredWidth;
     private int desiredHeight;
     private int desiredPaintMs;
-    private int desiredFrameId;
+    private volatile int desiredFrameId;
     // Screen-space deferred draws (glyphs + images) whose pixels are baked
     // into desiredPacked; the texture-cache planner may replay them as
     // on-glasses cached draws.
     private SurfaceCompositor.ScreenDraw[] desiredDraws = new SurfaceCompositor.ScreenDraw[0];
+    /** Three immutable-ownership slots: last enqueued, newest desired, and the broker's next write. */
+    private final Object brokerIngressLock = new Object();
+    private byte[][] brokerPackedPool = new byte[0][];
+    private int brokerPackedSize;
     // (frame, reason) of the last "waiting to send" line, so a frame that
     // stalls for seconds records one line per state change (see
     // noteImageStallLocked). Send-loop thread only.
@@ -219,7 +225,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
     // included in the newer composite).
     private long lastStoredCompositeSeq;
 
-    private final SurfaceCompositor compositor = new SurfaceCompositor();
+    private final RenderBroker compositor = new RenderBroker();
 
     // Phone-side model of the CFW's 64 KiB texture cache (modes 12/13/14).
     // Reset whenever the image pipeline / EvenHub session is torn down: the
@@ -597,6 +603,15 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
         return lastFirmwareCapabilities;
     }
 
+    /** Opaque equality token for firmware-owned resources; content is never exposed. */
+    public String getFirmwareFingerprint() {
+        try {
+            if(lastFirmwareCapabilities.isEmpty())return "";
+            byte[] value=java.security.MessageDigest.getInstance("SHA-256").digest(lastFirmwareCapabilities.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder out=new StringBuilder(64);for(byte item:value)out.append(String.format(java.util.Locale.US,"%02x",item));return out.toString();
+        } catch (Exception impossible) { return ""; }
+    }
+
     public void addAmbientLightListener(FaceclawAmbientLightListener listener) {
         if (listener != null) {
             ambientLightListeners.add(listener);
@@ -915,7 +930,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
         compositor.setSurfaceVisible(id, visible);
         SurfaceCompositor.Composite composite = compositor.composite();
         byte[] packed = BmpUtil.pack4bppFromGray8(composite.gray, composite.width, composite.height);
-        storeDesiredComposite(composite, packed, 0, frameId);
+        submitComposedFrame(composite, packed, 0, frameId);
     }
 
     /**
@@ -929,7 +944,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
         compositor.setBlanked(blanked);
         SurfaceCompositor.Composite composite = compositor.composite();
         byte[] packed = BmpUtil.pack4bppFromGray8(composite.gray, composite.width, composite.height);
-        storeDesiredComposite(composite, packed, 0, frameId);
+        submitComposedFrame(composite, packed, 0, frameId);
     }
 
     /**
@@ -1013,11 +1028,83 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
         FrameTimings.getInstance().spanStart(frameId, "pack-4bpp");
         byte[] packed = BmpUtil.pack4bppFromGray8(composite.gray, composite.width, composite.height);
         FrameTimings.getInstance().spanEnd(frameId, "pack-4bpp");
-        storeDesiredComposite(composite, packed, paintMs, frameId);
+        submitComposedFrame(composite, packed, paintMs, frameId);
+    }
+
+    /**
+     * Direct SDK/APK ingress. Pixels remain in Java from the private host copy
+     * through composition and BLE; only the terminal content-free outcome is
+     * returned to the application session.
+     */
+    public void submitExternalSurfaceFrame(
+            java.nio.ByteBuffer pixels8bpp,
+            String surfaceId,
+            int width,
+            int height,
+            String contentFingerprint,
+            java.nio.ByteBuffer draws,
+            ExternalFrameOutcomeListener outcome
+    ) {
+        submitExternalSurfaceFrame(pixels8bpp,surfaceId,width,height,new int[]{0,0,width,height},contentFingerprint,draws,outcome);
+    }
+
+    public void submitExternalSurfaceFrame(
+            java.nio.ByteBuffer pixels8bpp,
+            String surfaceId,
+            int width,
+            int height,
+            int[] damage,
+            String contentFingerprint,
+            java.nio.ByteBuffer draws,
+            ExternalFrameOutcomeListener outcome
+    ) {
+        submitExternalSurfaceFrame(pixels8bpp,surfaceId,width,height,damage,contentFingerprint,draws,outcome,"");
+    }
+
+    public void submitExternalSurfaceFrame(
+            java.nio.ByteBuffer pixels8bpp,
+            String surfaceId,
+            int width,
+            int height,
+            int[] damage,
+            String contentFingerprint,
+            java.nio.ByteBuffer draws,
+            ExternalFrameOutcomeListener outcome,
+            String traceId
+    ) {
+        String safeTrace=traceId!=null&&traceId.matches("[A-Za-z0-9_.:-]{1,128}")?traceId:"";
+        int frameId = FrameTimings.getInstance().startFrame("render:" + surfaceId+(safeTrace.isEmpty()?"":" trace="+safeTrace));
+        if (outcome != null) externalFrameOutcomes.put(frameId, outcome);
+        try {
+            synchronized(brokerIngressLock){
+                byte[] target;int packedSize=((width+1)>>1)*height;
+                synchronized(lock){synchronized(desiredTilesLock){target=acquireBrokerPackedLocked(packedSize);}}
+                int damageArea=0;if(damage!=null)for(int i=0;i+3<damage.length;i+=4)damageArea+=Math.max(0,damage[i+2])*Math.max(0,damage[i+3]);
+                FrameTimings.getInstance().log(frameId,"broker damageArea="+damageArea+" packedBytes="+packedSize+" retainedPool=true");
+                FrameTimings.getInstance().spanStart(frameId,"broker-intake-copy-compose-pack");
+                SurfaceCompositor.PackedComposite result=compositor.applyDamageAndCompositePacked(surfaceId,pixels8bpp,damage,contentFingerprint,draws,target);
+                FrameTimings.getInstance().spanEnd(frameId,"broker-intake-copy-compose-pack");
+                if(result.composite.damage.length==0){finishFrame(frameId,"discarded: no change");return;}
+                submitComposedFrame(result.composite,result.packed,0,frameId);
+            }
+        } catch (Throwable error) {
+            ExternalFrameOutcomeListener callback = externalFrameOutcomes.remove(frameId);
+            if (callback != null) callback.onOutcome(com.faceclaw.sdk.FrameOutcome.Status.CANCELLED,
+                    "Surface submission rejected");
+            FrameTimings.getInstance().finishFrame(frameId, "discarded: external surface rejected");
+        }
+    }
+
+    /** Called with lock then desiredTilesLock held. Pool growth occurs only on viewport changes. */
+    private byte[] acquireBrokerPackedLocked(int size){
+        if(size<=0)throw new IllegalArgumentException("Invalid packed viewport");
+        if(brokerPackedPool.length!=3||brokerPackedSize!=size){brokerPackedPool=new byte[][]{new byte[size],new byte[size],new byte[size]};brokerPackedSize=size;}
+        for(byte[] candidate:brokerPackedPool)if(candidate!=desiredPacked&&candidate!=lastEnqueuedPacked)return candidate;
+        throw new IllegalStateException("Packed framebuffer ownership exhausted");
     }
 
     /** Store a composite as the desired frame unless a newer one won the race. */
-    private void storeDesiredComposite(SurfaceCompositor.Composite composite, byte[] packed, int paintMs, int frameId) {
+    @Override public void submitComposedFrame(SurfaceCompositor.Composite composite, byte[] packed, int paintMs, int frameId) {
         int supersededFrameId = 0;
         boolean stale = false;
         synchronized (desiredTilesLock) {
@@ -1046,6 +1133,20 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
         }
         FrameTimings.getInstance().log(frameId, "image submitted as desired frame");
         interruptibleSleep.interrupt();
+    }
+
+    @Override public boolean isDisplayAvailable() {
+        synchronized (lock) { return running && sessionReady && fixedLayoutCreated && !chargingMode && !shutdownRequested; }
+    }
+
+    @Override public long renderCreditDelayMs() {
+        synchronized (lock) {
+            if (!running || !sessionReady || chargingMode || shutdownRequested) return 100;
+            int queuedImages=0;for(OutboundMessage message:pendingMessages)if("image".equals(message.kind))queuedImages++;for(OutboundMessage message:inFlightMessages)if("image".equals(message.kind))queuedImages++;
+            if (queuedImages>1 || desiredFrameId!=0) return 48;
+            if (!pendingMessages.isEmpty() || !inFlightMessages.isEmpty()) return 24;
+            return 0;
+        }
     }
 
     /**
@@ -3428,6 +3529,17 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable {
             return;
         }
         FrameTimings.getInstance().finishFrame(frameId, outcome);
+        ExternalFrameOutcomeListener external = externalFrameOutcomes.remove(frameId);
+        if (external != null) {
+            com.faceclaw.sdk.FrameOutcome.Status status;
+            if ("sent".equals(outcome)) status = com.faceclaw.sdk.FrameOutcome.Status.DISPLAY_ACKED;
+            else if (outcome.contains("no change") || outcome.contains("identical")) status = com.faceclaw.sdk.FrameOutcome.Status.DEDUPLICATED;
+            else if (outcome.contains("superseded") && outcome.contains("before store")) status = com.faceclaw.sdk.FrameOutcome.Status.SUPERSEDED_BEFORE_COMPOSE;
+            else if (outcome.contains("superseded")) status = com.faceclaw.sdk.FrameOutcome.Status.SUPERSEDED_BEFORE_SEND;
+            else if (outcome.contains("ack timeout")) status = com.faceclaw.sdk.FrameOutcome.Status.BLE_TIMEOUT;
+            else status = com.faceclaw.sdk.FrameOutcome.Status.CANCELLED;
+            try { external.onOutcome(status, outcome); } catch (Throwable ignored) {}
+        }
         final FaceclawBleCommunicatorListener current = listener;
         if (current == null) {
             return;

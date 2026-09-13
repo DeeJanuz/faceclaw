@@ -3,15 +3,17 @@ package com.faceclaw.app;
 import android.app.*;
 import android.content.*;
 import android.content.pm.*;
-import android.graphics.Color;
+import android.graphics.*;
 import android.os.*;
 import android.text.InputType;
 import android.view.WindowManager;
 import android.widget.*;
 import com.faceclaw.sdk.*;
+import com.faceclaw.sdk.ipc.*;
 import org.json.*;
 import java.nio.ByteBuffer;
 import java.util.*;
+import java.util.concurrent.*;
 
 /** Host-side policy owner. Everything from an external UID is untrusted. */
 public final class FaceclawExternalApps {
@@ -19,13 +21,18 @@ public final class FaceclawExternalApps {
  public static synchronized FaceclawExternalApps get(Context c) { if(instance==null) instance=new FaceclawExternalApps(c.getApplicationContext()); return instance; }
  private final Context context; private final Handler main=new Handler(Looper.getMainLooper());
  private final Map<String,Connection> connections=new java.util.concurrent.ConcurrentHashMap<>();
+ private final Map<String,Integer> retryAttempts=new ConcurrentHashMap<>();
+ private final Map<String,byte[]> restorationTokens=new ConcurrentHashMap<>();
+ private final Map<String,RecoveryContext> recoveryContexts=new ConcurrentHashMap<>();
  private FaceclawExternalAppListener listener;
  private final SharedPreferences prefs;
  private final FaceclawExtensions extensions;
  private final Map<String,Long> publishedFeatureGenerations=new HashMap<>();
+ private final DisplayScheduler scheduler=new DisplayScheduler(main);
  private String publishedExtensionSnapshot="";
  private JSONObject sharedStyle=new JSONObject();
  private static final String[] APPROVAL_CAPABILITIES={"notifications","dictation","previews","suppress","messaging"};
+ private static final long[] RETRY_DELAYS_MS={0,250,1000,2000,5000,10000};
  private FaceclawExternalApps(Context c) {
   context=c; prefs=ApprovalStore.open(c,"faceclaw-external-apps");
   extensions=new FaceclawExtensions(prefs,new FaceclawExtensions.Owners() {
@@ -37,6 +44,7 @@ public final class FaceclawExternalApps {
    if(Intent.ACTION_PACKAGE_REMOVED.equals(intent.getAction()) && !intent.getBooleanExtra(Intent.EXTRA_REPLACING,false) && intent.getData()!=null) {
     String pkg=intent.getData().getSchemeSpecificPart(); SharedPreferences.Editor edit=prefs.edit();
     for(String key:prefs.getAll().keySet()) if(key.startsWith(pkg+"/")) edit.remove(key); edit.apply();
+    restorationTokens.keySet().removeIf(key->key.startsWith(pkg+"/"));retryAttempts.keySet().removeIf(key->key.startsWith(pkg+"/"));recoveryContexts.keySet().removeIf(key->key.startsWith(pkg+"/"));
    }
    refresh();
   } },filter);
@@ -46,13 +54,16 @@ public final class FaceclawExternalApps {
  private String key(ServiceInfo s) { return new ComponentName(s.packageName,s.name).flattenToString(); }
  private boolean validService(ServiceInfo s) { return key(s).length()<=512 && s.exported && s.enabled && s.applicationInfo.enabled && s.metaData!=null && s.metaData.getInt("com.faceclaw.PROTOCOL_MAJOR",0)==Protocol.VERSION; }
  private boolean approved(ServiceInfo s) {
-  try { return validService(s) && PackageIdentity.forPackage(context,s.packageName).equals(prefs.getString(key(s)+":pin","")) && PackageIdentity.forUid(context,s.applicationInfo.uid).equals(prefs.getString(key(s)+":pin","")); } catch(Exception e) { return false; }
+  return validService(s)&&identityApproved(s);
+ }
+ private boolean identityApproved(ServiceInfo s) {
+  try { return PackageIdentity.forPackage(context,s.packageName).equals(prefs.getString(key(s)+":pin","")) && PackageIdentity.forUid(context,s.applicationInfo.uid).equals(prefs.getString(key(s)+":pin","")); } catch(Exception e) { return false; }
  }
  public String installedJson() {
   JSONArray result=new JSONArray();
-  for(ResolveInfo r:discover()) if(approved(r.serviceInfo)) {
+  for(ResolveInfo r:discover()) if(identityApproved(r.serviceInfo)) {
    Connection c=connections.get(key(r.serviceInfo));
-   result.put(Protocol.object("component",key(r.serviceInfo),"name",r.loadLabel(context.getPackageManager()).toString(),"connected",c!=null&&c.ready,"messaging",allows(key(r.serviceInfo),"messaging")?r.serviceInfo.metaData.getString("com.faceclaw.MESSAGING",""):""));
+   boolean compatible=validService(r.serviceInfo);result.put(Protocol.object("component",key(r.serviceInfo),"name",r.loadLabel(context.getPackageManager()).toString(),"connected",compatible&&c!=null&&c.ready,"state",compatible?(c!=null&&c.ready?"READY":"DISCOVERED"):"UPDATE_REQUIRED","messaging",allows(key(r.serviceInfo),"messaging")?r.serviceInfo.metaData.getString("com.faceclaw.MESSAGING",""):""));
   }
   return result.toString();
  }
@@ -64,8 +75,8 @@ public final class FaceclawExternalApps {
  }
  private void bind(ServiceInfo s) {
   Connection c=new Connection(s); connections.put(c.component,c);
-  try { if(!context.bindService(new Intent(Protocol.ACTION).setComponent(new ComponentName(s.packageName,s.name)),c,Context.BIND_AUTO_CREATE)) disconnect(c.component,false); }
-  catch(Exception e) { disconnect(c.component,false); }
+  try { if(!context.bindService(new Intent(Protocol.ACTION).setComponent(new ComponentName(s.packageName,s.name)),c,Context.BIND_AUTO_CREATE)) disconnect(c.component,true); }
+  catch(Exception e) { disconnect(c.component,true); }
  }
  private void emit(String component,String type,JSONObject data) { if(listener!=null) listener.onEvent(component,type,data.toString()); }
  public boolean isConnected(String component) { Connection c=connections.get(component); return c!=null&&c.ready&&approved(c.service); }
@@ -89,7 +100,7 @@ public final class FaceclawExternalApps {
    JSONObject data=new JSONObject(json);
    if(!Boolean.TRUE.equals(data.opt("confirmed"))||!(data.opt("text") instanceof String)||data.getString("text").trim().isEmpty()||data.getString("text").length()>8000) return false;
    for(String field:new String[]{"id","target","replyToken"}) if(!(data.opt(field) instanceof String)||data.getString(field).isEmpty()||data.getString(field).length()>(field.equals("target")?512:128)) return false;
-   c.remote.send(Protocol.message(Protocol.EVENT,c.session,"notification-reply",data)); return true;
+   c.sendControl("notification-reply",data); return true;
   } catch(Exception ignored) { return false; }
  }
  public void send(String component,String type,String json) {
@@ -97,14 +108,26 @@ public final class FaceclawExternalApps {
   Connection c=connections.get(component); if(c==null||!c.ready||!approved(c.service)) return;
   try {
    JSONObject data=new JSONObject(json);
+   String inputTrace="";if(type.equals("input")){inputTrace=data.optString("traceId");if(inputTrace.isEmpty()){inputTrace=UUID.randomUUID().toString();data.put("traceId",inputTrace);}}
    if(type.equals("messaging-request")&&!allows(component,"messaging")) return;
+   if(type.equals("capability-request")) {
+    String requestId=data.optString("requestId"),capabilityId=data.optString("capabilityId"); int version=data.optInt("capabilityVersion"); long now=System.currentTimeMillis(),expiry=data.optLong("expiresAt");
+    JSONObject published=null; for(int i=0;i<c.capabilities.length();i++) { JSONObject capability=c.capabilities.optJSONObject(i); if(capability!=null&&capabilityId.equals(capability.optString("id"))&&version==capability.optInt("version")) { published=capability; break; } }
+    if(published==null||!ExtensionContract.token(requestId)||c.capabilityRequests.containsKey(requestId)||c.capabilityRequests.size()>=32||data.optLong("catalogGeneration")!=c.capabilityGeneration||
+       expiry<=now||expiry>now+30000||data.optJSONObject("arguments")==null||data.optJSONObject("caller")==null||data.toString().length()>Protocol.MAX_JSON/2) return;
+    try { data.put("arguments",CapabilityContract.arguments(published.getJSONObject("inputSchema"),data.getJSONObject("arguments"))); }
+    catch(Exception invalidArguments) { return; }
+    c.capabilityRequests.put(requestId,capabilityId);
+   }
+   if(type.equals("capability-cancel")) c.capabilityRequests.remove(data.optString("requestId"));
    if(type.equals("open")||type.equals("resize")) {
     c.width=data.getInt("width"); c.height=data.getInt("height"); Protocol.frameSize(c.width,c.height); data.put("generation",++c.generation); c.open=true;
-    c.frames.clear();
+    c.windowSurface().reset(c.width,c.height,c.generation);
    }
-   if(type.equals("close")) { c.open=false; c.visible=false; c.generation++; c.frames.clear(); }
-   if(type.equals("visibility")) { c.visible=data.optBoolean("visible"); c.screenOn=data.optBoolean("screenOn"); if(!c.visible||!c.screenOn)c.frames.clear(); }
-   c.remote.send(Protocol.message(Protocol.EVENT,c.session,type,data));
+   if(type.equals("close")) { c.open=false; c.visible=false; c.generation++; c.windowSurface().setState(false,false,c.generation);c.restorationToken=null;restorationTokens.remove(component); }
+   if(type.equals("visibility")) { c.visible=data.optBoolean("visible"); c.screenOn=data.optBoolean("screenOn"); c.windowSurface().setState(c.visible,c.screenOn,c.generation); }
+   c.sendControl(type,data);
+   if(type.equals("render")||type.equals("input")||type.equals("open")||type.equals("resize")||(type.equals("visibility")&&c.visible&&c.screenOn))scheduleCredit(c,c.windowSurface(),type.equals("input")?DisplayScheduler.Priority.DIRECT_INPUT:DisplayScheduler.Priority.FOCUSED_ANIMATION,inputTrace);
   } catch(Exception e) { disconnect(component,true); }
  }
  private void publishCapabilities(String component) {
@@ -112,92 +135,169 @@ public final class FaceclawExternalApps {
  }
  private void disconnect(String component,boolean retry) {
   Connection c=connections.remove(component); if(c==null) return;
-  c.ready=false; c.generation++; c.frames.clear(); for(Surface surface:c.surfaces.values())surface.frames.clear();
-  try { if(c.remote!=null) c.remote.send(Protocol.message(Protocol.EVENT,c.session,"revoke",null)); } catch(Exception ignored) {}
+  if(retry)showReconnecting(c);
+  if(retry)recoveryContexts.put(component,new RecoveryContext(c));else recoveryContexts.remove(component);
+  c.ready=false;for(PendingFrame frame:new ArrayList<>(c.pendingFrames.values()))complete(c,frame.surfaceId,frame.clientFrameId,frame.contentVersion,FrameOutcome.Status.SESSION_LOST,frame.traceId,"Application Binder session lost",frame.metadataDropped);c.generation++; for(Surface surface:c.surfaces.values())surface.close();c.renderExecutor.shutdownNow();
+  try { if(c.remote!=null) { Bundle reason=new Bundle();reason.putString("reason",(retry?DisconnectInfo.Reason.BINDER_DIED:DisconnectInfo.Reason.HOST_STOPPED).name());reason.putBoolean("recoverable",retry);reason.putString("detail",retry?"Host reconnecting":"Host closed session");c.remote.close(reason); } } catch(Exception ignored) {}
   try { context.unbindService(c); } catch(Exception ignored) {}
-  emit(component,"disconnected",new JSONObject()); extensionsChanged();
-  if(retry && approved(c.service)) main.postDelayed(()->{ if(!connections.containsKey(component)&&approved(c.service)) bind(c.service); },5000);
+  emit(component,retry?"recovering":"disconnected",Protocol.object("category",retry?"binder":"host-policy")); extensionsChanged();
+  if(retry && approved(c.service)) {int attempt=retryAttempts.merge(component,1,Integer::sum)-1;long delay=RETRY_DELAYS_MS[Math.min(attempt,RETRY_DELAYS_MS.length-1)];main.postDelayed(()->{ if(!connections.containsKey(component)&&approved(c.service)) bind(c.service); },delay);}
+  else retryAttempts.remove(component);
  }
- /** At most one private snapshot waits for the 16ms boundary; the final frame is never dropped. */
- private final class FrameDelivery {
-  Runnable pending; boolean scheduled; long lastFrame;
-  final Runnable flush=()->{
-   scheduled=false; Runnable delivery=pending; pending=null;
-   if(delivery!=null) { lastFrame=SystemClock.elapsedRealtime(); delivery.run(); }
-  };
-  void offer(Runnable delivery,long now) {
-   pending=delivery;
-   if(now-lastFrame>=16) { main.removeCallbacks(flush); flush.run(); }
-   else if(!scheduled) { scheduled=true; main.postDelayed(flush,16-(now-lastFrame)); }
-  }
-  void clear() { pending=null; scheduled=false; lastFrame=0; main.removeCallbacks(flush); }
+ private void showReconnecting(Connection c){
+  if(!c.open||c.width<1||c.height<1)return;try{Bitmap bitmap=Bitmap.createBitmap(c.width,c.height,Bitmap.Config.ARGB_8888);Canvas canvas=new Canvas(bitmap);canvas.drawColor(Color.BLACK);Paint border=new Paint();border.setStyle(Paint.Style.STROKE);border.setStrokeWidth(2);border.setColor(Color.rgb(150,150,150));canvas.drawRoundRect(12,12,c.width-12,c.height-12,8,8,border);Ui.text(canvas,"Reconnecting…",24,Math.max(42,c.height/2),18,Color.WHITE);int[] argb=new int[c.width*c.height];bitmap.getPixels(argb,0,c.width,0,0,c.width,c.height);bitmap.recycle();byte[] gray=new byte[argb.length];for(int i=0;i<argb.length;i++){int value=argb[i];gray[i]=(byte)((((value>>16)&255)*54+((value>>8)&255)*183+(value&255)*19)>>8);}String id="window:apk:"+c.component;FaceclawBleCommunicator display=FaceclawBleCommunicator.getActive();if(display!=null)display.submitExternalSurfaceFrame(ByteBuffer.wrap(gray),id,c.width,c.height,"reconnecting:"+c.generation,null,null);else{FaceclawPreviewCompositor preview=FaceclawPreviewCompositor.getActive();if(preview!=null)preview.submitSurfaceFrame(ByteBuffer.wrap(gray),id,0,0,c.width,c.height,"reconnecting:"+c.generation,0,0,null);}}catch(Exception ignored){}
  }
+ private static final class HostResource {final int id,width,height,atlasId,encoding;final String type,sha256;final byte[] pixels;HostResource(int id,String type,int width,int height,String sha256,byte[] pixels,int atlasId,int encoding){this.id=id;this.type=type;this.width=width;this.height=height;this.sha256=sha256;this.pixels=pixels;this.atlasId=atlasId;this.encoding=encoding;}}
+ private static final class RecoverySurface {final String id;final int width,height;final long generation;final boolean visible,screenOn;RecoverySurface(Surface value){id=value.id;width=value.width;height=value.height;generation=value.generation+1;visible=value.visible;screenOn=value.screenOn;}}
+ private static final class RecoveryContext {final int width,height;final long generation;final boolean open,visible,screenOn;final ArrayList<RecoverySurface> surfaces=new ArrayList<>();RecoveryContext(Connection value){width=value.width;height=value.height;generation=value.generation+1;open=value.open;visible=value.visible;screenOn=value.screenOn;for(Surface surface:value.surfaces.values())surfaces.add(new RecoverySurface(surface));}}
+ private Surface surface(Connection c,String wireId){if("window".equals(wireId))return c.windowSurface();if(wireId!=null&&wireId.startsWith("extension:"))return c.surfaces.get(wireId.substring(10));return null;}
+ private void registerSurface(Connection c,Bundle b){
+  try{if(connections.get(c.component)!=c||!c.ready)return;String id=b.getString("surfaceId","");long generation=b.getLong("generation");int width=b.getInt("width"),height=b.getInt("height"),size=Protocol.frameSize(width,height)+Protocol.FRAME_HEADER_BYTES;Surface surface=surface(c,id);if(surface==null||surface.generation!=generation||surface.width!=width||surface.height!=height)return;
+   ArrayList<SharedMemory> memories=b.getParcelableArrayList("buffers");if(memories==null||memories.size()!=Protocol.BUFFER_SLOTS)return;ByteBuffer[] mappings=new ByteBuffer[memories.size()];for(int i=0;i<memories.size();i++){SharedMemory memory=memories.get(i);if(memory==null||memory.getSize()!=size)throw new IllegalArgumentException("Invalid pool slot");mappings[i]=memory.mapReadOnly();}
+   synchronized(surface){surface.closePool();surface.memories=memories.toArray(new SharedMemory[0]);surface.mappings=mappings;}
+   main.post(()->scheduleCredit(c,surface,"window".equals(id)?DisplayScheduler.Priority.FOCUSED_ANIMATION:DisplayScheduler.Priority.VISIBLE_EXTENSION));
+  }catch(Exception error){invalidFrame(c);}
+ }
+ private void unregisterSurface(Connection c,String id,long generation){Surface surface=surface(c,id);if(surface!=null&&surface.generation==generation)surface.closePool();}
+ private void requestCredit(Connection c,String id,long generation,int reason){Surface surface=surface(c,id);if(surface==null||surface.generation!=generation)return;DisplayScheduler.Priority priority=reason==InvalidateReason.INPUT.ordinal()?DisplayScheduler.Priority.DIRECT_INPUT:(id.startsWith("extension:")?DisplayScheduler.Priority.VISIBLE_EXTENSION:DisplayScheduler.Priority.FOCUSED_ANIMATION);scheduleCredit(c,surface,priority);}
+ private void scheduleCredit(Connection c,Surface surface,DisplayScheduler.Priority priority){scheduleCredit(c,surface,priority,"");}
+ private void scheduleCredit(Connection c,Surface surface,DisplayScheduler.Priority priority,String causeTrace){
+  if(c==null||surface==null||!c.ready||c.remote==null||!surface.visible||!surface.screenOn)return;synchronized(surface){if(surface.creditOutstanding)return;surface.creditOutstanding=true;}
+  final String trace=causeTrace!=null&&causeTrace.matches("[A-Za-z0-9_.:-]{1,128}")?causeTrace:UUID.randomUUID().toString();FaceclawBleCommunicator display=FaceclawBleCommunicator.getActive();long pacing=priority==DisplayScheduler.Priority.DIRECT_INPUT?0:display==null?0:display.renderCreditDelayMs();scheduler.offer(c.component+":"+surface.id,priority,pacing,()->{FaceclawBleCommunicator currentDisplay=FaceclawBleCommunicator.getActive();if(currentDisplay!=null&&!currentDisplay.isDisplayAvailable()&&FaceclawPreviewCompositor.getActive()==null){synchronized(surface){surface.creditOutstanding=false;}main.postDelayed(()->scheduleCredit(c,surface,priority,trace),100);return;}synchronized(surface){if(connections.get(c.component)!=c||!c.ready||!surface.visible||!surface.screenOn){surface.creditOutstanding=false;return;}surface.creditId++;}try{Bundle credit=new Bundle();credit.putString("surfaceId",surface.id);credit.putLong("generation",surface.generation);credit.putLong("creditId",surface.creditId);credit.putLong("targetPresentationTimeNanos",SystemClock.elapsedRealtimeNanos()+16_000_000L);credit.putInt("maxDamageRects",Protocol.MAX_DAMAGE_RECTS);credit.putString("traceId",trace);credit.putString("schedulerPriority",priority.name());c.remote.grantRenderCredit(credit);}catch(Exception error){main.post(()->disconnect(c.component,true));}});
+ }
+ private void receiveFrame(Connection c,Bundle b){
+  String id=b.getString("surfaceId","");long generation=b.getLong("generation"),sequence=b.getLong("sequence"),clientFrameId=b.getLong("clientFrameId"),contentVersion=b.getLong("contentVersion");int slotId=b.getInt("slotId",-1);String trace=b.getString("traceId","");Surface surface=surface(c,id);
+  if(surface==null){outcome(c,id,clientFrameId,contentVersion,FrameOutcome.Status.STALE_GENERATION,trace,"Unknown surface",false);return;}
+  try{
+   synchronized(surface){
+    if(surface.generation!=generation){outcome(c,id,clientFrameId,contentVersion,FrameOutcome.Status.STALE_GENERATION,trace,"Stale generation",false);return;}
+    if(!surface.visible||!surface.screenOn){release(c,surface,slotId,sequence);surface.creditOutstanding=false;outcome(c,id,clientFrameId,contentVersion,FrameOutcome.Status.HIDDEN,trace,"Surface hidden",false);return;}
+    if(!surface.creditOutstanding||b.getLong("creditId")!=surface.creditId){release(c,surface,slotId,sequence);outcome(c,id,clientFrameId,contentVersion,FrameOutcome.Status.THROTTLED,trace,"No matching render credit",false);invalidFrame(c);return;}
+    surface.creditOutstanding=false;if(slotId<0||slotId>=surface.mappings.length||sequence<=surface.sequence){release(c,surface,slotId,sequence);outcome(c,id,clientFrameId,contentVersion,FrameOutcome.Status.STALE_GENERATION,trace,"Invalid slot or sequence",false);return;}
+    FrameWire.Validation validation=FrameWire.validate(surface.mappings[slotId],generation,sequence,surface.width*surface.height);if(validation!=FrameWire.Validation.VALID){release(c,surface,slotId,sequence);outcome(c,id,clientFrameId,contentVersion,validation==FrameWire.Validation.TORN?FrameOutcome.Status.TORN_WRITE:FrameOutcome.Status.STALE_GENERATION,trace,"Frame header validation failed",false);invalidFrame(c);return;}
+    int[] damage=validateDamage(b.getIntArray("damage"),surface.width,surface.height);byte[] rawDraws=b.getByteArray("draws");TranslatedDraws translated=translateDraws(c,rawDraws);byte[] draws=translated.bytes;boolean metadataDropped=translated.dropped;if(clientFrameId<=surface.clientFrameId){release(c,surface,slotId,sequence);outcome(c,id,clientFrameId,contentVersion,FrameOutcome.Status.THROTTLED,trace,"Client frame ID did not increase",metadataDropped);invalidFrame(c);return;}surface.clientFrameId=clientFrameId;surface.sequence=sequence;surface.contentVersion=contentVersion;surface.draws=draws;accepted(c,id,clientFrameId,contentVersion,trace,metadataDropped);
+    deliverFrame(c,surface,FrameWire.pixels(surface.mappings[slotId],surface.width*surface.height),damage,draws,clientFrameId,contentVersion,trace,metadataDropped);release(c,surface,slotId,sequence);
+    if(b.getBoolean("requestNextFrame"))main.post(()->scheduleCredit(c,surface,DisplayScheduler.Priority.FOCUSED_ANIMATION));
+   }
+  }catch(Exception error){release(c,surface,slotId,sequence);if(!complete(c,id,clientFrameId,contentVersion,FrameOutcome.Status.TORN_WRITE,trace,"Rejected frame",false))outcome(c,id,clientFrameId,contentVersion,FrameOutcome.Status.TORN_WRITE,trace,"Rejected frame",false);invalidFrame(c);}
+ }
+ private int[] validateDamage(int[] value,int width,int height){if(value==null||value.length==0)return new int[]{0,0,width,height};if(value.length%4!=0||value.length/4>Protocol.MAX_DAMAGE_RECTS)throw new IllegalArgumentException("Invalid damage");for(int i=0;i<value.length;i+=4)if(value[i]<0||value[i+1]<0||value[i+2]<=0||value[i+3]<=0||value[i]+value[i+2]>width||value[i+1]+value[i+3]>height)throw new IllegalArgumentException("Damage outside surface");return value;}
+ private void release(Connection c,Surface surface,int slot,long sequence){try{if(c.remote!=null)c.remote.onBufferReleased(surface.id,surface.generation,slot,sequence);}catch(Exception ignored){}}
+ private void outcome(Connection c,String id,long clientFrameId,long contentVersion,FrameOutcome.Status status,String trace,String diagnostic,boolean metadataDropped){try{if(c.remote==null)return;Bundle b=new Bundle();b.putString("surfaceId",id);b.putLong("clientFrameId",clientFrameId);b.putLong("contentVersion",contentVersion);b.putString("status",status.name());b.putString("traceId",trace);b.putString("diagnostic",diagnostic);b.putBoolean("metadataDropped",metadataDropped);c.remote.onFrameOutcome(b);}catch(Exception ignored){}}
+ private static final class PendingFrame{final String surfaceId,traceId;final long clientFrameId,contentVersion;final boolean metadataDropped;PendingFrame(String surfaceId,long clientFrameId,long contentVersion,String traceId,boolean metadataDropped){this.surfaceId=surfaceId;this.clientFrameId=clientFrameId;this.contentVersion=contentVersion;this.traceId=traceId;this.metadataDropped=metadataDropped;}}
+ private void accepted(Connection c,String id,long clientFrameId,long contentVersion,String trace,boolean metadataDropped){c.pendingFrames.put(id+":"+clientFrameId,new PendingFrame(id,clientFrameId,contentVersion,trace,metadataDropped));}
+ private boolean complete(Connection c,String id,long clientFrameId,long contentVersion,FrameOutcome.Status status,String trace,String diagnostic,boolean metadataDropped){if(c.pendingFrames.remove(id+":"+clientFrameId)==null)return false;outcome(c,id,clientFrameId,contentVersion,status,trace,diagnostic,metadataDropped);return true;}
+ private void invalidFrame(Connection c){long now=SystemClock.elapsedRealtime();synchronized(c){if(now-c.invalidWindowStart>10000){c.invalidWindowStart=now;c.invalidFrames=0;}if(++c.invalidFrames>32)main.post(()->disconnect(c.component,false));}}
+ private void deliverFrame(Connection c,Surface surface,ByteBuffer pixels,int[] damage,byte[] draws,long clientFrameId,long contentVersion,String trace,boolean metadataDropped){
+  if(connections.get(c.component)!=c||!c.ready||!surface.visible||!surface.screenOn){complete(c,surface.id,clientFrameId,contentVersion,FrameOutcome.Status.HIDDEN,trace,"Surface no longer visible",metadataDropped);return;}
+  String compositorId="window".equals(surface.id)?"window:apk:"+c.component:"extension:"+c.component+":"+surface.id.substring(10);FaceclawBleCommunicator display=FaceclawBleCommunicator.getActive();
+  if(display!=null){display.submitExternalSurfaceFrame(pixels,compositorId,surface.width,surface.height,damage,"apk:"+c.component+":"+contentVersion,draws==null?null:ByteBuffer.wrap(draws),(status,detail)->complete(c,surface.id,clientFrameId,contentVersion,status,trace,detail,metadataDropped),trace);return;}
+  FaceclawPreviewCompositor preview=FaceclawPreviewCompositor.getActive();if(preview!=null){try{preview.submitSurfaceFrame(pixels,compositorId,0,0,surface.width,surface.height,"apk:"+contentVersion,0,0,draws==null?null:ByteBuffer.wrap(draws));complete(c,surface.id,clientFrameId,contentVersion,FrameOutcome.Status.PREVIEW_COMMITTED,trace,"Preview compositor committed",metadataDropped);}catch(Exception error){complete(c,surface.id,clientFrameId,contentVersion,FrameOutcome.Status.CANCELLED,trace,"Preview surface unavailable",metadataDropped);}return;}
+  complete(c,surface.id,clientFrameId,contentVersion,FrameOutcome.Status.HIDDEN,trace,"No display transport",metadataDropped);
+ }
+ private static final class TranslatedDraws{final byte[] bytes;final boolean dropped;TranslatedDraws(byte[] bytes,boolean dropped){this.bytes=bytes;this.dropped=dropped;}}
+ private TranslatedDraws translateDraws(Connection c,byte[] wire){if(wire==null||wire.length==0)return new TranslatedDraws(null,false);if(wire.length>Protocol.MAX_COMMAND_BYTES||wire.length%DrawBatch.RECORD_BYTES!=0)return new TranslatedDraws(null,true);ByteBuffer in=ByteBuffer.wrap(wire).order(java.nio.ByteOrder.LITTLE_ENDIAN),out=ByteBuffer.allocate((wire.length/DrawBatch.RECORD_BYTES)*12).order(java.nio.ByteOrder.LITTLE_ENDIAN);boolean dropped=false;while(in.remaining()>=DrawBatch.RECORD_BYTES){int kind=in.get()&255,id=in.getInt(),x=in.getShort(),y=in.getShort(),brightness=in.get()&255,reserved=in.getInt();HostResource resource=c.resources.get(id);if(resource==null||kind!=("GLYPH".equals(resource.type)?1:0)||reserved!=0){dropped=true;continue;}if("GLYPH".equals(resource.type))out.put((byte)0).putShort((short)resource.atlasId).putInt(resource.encoding).putShort((short)x).putShort((short)y).put((byte)brightness);else if(brightness==255)out.put((byte)1).putInt(resource.atlasId).putShort((short)x).putShort((short)y);else dropped=true;}return new TranslatedDraws(out.position()==0?null:Arrays.copyOf(out.array(),out.position()),dropped);}
+ private void receiveResource(Connection c,Bundle b){try{int id=b.getInt("id"),width=b.getInt("width"),height=b.getInt("height");String type=b.getString("type",""),hash=b.getString("sha256","");byte[] pixels=b.getByteArray("pixels");if(id<=0||id>Protocol.MAX_RESOURCES||!(type.equals("IMAGE")||type.equals("GLYPH"))||pixels==null||pixels.length!=Protocol.frameSize(width,height)||width>255||height>255||!hash.equals(resourceHash(type,width,height,pixels)))return;HostResource existing=c.resources.get(id);if(existing!=null){if(existing.type.equals(type)&&existing.sha256.equals(hash))return;else return;}int total=c.resources.values().stream().mapToInt(resource->resource.pixels.length).sum();if(c.resources.size()>=Protocol.MAX_RESOURCES||total+pixels.length>Protocol.MAX_RESOURCE_BYTES)return;int encoding=0,atlasId=type.equals("GLYPH")?GlyphAtlas.ensureGray(c.component+":"+hash,encoding,width,height,ByteBuffer.wrap(pixels)):ImageAtlas.ensure(c.component+":"+hash,width,height,ByteBuffer.wrap(pixels));c.resources.put(id,new HostResource(id,type,width,height,hash,pixels.clone(),atlasId,encoding));}catch(Exception ignored){}}
+ private String resourceHash(String type,int width,int height,byte[] pixels)throws Exception{java.security.MessageDigest digest=java.security.MessageDigest.getInstance("SHA-256");digest.update((byte)("GLYPH".equals(type)?1:0));digest.update((byte)(width>>8));digest.update((byte)width);digest.update((byte)(height>>8));digest.update((byte)height);byte[] value=digest.digest(pixels);StringBuilder out=new StringBuilder();for(byte item:value)out.append(String.format(Locale.US,"%02x",item));return out.toString();}
+ private void receiveScene(Connection c,Bundle transaction){
+  Surface surface=surface(c,transaction.getString("surfaceId",""));if(surface==null||surface.generation!=transaction.getLong("generation"))return;
+  try{
+   Parcel parcel=Parcel.obtain();int parcelBytes;try{parcel.writeBundle(transaction);parcelBytes=parcel.dataSize();}finally{parcel.recycle();}if(parcelBytes>Protocol.MAX_COMMAND_BYTES)throw new IllegalArgumentException("Scene command batch too large");
+   synchronized(surface){
+    long version=transaction.getLong("sceneVersion");if(version<=surface.sceneVersion)return;
+    Map<Long,Bundle> next=transaction.getBoolean("clear")?new HashMap<>():new HashMap<>(surface.nodes);ArrayList<Long> nextOrder=transaction.getBoolean("clear")?new ArrayList<>():new ArrayList<>(surface.sceneOrder);
+    long[] removals=transaction.getLongArray("removes");if(removals!=null)for(long id:removals){next.remove(id);nextOrder.remove(id);}
+    ArrayList<Bundle> upserts=transaction.getParcelableArrayList("upserts");if(upserts!=null)for(Bundle node:upserts){long id=node.getLong("id");validateSceneNode(c,node,id);next.put(id,new Bundle(node));if(!nextOrder.contains(id))nextOrder.add(id);}
+    if(next.size()>Protocol.MAX_SCENE_NODES)throw new IllegalArgumentException("Scene node quota exceeded");validateSceneGraph(next);
+    long[] explicit=transaction.getLongArray("order");if(explicit!=null&&explicit.length>0){LinkedHashSet<Long> ordered=new LinkedHashSet<>();for(long id:explicit)if(next.containsKey(id))ordered.add(id);for(long id:nextOrder)if(next.containsKey(id))ordered.add(id);nextOrder=new ArrayList<>(ordered);}
+    byte[] nextPixels=renderScene(c,surface,next,nextOrder);int[] damage=changedBounds(surface.pixels,nextPixels,surface.width,surface.height);
+    surface.nodes=next;surface.sceneOrder=nextOrder;surface.sceneVersion=version;surface.pixels=nextPixels;surface.draws=null;surface.creditOutstanding=false;
+    if(damage.length!=0)deliverSceneFrame(c,surface,ByteBuffer.wrap(nextPixels),damage,"scene-"+version);
+   }
+  }catch(Exception ignored){}
+ }
+ private void validateSceneNode(Connection c,Bundle node,long id){String kind=node.getString("kind","");if(id==0||node.getLong("parentId")==id||!Arrays.asList("group","rect","rounded-rect","line","glyph","image","raster-patch").contains(kind))throw new IllegalArgumentException("Invalid scene node");int brightness=node.getInt("brightness",255),opacity=node.getInt("opacity",255);if(brightness<0||brightness>255||opacity<0||opacity>255)throw new IllegalArgumentException("Invalid scene color");if(Arrays.asList("glyph","image").contains(kind)&&!c.resources.containsKey(node.getInt("resourceId")))throw new IllegalArgumentException("Unknown scene resource");if("raster-patch".equals(kind)){byte[] pixels=node.getByteArray("pixels");if(pixels==null){if(!c.resources.containsKey(node.getInt("resourceId")))throw new IllegalArgumentException("Unknown scene resource");}else if(pixels.length!=Protocol.frameSize(node.getInt("width"),node.getInt("height")))throw new IllegalArgumentException("Invalid inline raster patch");}}
+ private void validateSceneGraph(Map<Long,Bundle> nodes){for(Bundle node:nodes.values()){Set<Long> seen=new HashSet<>();long parent=node.getLong("parentId");while(parent!=0){if(!seen.add(parent))throw new IllegalArgumentException("Scene group cycle");Bundle group=nodes.get(parent);if(group==null||!"group".equals(group.getString("kind")))throw new IllegalArgumentException("Invalid scene parent");parent=group.getLong("parentId");}}}
+ private static final class ScenePlacement{int x,y,z,brightness=255,opacity=255,left,top,right,bottom;ScenePlacement(int width,int height){right=width;bottom=height;}}
+ private ScenePlacement placeSceneNode(Bundle node,Map<Long,Bundle> nodes,int width,int height){ScenePlacement p=new ScenePlacement(width,height);ArrayList<Bundle> parents=new ArrayList<>();long parent=node.getLong("parentId");while(parent!=0){Bundle group=nodes.get(parent);parents.add(group);parent=group.getLong("parentId");}Collections.reverse(parents);for(Bundle group:parents){p.x+=group.getInt("x");p.y+=group.getInt("y");p.z+=group.getInt("z");p.brightness=p.brightness*group.getInt("brightness",255)/255;p.opacity=p.opacity*group.getInt("opacity",255)/255;int clipWidth=group.getInt("clipWidth"),clipHeight=group.getInt("clipHeight");if(clipWidth>0&&clipHeight>0){p.left=Math.max(p.left,p.x+group.getInt("clipX"));p.top=Math.max(p.top,p.y+group.getInt("clipY"));p.right=Math.min(p.right,p.x+group.getInt("clipX")+clipWidth);p.bottom=Math.min(p.bottom,p.y+group.getInt("clipY")+clipHeight);}}p.x+=node.getInt("x");p.y+=node.getInt("y");p.z+=node.getInt("z");p.opacity=p.opacity*node.getInt("opacity",255)/255;return p;}
+ private byte[] renderScene(Connection c,Surface surface,Map<Long,Bundle> sceneNodes,List<Long> sceneOrder){byte[] pixels=new byte[surface.width*surface.height];Map<Long,Integer> rank=new HashMap<>();for(int i=0;i<sceneOrder.size();i++)rank.put(sceneOrder.get(i),i);List<Bundle> nodes=new ArrayList<>(sceneNodes.values());nodes.removeIf(node->"group".equals(node.getString("kind")));nodes.sort((a,b)->{int za=placeSceneNode(a,sceneNodes,surface.width,surface.height).z,zb=placeSceneNode(b,sceneNodes,surface.width,surface.height).z;if(za!=zb)return Integer.compare(za,zb);return Integer.compare(rank.getOrDefault(a.getLong("id"),Integer.MAX_VALUE),rank.getOrDefault(b.getLong("id"),Integer.MAX_VALUE));});for(Bundle node:nodes){String kind=node.getString("kind","");ScenePlacement p=placeSceneNode(node,sceneNodes,surface.width,surface.height);int value=node.getInt("brightness",255)*p.brightness/255*p.opacity/255;if(kind.equals("rect"))fillRect(pixels,surface.width,surface.height,p.x,p.y,node.getInt("width"),node.getInt("height"),(byte)value,p);else if(kind.equals("rounded-rect"))fillRoundedRect(pixels,surface.width,surface.height,p.x,p.y,node.getInt("width"),node.getInt("height"),node.getInt("radius"),(byte)value,p);else if(kind.equals("line"))drawLine(pixels,surface.width,surface.height,p.x,p.y,p.x+node.getInt("x2")-node.getInt("x"),p.y+node.getInt("y2")-node.getInt("y"),node.getInt("width"),(byte)value,p);else{HostResource resource=c.resources.get(node.getInt("resourceId"));if(resource!=null)blit(pixels,surface.width,surface.height,resource.pixels,resource.width,resource.height,p.x,p.y,value,p);else{byte[] inline=node.getByteArray("pixels");if(inline!=null)blit(pixels,surface.width,surface.height,inline,node.getInt("width"),node.getInt("height"),p.x,p.y,value,p);}}}return pixels;}
+ private void fillRect(byte[] pixels,int surfaceWidth,int surfaceHeight,int x,int y,int width,int height,byte value,ScenePlacement clip){int left=Math.max(Math.max(0,x),clip.left),top=Math.max(Math.max(0,y),clip.top),right=Math.min(Math.min(surfaceWidth,x+width),clip.right),bottom=Math.min(Math.min(surfaceHeight,y+height),clip.bottom);for(int row=top;row<bottom;row++)Arrays.fill(pixels,row*surfaceWidth+left,row*surfaceWidth+right,value);}
+ private void fillRoundedRect(byte[] pixels,int surfaceWidth,int surfaceHeight,int x,int y,int width,int height,int radius,byte value,ScenePlacement clip){int r=Math.max(0,Math.min(radius,Math.min(width,height)/2));if(r==0){fillRect(pixels,surfaceWidth,surfaceHeight,x,y,width,height,value,clip);return;}for(int row=0;row<height;row++){int cy=row<r?r-row-1:row>=height-r?row-(height-r):0;int inset=cy==0?0:(int)Math.ceil(r-Math.sqrt(Math.max(0,r*r-cy*cy)));fillRect(pixels,surfaceWidth,surfaceHeight,x+inset,y+row,width-inset*2,1,value,clip);}}
+ private void drawLine(byte[] pixels,int surfaceWidth,int surfaceHeight,int x0,int y0,int x1,int y1,int width,byte value,ScenePlacement clip){int dx=Math.abs(x1-x0),sx=x0<x1?1:-1,dy=-Math.abs(y1-y0),sy=y0<y1?1:-1,error=dx+dy;while(true){fillRect(pixels,surfaceWidth,surfaceHeight,x0-width/2,y0-width/2,width,width,value,clip);if(x0==x1&&y0==y1)break;int e=2*error;if(e>=dy){error+=dy;x0+=sx;}if(e<=dx){error+=dx;y0+=sy;}}}
+ private void blit(byte[] pixels,int surfaceWidth,int surfaceHeight,byte[] sourcePixels,int sourceWidth,int sourceHeight,int x,int y,int value,ScenePlacement clip){for(int row=0;row<sourceHeight;row++)for(int col=0;col<sourceWidth;col++){int dx=x+col,dy=y+row;if(dx<Math.max(0,clip.left)||dy<Math.max(0,clip.top)||dx>=Math.min(surfaceWidth,clip.right)||dy>=Math.min(surfaceHeight,clip.bottom))continue;int source=sourcePixels[row*sourceWidth+col]&255;if(source!=0)pixels[dy*surfaceWidth+dx]=(byte)(source*value/255);}}
+ private int[] changedBounds(byte[] before,byte[] after,int width,int height){if(before==null||before.length!=after.length)return new int[]{0,0,width,height};int minX=width,minY=height,maxX=-1,maxY=-1;for(int i=0;i<after.length;i++)if(before[i]!=after[i]){int x=i%width,y=i/width;minX=Math.min(minX,x);minY=Math.min(minY,y);maxX=Math.max(maxX,x);maxY=Math.max(maxY,y);}return maxX<minX?new int[0]:new int[]{minX,minY,maxX-minX+1,maxY-minY+1};}
+ private void deliverSceneFrame(Connection c,Surface surface,ByteBuffer pixels,int[] damage,String fingerprint){if(connections.get(c.component)!=c||!c.ready||!surface.visible||!surface.screenOn)return;String compositorId="window".equals(surface.id)?"window:apk:"+c.component:"extension:"+c.component+":"+surface.id.substring(10);FaceclawBleCommunicator display=FaceclawBleCommunicator.getActive();if(display!=null)display.submitExternalSurfaceFrame(pixels,compositorId,surface.width,surface.height,damage,fingerprint,null,null);else{FaceclawPreviewCompositor preview=FaceclawPreviewCompositor.getActive();if(preview!=null)preview.submitSurfaceFrame(pixels,compositorId,0,0,surface.width,surface.height,fingerprint,0,0,null);}}
  private final class Connection implements ServiceConnection {
-  final ServiceInfo service; final String component,session=UUID.randomUUID().toString(); final Messenger inbox;
+  final ServiceInfo service; final String component,session=UUID.randomUUID().toString();
   java.lang.ref.WeakReference<Activity> selectionActivity; long selectionUntil;
-  final Map<String,Surface> surfaces=new HashMap<>(); final Map<String,String> extensionRequests=new HashMap<>(); final Set<String> actionIds=new HashSet<>();
-  final FrameDelivery frames=new FrameDelivery();
-  Messenger remote; PendingIntent consent; boolean ready,open,visible,screenOn=true; int width,height; long generation,sequence,rateStart,lastOpenRequest; int rate; String lastExtensionSnapshot="";
-  Connection(ServiceInfo service) { this.service=service; component=key(service); inbox=new Messenger(new Handler(Looper.getMainLooper(),m->{ receive(m); return true; })); }
+  final Map<String,Surface> surfaces=new HashMap<>(); final Map<String,String> extensionRequests=new HashMap<>(),capabilityRequests=new HashMap<>(); final Set<String> actionIds=new HashSet<>();
+  final Map<Integer,HostResource> resources=new ConcurrentHashMap<>();final Map<String,PendingFrame> pendingFrames=new ConcurrentHashMap<>();final ExecutorService renderExecutor;
+  JSONArray capabilities=new JSONArray(); long capabilityGeneration;
+  IFaceclawAppEndpoint endpoint;IFaceclawAppSession remote; PendingIntent consent; boolean ready,open,visible,screenOn=true; int width,height; long generation,lastControlRefill=SystemClock.elapsedRealtime(),lastOpenRequest; double controlTokens=120; int invalidFrames;long invalidWindowStart; String lastExtensionSnapshot="";byte[] restorationToken;
+  final IFaceclawHostSession.Stub hostSession=new IFaceclawHostSession.Stub(){
+   private boolean authorized(){return Binder.getCallingUid()==service.applicationInfo.uid;}
+   @Override public void onReady(Bundle hello,IFaceclawAppSession app){if(!authorized())return;main.post(()->ready(hello,app));}
+   @Override public void onConsentRequired(Bundle value){int uid=Binder.getCallingUid();if(!authorized())return;main.post(()->consent(value,uid));}
+   @Override public void registerSurface(Bundle value){if(authorized())renderExecutor.execute(()->FaceclawExternalApps.this.registerSurface(Connection.this,value));}
+   @Override public void unregisterSurface(String id,long generation){if(authorized())renderExecutor.execute(()->FaceclawExternalApps.this.unregisterSurface(Connection.this,id,generation));}
+   @Override public void requestRender(String id,long generation,int reason){if(authorized())main.post(()->requestCredit(Connection.this,id,generation,reason));}
+   @Override public void submitFrame(Bundle value){if(authorized())renderExecutor.execute(()->receiveFrame(Connection.this,value));}
+   @Override public void registerResource(Bundle value){if(authorized())renderExecutor.execute(()->receiveResource(Connection.this,value));}
+   @Override public void commitScene(Bundle value){if(authorized())renderExecutor.execute(()->receiveScene(Connection.this,value));}
+   @Override public void sendControl(Bundle value){if(authorized())main.post(()->receiveControl(value));}
+   @Override public void close(Bundle reason){if(authorized())main.post(()->disconnect(component,false));}
+  };
+  Connection(ServiceInfo service) { this.service=service; component=key(service);byte[] saved=restorationTokens.get(component);restorationToken=saved==null?null:saved.clone();RecoveryContext recovery=recoveryContexts.get(component);if(recovery!=null){width=recovery.width;height=recovery.height;generation=recovery.generation;open=recovery.open;visible=recovery.visible;screenOn=recovery.screenOn;for(RecoverySurface state:recovery.surfaces){Surface surface=new Surface(state.id,state.width,state.height,state.generation);surface.visible=state.visible;surface.screenOn=state.screenOn;String surfaceKey=state.id.startsWith("extension:")?state.id.substring(10):state.id;surfaces.put(surfaceKey,surface);}}renderExecutor=Executors.newSingleThreadExecutor(r->{Thread t=new Thread(r,"FaceclawRender-"+service.packageName);t.setDaemon(true);return t;}); }
   public void onServiceConnected(ComponentName name,IBinder binder) {
    if(connections.get(component)!=this || !approved(service)) return;
-   remote=new Messenger(binder);
-   try { Message m=Protocol.message(Protocol.HELLO,session,"hello",Protocol.object("version",Protocol.VERSION)); m.replyTo=inbox; remote.send(m); }
+   endpoint=IFaceclawAppEndpoint.Stub.asInterface(binder);
+   try { Bundle hello=new Bundle();hello.putInt("protocolMajor",Protocol.VERSION);hello.putString("hostVersion","local");hello.putString("session",session);endpoint.connect(hello,hostSession); }
    catch(Exception e) { disconnect(component,true); }
   }
   public void onServiceDisconnected(ComponentName name) { disconnect(component,true); }
   public void onBindingDied(ComponentName name) { disconnect(component,true); }
   public void onNullBinding(ComponentName name) { disconnect(component,false); }
-  void receive(Message m) {
+  void ready(Bundle hello,IFaceclawAppSession app){
+   if(connections.get(component)!=this||!approved(service)||hello==null||hello.getInt("protocolMajor")!=Protocol.VERSION||!session.equals(hello.getString("session"))||app==null)return;
+   remote=app;ready=true;consent=null;selectionActivity=null;retryAttempts.remove(component);recoveryContexts.remove(component);
+   try{app.asBinder().linkToDeath(()->main.post(()->disconnect(component,true)),0);}catch(Exception error){disconnect(component,true);return;}
+   try{remote.applyHostSnapshot(snapshot());}catch(Exception error){disconnect(component,true);return;}
+   publishCapabilities(component);send(component,"shared-style",sharedStyle.toString());emit(component,"connected",new JSONObject());extensionsChanged();
+  }
+  void consent(Bundle value,int uid){
+   PendingIntent pi=value==null?null:value.getParcelable("consent");
+   if(pi!=null&&pi.getCreatorUid()==uid&&service.packageName.equals(pi.getCreatorPackage())&&(Build.VERSION.SDK_INT<31||pi.isActivity())){consent=pi;emit(component,"consent",new JSONObject());launchRequestedConsent(this,pi);}
+  }
+  Bundle snapshot(){Bundle b=new Bundle();b.putInt("protocolMajor",Protocol.VERSION);b.putInt("maxWidth",Protocol.MAX_WIDTH);b.putInt("maxHeight",Protocol.MAX_HEIGHT);b.putInt("maxDamageRects",Protocol.MAX_DAMAGE_RECTS);b.putInt("bufferSlots",Protocol.BUFFER_SLOTS);b.putBoolean("screenOn",screenOn);b.putBoolean("windowOpen",open);b.putBoolean("windowVisible",visible);b.putLong("windowGeneration",generation);b.putInt("windowWidth",width);b.putInt("windowHeight",height);b.putString("grants",Protocol.object("notifications",allows(component,"notifications"),"dictation",allows(component,"dictation"),"previews",allows(component,"previews"),"messaging",allows(component,"messaging")).toString());b.putString("sharedStyle",sharedStyle.toString());b.putString("extensions",extensionsJson());b.putString("hostState","{}");FaceclawBleCommunicator display=FaceclawBleCommunicator.getActive();b.putString("capabilities",Protocol.object("gray8",true,"sharedMemory",true,"damage",true,"resources",true,"retainedScenes",true,"firmwareFingerprint",display==null?"":display.getFirmwareFingerprint()).toString());ArrayList<Bundle> openSurfaces=new ArrayList<>();for(Surface surface:surfaces.values()){Bundle item=new Bundle();item.putString("id",surface.id);item.putInt("width",surface.width);item.putInt("height",surface.height);item.putLong("generation",surface.generation);item.putBoolean("visible",surface.visible);item.putBoolean("screenOn",surface.screenOn);openSurfaces.add(item);}b.putParcelableArrayList("surfaces",openSurfaces);if(restorationToken!=null)b.putByteArray("restorationToken",restorationToken.clone());return b;}
+  Surface windowSurface(){synchronized(this){return surfaces.computeIfAbsent("window",ignored->new Surface("window",width,height,generation));}}
+  void sendControl(String type,JSONObject data)throws RemoteException{if(remote==null)throw new RemoteException("App session unavailable");remote.sendControl(Protocol.control(type,data));}
+  void receiveControl(Bundle b) {
    try {
-    if(connections.get(component)!=this || m.sendingUid!=service.applicationInfo.uid || !approved(service) || !PackageIdentity.forUid(context,m.sendingUid).equals(prefs.getString(component+":pin",""))) return;
-    Bundle b=m.getData(); if(!session.equals(b.getString("session"))) return;
-    long now=SystemClock.elapsedRealtime(); if(now-rateStart>1000) { rateStart=now; rate=0; }
-    if(++rate>240) { disconnect(component,false); return; }
-    if(m.what==Protocol.CONSENT) {
-     PendingIntent pi=b.getParcelable("consent");
-     if(pi!=null&&pi.getCreatorUid()==m.sendingUid&&service.packageName.equals(pi.getCreatorPackage())&&(Build.VERSION.SDK_INT<31||pi.isActivity())) {
-      consent=pi; emit(component,"consent",new JSONObject()); launchRequestedConsent(this,pi);
-     } return;
-    }
-    if(m.what==Protocol.READY) {
-     if(Protocol.json(b).optInt("version")!=Protocol.VERSION) return;
-     ready=true; consent=null; selectionActivity=null; publishCapabilities(component); send(component,"shared-style",sharedStyle.toString()); emit(component,"connected",new JSONObject()); extensionsChanged(); return;
-    }
-    if(!ready) return;
-    if(m.what==Protocol.EXTENSION_FRAME) { receiveExtensionFrame(this,m,now); return; }
-    if(m.what==Protocol.FRAME) {
-     long seq=b.getLong("sequence");
-     try {
-      int w=b.getInt("width"),h=b.getInt("height"); int size=Protocol.frameSize(w,h);
-      if(!open||!visible||!screenOn||w!=width||h!=height||b.getLong("generation")!=generation||seq<=sequence) return;
-      byte[] copy;
-      if(Build.VERSION.SDK_INT>=27 && b.containsKey("memory")) {
-       SharedMemory memory=b.getParcelable("memory"); if(memory==null) return;
-       try { if(memory.getSize()!=size) return; ByteBuffer mapping=memory.mapReadOnly(); try { copy=new byte[size]; mapping.get(copy); } finally { SharedMemory.unmap(mapping); } } finally { memory.close(); }
-      } else { byte[] bytes=b.getByteArray("pixels"); if(bytes==null||bytes.length!=size) return; copy=bytes.clone(); }
-      sequence=seq; final long frameGeneration=generation;
-      // ACK permits another frame only after its memory has become a private snapshot.
-      frames.offer(()->{
-       if(connections.get(component)!=this||!ready||!approved(service)||!open||!visible||!screenOn||generation!=frameGeneration||width!=w||height!=h)return;
-       try { if(listener!=null)listener.onFrame(component,w,h,ByteBuffer.wrap(copy)); }
-       catch(Exception ignored) { disconnect(component,false); }
-      },now);
-     } finally {
-      // Close descriptors even on early rejection before mapping.
-      if(Build.VERSION.SDK_INT>=27 && b.containsKey("memory")) { SharedMemory mem=b.getParcelable("memory"); if(mem!=null) mem.close(); }
-      Message ack=Protocol.message(Protocol.ACK,session,"ack",null); ack.getData().putLong("sequence",seq); remote.send(ack);
-     }
-     return;
-    }
-    if(m.what!=Protocol.EVENT) return;
+    if(connections.get(component)!=this||!approved(service)||!ready)return;
+    long now=SystemClock.elapsedRealtime();controlTokens=Math.min(120,controlTokens+(now-lastControlRefill)*0.06);lastControlRefill=now;if(controlTokens<1)return;controlTokens-=1;
     String type=b.getString("type",""); JSONObject data=Protocol.json(b);
+    if(type.equals("restoration-token")){byte[] value=b.getByteArray("value");if(value!=null&&value.length<=4096){restorationToken=value.clone();restorationTokens.put(component,restorationToken.clone());}return;}
+    if(type.equals("surface-reset")){Surface target=surface(this,data.optString("surfaceId"));if(target!=null&&target.generation==data.optLong("generation")){synchronized(target){if(target.pixels!=null)Arrays.fill(target.pixels,(byte)0);target.draws=null;target.nodes.clear();target.sceneOrder.clear();target.sceneVersion=0;}}return;}
     if(type.equals("host-switched")) { revokeApproval(component); return; }
     if(type.equals("disconnected")) { disconnect(component,false); return; }
     if(type.equals("publish-extensions")) {
      long before=extensions.generation(); if(extensions.publish(component,data.getJSONArray("declarations"))&&before!=extensions.generation()) extensionsChanged(); return;
     }
+    if(type.equals("publish-tool-capabilities")) {
+     JSONArray clean=CapabilityContract.declarations(data.getJSONArray("capabilities"));
+     if(data.optInt("version")!=CapabilityContract.VERSION) return;
+     capabilities=clean; capabilityGeneration++;
+     for(String requestId:new ArrayList<>(capabilityRequests.keySet())) emit(component,"capability-result",Protocol.object("requestId",requestId,"result",Protocol.object("state","unknown","message","Provider catalog changed; operation outcome may be unknown")));
+     capabilityRequests.clear();
+     emit(component,"capabilities-changed",Protocol.object("version",CapabilityContract.VERSION,"generation",capabilityGeneration,"capabilities",clean)); return;
+    }
     if(type.equals("extension-result")||type.equals("extension-progress")||type.equals("extension-action")) { receiveExtensionControl(this,type,data); return; }
+    if(type.equals("capability-result")||type.equals("capability-progress")) {
+     String requestId=data.optString("requestId"),capabilityId=capabilityRequests.get(requestId); if(capabilityId==null) return;
+     JSONObject result=CapabilityContract.result(data.getJSONObject("result"),type.equals("capability-progress"));
+     if(type.equals("capability-result")) capabilityRequests.remove(requestId);
+     emit(component,type,Protocol.object("requestId",requestId,"capabilityId",capabilityId,"result",result)); return;
+    }
     if(type.equals("messaging-result")) { if(allows(component,"messaging")) emit(component,type,data); return; }
     if(type.equals("window-menu-state")) { if(open&&data.opt("available") instanceof Boolean) emit(component,type,Protocol.object("available",data.getBoolean("available"))); return; }
     if(type.equals("window-protection")) { if(open&&data.opt("protected") instanceof Boolean) emit(component,type,Protocol.object("protected",data.getBoolean("protected"))); return; }
@@ -212,8 +312,8 @@ public final class FaceclawExternalApps {
     if(type.equals("request-system-menu")) { if(open&&visible&&screenOn) emit(component,type,new JSONObject()); return; }
     if(type.equals("notification")||type.equals("remove-notification")||type.equals("notification-reply-result")) { if(!allows(component,"notifications")) return; }
     else if(type.equals("dictation")||type.equals("cancel-dictation")||type.equals("search-dictation")||type.equals("cancel-search-dictation")||type.equals("capture-dictation")||type.equals("finish-capture-dictation")||type.equals("cancel-capture-dictation")||type.equals("host-refinement")||type.equals("cancel-host-refinement")) { if(!allows(component,"dictation")||!(open&&visible&&screenOn||hasVisibleSurface(this,"ui.notifications"))) {
-      if(type.equals("host-refinement")||type.equals("capture-dictation")) remote.send(Protocol.message(Protocol.EVENT,session,type.equals("host-refinement")?"host-refinement-rejected":"capture-dictation-closed",Protocol.object("requestId",data.optString("requestId","").substring(0,Math.min(128,data.optString("requestId","").length())),"reason","Permission or visible window required")));
-      if(type.equals("dictation")||type.equals("search-dictation")) remote.send(Protocol.message(Protocol.EVENT,session,type.equals("search-dictation")?"search-dictation-rejected":"dictation-rejected",Protocol.object("requestId",data.optString("requestId","").substring(0,Math.min(128,data.optString("requestId","").length())),"reason","Dictation permission or visible window required")));
+      if(type.equals("host-refinement")||type.equals("capture-dictation")) sendControl(type.equals("host-refinement")?"host-refinement-rejected":"capture-dictation-closed",Protocol.object("requestId",data.optString("requestId","").substring(0,Math.min(128,data.optString("requestId","").length())),"reason","Permission or visible window required"));
+      if(type.equals("dictation")||type.equals("search-dictation")) sendControl(type.equals("search-dictation")?"search-dictation-rejected":"dictation-rejected",Protocol.object("requestId",data.optString("requestId","").substring(0,Math.min(128,data.optString("requestId","").length())),"reason","Dictation permission or visible window required"));
       return;
      } }
     else return;
@@ -381,6 +481,7 @@ public final class FaceclawExternalApps {
   } catch(Exception ignored) { return false; }
  }
  private void revokeApproval(String component) {
+  restorationTokens.remove(component);retryAttempts.remove(component);recoveryContexts.remove(component);
   SharedPreferences.Editor edit=prefs.edit().remove(component+":pin");
   for(String capability:APPROVAL_CAPABILITIES) edit.remove(component+":"+capability);
   for(String key:prefs.getAll().keySet()) if(key.startsWith(component+":extension")) edit.remove(key);
@@ -450,7 +551,7 @@ public final class FaceclawExternalApps {
   }
   for(Connection c:connections.values()) {
    c.extensionRequests.entrySet().removeIf(entry->changed.contains(entry.getValue()) || (entry.getValue().equals("transcription")&&!isExtensionGranted(c.component,"transcription")));
-   for(String feature:changed) { Surface surface=c.surfaces.remove(feature); if(surface!=null)surface.frames.clear(); }
+   for(String feature:changed) { Surface surface=c.surfaces.remove(feature); if(surface!=null)surface.close(); }
   }
   String snapshot=extensionsJson();
   for(Connection c:connections.values()) if(c.ready&&!snapshot.equals(c.lastExtensionSnapshot)) {
@@ -474,7 +575,7 @@ public final class FaceclawExternalApps {
   if(!isConnected(component)||(!ownProvider&&!extensions.controls(component,feature))||json==null||json.length()>Protocol.MAX_JSON/2||!Arrays.asList("request","event","cancel","input").contains(type)) return false;
   Connection c=connections.get(component); if(c==null) return false;
   try {
-   JSONObject data=new JSONObject(json); long generation=extensions.generation(feature);
+   JSONObject data=new JSONObject(json); long generation=extensions.generation(feature);String inputTrace="";if(type.equals("input")){inputTrace=data.optString("traceId");if(inputTrace.isEmpty())inputTrace=UUID.randomUUID().toString();data.put("traceId",inputTrace);JSONObject input=data.optJSONObject("input");if(input!=null)input.put("traceId",inputTrace);}
    if(type.equals("request")) {
     String id=data.getString("requestId"); if(!ExtensionContract.token(id)||c.extensionRequests.size()>=32||c.extensionRequests.containsKey(id)) return false;
     c.extensionRequests.put(id,feature);
@@ -484,13 +585,13 @@ public final class FaceclawExternalApps {
     },feature.equals("assistant")?600000:feature.equals("transcription")?390000:feature.equals("refinement")?120000:20000);
    }
    if(type.equals("cancel")) c.extensionRequests.remove(data.optString("requestId"));
-   Message outgoing=Protocol.message(Protocol.EVENT,c.session,"extension-event",Protocol.object("feature",feature,"generation",generation,"type",type,"data",data));
-   try { c.remote.send(outgoing); }
+   try { c.sendControl("extension-event",Protocol.object("feature",feature,"generation",generation,"type",type,"data",data)); }
    catch(Exception uncertain) {
     String id=data.optString("requestId");
     if(feature.equals(c.extensionRequests.remove(id))) emit(component,"extension-event",Protocol.object("feature",feature,"generation",generation,"type","timeout","requestId",id));
     // IPC was attempted. A transport exception cannot safely authorize backend fallback/retry.
    }
+   if(type.equals("input")){Surface surface=c.surfaces.get(feature);if(surface!=null)scheduleCredit(c,surface,DisplayScheduler.Priority.DIRECT_INPUT,inputTrace);}
    return true;
   } catch(Exception ignored) { return false; }
  }
@@ -512,9 +613,14 @@ public final class FaceclawExternalApps {
   }
  }
  private final class Surface {
-  final FrameDelivery frames=new FrameDelivery();
-  int width,height; long generation,sequence; boolean visible,screenOn;
-  Surface(int width,int height,long generation) { this.width=width; this.height=height; this.generation=generation; }
+  final String id;
+  int width,height; long generation,sequence,contentVersion,clientFrameId,creditId,sceneVersion; boolean visible,screenOn,creditOutstanding;
+  SharedMemory[] memories=new SharedMemory[0];ByteBuffer[] mappings=new ByteBuffer[0];byte[] pixels,draws;Map<Long,Bundle> nodes=new HashMap<>();ArrayList<Long> sceneOrder=new ArrayList<>();
+  Surface(String id,int width,int height,long generation) { this.id=id;this.width=width;this.height=height;this.generation=generation;this.pixels=width>0&&height>0?new byte[width*height]:null; }
+  synchronized void reset(int width,int height,long generation){this.width=width;this.height=height;this.generation=generation;this.sequence=0;this.contentVersion=0;this.clientFrameId=0;this.creditOutstanding=false;this.sceneVersion=0;this.nodes.clear();this.sceneOrder.clear();this.pixels=width>0&&height>0?new byte[width*height]:null;closePool();}
+  synchronized void setState(boolean visible,boolean screenOn,long generation){this.visible=visible;this.screenOn=screenOn;if(this.generation!=generation)reset(width,height,generation);if(!visible||!screenOn)creditOutstanding=false;}
+  synchronized void closePool(){for(ByteBuffer mapping:mappings)try{SharedMemory.unmap(mapping);}catch(Exception ignored){}for(SharedMemory memory:memories)try{memory.close();}catch(Exception ignored){}mappings=new ByteBuffer[0];memories=new SharedMemory[0];}
+  synchronized void close(){closePool();creditOutstanding=false;nodes.clear();sceneOrder.clear();}
  }
  private long nextSurfaceGeneration=1;
  /** Only the host's real mirror hit-test dispatches bounded pointer input to a current visible surface. */
@@ -527,43 +633,20 @@ public final class FaceclawExternalApps {
  public boolean openExtensionSurface(String component,String feature,int width,int height) {
   if(!ExtensionContract.surface(feature)||!isConnected(component)||!extensions.controls(component,feature)) return false;
   try {
-   Protocol.frameSize(width,height); Connection c=connections.get(component); Surface surface=new Surface(width,height,++nextSurfaceGeneration); Surface previous=c.surfaces.put(feature,surface); if(previous!=null)previous.frames.clear();
-   c.remote.send(Protocol.message(Protocol.EVENT,c.session,"extension-surface",Protocol.object("feature",feature,"type","open","width",width,"height",height,"generation",surface.generation,"extensionGeneration",extensions.generation(feature),"visible",false,"screenOn",false))); return true;
+   Protocol.frameSize(width,height); Connection c=connections.get(component); Surface surface=new Surface("extension:"+feature,width,height,++nextSurfaceGeneration); Surface previous=c.surfaces.put(feature,surface); if(previous!=null)previous.close();
+   c.sendControl("extension-surface",Protocol.object("feature",feature,"type","open","width",width,"height",height,"generation",surface.generation,"extensionGeneration",extensions.generation(feature),"visible",false,"screenOn",false)); return true;
   } catch(Exception ignored) { return false; }
  }
  public void setExtensionSurfaceVisibility(String component,String feature,boolean visible,boolean screenOn) {
   Connection c=connections.get(component); if(c==null||!extensions.controls(component,feature)) return;
-  Surface surface=c.surfaces.get(feature); if(surface==null) return; surface.visible=visible; surface.screenOn=screenOn;
-  if(!visible||!screenOn)surface.frames.clear();
+  Surface surface=c.surfaces.get(feature); if(surface==null) return; surface.setState(visible,screenOn,surface.generation);
   send(component,"extension-surface",Protocol.object("feature",feature,"type","visibility","generation",surface.generation,"visible",visible,"screenOn",screenOn).toString());
+  if(visible&&screenOn)scheduleCredit(c,surface,DisplayScheduler.Priority.VISIBLE_EXTENSION);
  }
  public void closeExtensionSurface(String component,String feature) {
   Connection c=connections.get(component); if(c==null) return; Surface surface=c.surfaces.remove(feature); if(surface==null) return;
-  surface.frames.clear();
+  surface.close();
   send(component,"extension-surface",Protocol.object("feature",feature,"type","close","generation",surface.generation).toString());
- }
- private void receiveExtensionFrame(Connection c,Message message,long now) throws Exception {
-  Bundle b=message.getData(); String feature=b.getString("feature",""); long sequence=b.getLong("sequence");
-  try {
-   Surface surface=c.surfaces.get(feature);
-   if(surface==null||!extensions.controls(c.component,feature)||!surface.visible||!surface.screenOn||surface.generation!=b.getLong("generation")||sequence<=surface.sequence) return;
-   int width=b.getInt("width"),height=b.getInt("height"),size=Protocol.frameSize(width,height);
-   if(width!=surface.width||height!=surface.height) return;
-   byte[] copy;
-   if(Build.VERSION.SDK_INT>=27&&b.containsKey("memory")) {
-    SharedMemory memory=b.getParcelable("memory"); if(memory==null||memory.getSize()!=size) return;
-    ByteBuffer mapping=memory.mapReadOnly(); try { copy=new byte[size]; mapping.get(copy); } finally { SharedMemory.unmap(mapping); }
-   } else { byte[] supplied=b.getByteArray("pixels"); if(supplied==null||supplied.length!=size) return; copy=supplied.clone(); }
-   surface.sequence=sequence; final long frameGeneration=surface.generation;
-   surface.frames.offer(()->{
-    if(connections.get(c.component)!=c||!c.ready||!approved(c.service)||c.surfaces.get(feature)!=surface||!extensions.controls(c.component,feature)||!surface.visible||!surface.screenOn||surface.generation!=frameGeneration||surface.width!=width||surface.height!=height)return;
-    try { if(listener!=null)listener.onExtensionFrame(c.component,feature,frameGeneration,width,height,ByteBuffer.wrap(copy)); }
-    catch(Exception ignored) { disconnect(c.component,false); }
-   },now);
-  } finally {
-   if(Build.VERSION.SDK_INT>=27&&b.containsKey("memory")) { SharedMemory memory=b.getParcelable("memory"); if(memory!=null) memory.close(); }
-   Message ack=Protocol.message(Protocol.EXTENSION_ACK,c.session,"ack",null); ack.getData().putString("feature",feature); ack.getData().putLong("generation",b.getLong("generation")); ack.getData().putLong("sequence",sequence); c.remote.send(ack);
-  }
  }
  private String extensionLabel(String feature) {
   switch(feature) {

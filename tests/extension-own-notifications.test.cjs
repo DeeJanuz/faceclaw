@@ -12,6 +12,7 @@ function harness(registry = {}) {
  '../../native/external-notifications':{invokeExternalNotification:key=>{opened.push(key);return true;}},
  '../../native/notification-apps':{readNotificationApps:()=>catalog},
  './extension-policy':require('../.test-build/app/apps/external/extension-policy.js'),
+ './app-capabilities':{AppCapabilityRegistry:class{constructor(){}tools(){return [];}event(){return false;}remove(){}has(){return false;}}},
  };
  vm.runInNewContext(ts.transpileModule(fs.readFileSync('app/apps/external/extension-platform.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText,{module,exports:module.exports,require:name=>imports[name]||{},java:{util:{UUID:{randomUUID:()=>({toString:()=>`id-${++seq}`})}}}});
  const platform=Object.create(module.exports.ExtensionPlatform.prototype);

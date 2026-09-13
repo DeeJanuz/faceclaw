@@ -41,6 +41,8 @@ import java.util.Map;
 public final class SurfaceCompositor {
     public static final int TRANSPARENCY_OPAQUE = 0;
     public static final int TRANSPARENCY_COLOR_KEY = 1;
+    public static final int TILE_WIDTH = 32;
+    public static final int TILE_HEIGHT = 16;
 
     /**
      * One deferred draw (a text glyph or an icon image) within a frame, in
@@ -109,7 +111,11 @@ public final class SurfaceCompositor {
 
     /** One composited full-screen frame plus the metadata the pipeline needs. */
     public static final class Composite {
-        /** Full-screen 8bpp grayscale pixels, screenWidth*screenHeight bytes. */
+        /**
+         * Full-screen 8bpp grayscale pixels, screenWidth*screenHeight bytes.
+         * Null for the allocation-free packed intake path; preview and
+         * screenshot consumers request their own retained snapshot.
+         */
         public final byte[] gray;
         public final int width;
         public final int height;
@@ -127,15 +133,25 @@ public final class SurfaceCompositor {
          * pixels are already baked into gray.
          */
         public final ScreenDraw[] draws;
+        /** Bounding screen-space damage produced by this composition. */
+        public final int[] damage;
 
-        Composite(byte[] gray, int width, int height, String fingerprint, long seq, ScreenDraw[] draws) {
+        Composite(byte[] gray, int width, int height, String fingerprint, long seq, ScreenDraw[] draws, int[] damage) {
             this.gray = gray;
             this.width = width;
             this.height = height;
             this.fingerprint = fingerprint;
             this.seq = seq;
             this.draws = draws == null ? NO_DRAWS : draws;
+            this.damage = damage == null ? new int[0] : damage;
         }
+    }
+
+    /** Packed result produced while retained Gray8 is protected by the compositor lock. */
+    public static final class PackedComposite {
+        public final Composite composite;
+        public final byte[] packed;
+        PackedComposite(Composite composite, byte[] packed) { this.composite = composite; this.packed = packed; }
     }
 
     private static final class Surface {
@@ -166,6 +182,14 @@ public final class SurfaceCompositor {
     private int underlayDim = 256;
     private final Map<String, Surface> surfaces = new HashMap<>();
     private long nextCompositeSeq = 1;
+    private byte[] retainedGray;
+    /** Canonical packed framebuffer, patched in place from the same dirty tiles. */
+    private byte[] retainedPacked;
+    private boolean retainedPackedValid;
+    private boolean[] dirtyTiles;
+    private int tileColumns;
+    private boolean retainedValid;
+    private final boolean compareDirtyWithFull = Boolean.getBoolean("faceclaw.compositor.compareDirty");
 
     /** Set the output frame size. Must be called before any surface work. */
     public void configureScreen(int width, int height) {
@@ -173,8 +197,18 @@ public final class SurfaceCompositor {
             throw new IllegalArgumentException("bad screen size " + width + "x" + height);
         }
         synchronized (lock) {
+            boolean changed = this.screenWidth != width || this.screenHeight != height;
             this.screenWidth = width;
             this.screenHeight = height;
+            if (changed || retainedGray == null) {
+                retainedGray = new byte[width * height];
+                retainedPacked = new byte[((width + 1) >> 1) * height];
+                retainedPackedValid = false;
+                tileColumns = (width + TILE_WIDTH - 1) / TILE_WIDTH;
+                dirtyTiles = new boolean[tileColumns * ((height + TILE_HEIGHT - 1) / TILE_HEIGHT)];
+                retainedValid = false;
+                markAllDirtyLocked();
+            }
         }
     }
 
@@ -198,6 +232,8 @@ public final class SurfaceCompositor {
             if (surface == null) {
                 surface = new Surface(id);
                 surfaces.put(id, surface);
+            } else if (surface.visible) {
+                markScreenRectDirtyLocked(surface.x, surface.y, surface.width, surface.height);
             }
             if (surface.pixels == null || surface.width != width || surface.height != height) {
                 surface.pixels = new byte[width * height];
@@ -210,12 +246,14 @@ public final class SurfaceCompositor {
             surface.height = height;
             surface.zOrder = zOrder;
             surface.transparency = transparency;
+            if (surface.visible) markScreenRectDirtyLocked(x, y, width, height);
         }
     }
 
     public void removeSurface(String id) {
         synchronized (lock) {
-            surfaces.remove(id);
+            Surface removed = surfaces.remove(id);
+            if (removed != null && removed.visible) markScreenRectDirtyLocked(removed.x, removed.y, removed.width, removed.height);
         }
     }
 
@@ -234,8 +272,10 @@ public final class SurfaceCompositor {
      */
     public void setUnderlayDim(int belowZOrder, int factor256) {
         synchronized (lock) {
+            int next = Math.max(0, Math.min(256, factor256));
+            if (underlayDimBelowZOrder != belowZOrder || underlayDim != next) markAllDirtyLocked();
             underlayDimBelowZOrder = belowZOrder;
-            underlayDim = Math.max(0, Math.min(256, factor256));
+            underlayDim = next;
         }
     }
 
@@ -259,6 +299,7 @@ public final class SurfaceCompositor {
             if (surface == null) {
                 throw new IllegalArgumentException("unknown surface " + id);
             }
+            if (surface.visible != visible) markScreenRectDirtyLocked(surface.x, surface.y, surface.width, surface.height);
             surface.visible = visible;
         }
     }
@@ -270,6 +311,7 @@ public final class SurfaceCompositor {
      */
     public void setBlanked(boolean blanked) {
         synchronized (lock) {
+            if (this.blanked != blanked) markAllDirtyLocked();
             this.blanked = blanked;
         }
     }
@@ -292,6 +334,47 @@ public final class SurfaceCompositor {
     ) {
         return applyAndComposite(surfaceId, pixels, rectX, rectY, rectWidth, rectHeight,
                 contentFingerprint, null);
+    }
+
+    /**
+     * Isolated-adapter intake. {@code fullPixels} is a full Gray8 surface, but
+     * only the declared damage rectangles are read and copied into retained
+     * broker storage. This is the APK path's single host-private pixel copy.
+     */
+    public Composite applyDamageAndComposite(String surfaceId,ByteBuffer fullPixels,int[] damage,
+            String contentFingerprint,ByteBuffer draws) {
+        ScreenDraw[] parsed=parseDraws(draws);
+        synchronized(lock){
+            return applyDamageAndCompositeLocked(surfaceId,fullPixels,damage,contentFingerprint,parsed,true);
+        }
+    }
+
+    /** External broker intake: compose and patch caller-owned packed storage without a Gray8 snapshot allocation. */
+    public PackedComposite applyDamageAndCompositePacked(String surfaceId,ByteBuffer fullPixels,int[] damage,
+            String contentFingerprint,ByteBuffer draws,byte[] packedTarget) {
+        ScreenDraw[] parsed=parseDraws(draws);
+        synchronized(lock){
+            Composite composite=applyDamageAndCompositeLocked(surfaceId,fullPixels,damage,contentFingerprint,parsed,false);
+            int size=((composite.width+1)>>1)*composite.height;if(packedTarget==null||packedTarget.length!=size)throw new IllegalArgumentException("Invalid packed target");
+            System.arraycopy(retainedPacked,0,packedTarget,0,size);
+            return new PackedComposite(composite,packedTarget);
+        }
+    }
+
+    private Composite applyDamageAndCompositeLocked(String surfaceId,ByteBuffer fullPixels,int[] damage,
+            String contentFingerprint,ScreenDraw[] parsed,boolean snapshotGray) {
+            requireScreenConfiguredLocked();Surface surface=surfaces.get(surfaceId);
+            if(surface==null)throw new IllegalArgumentException("unknown surface "+surfaceId);
+            if(fullPixels==null||fullPixels.remaining()!=surface.width*surface.height)throw new IllegalArgumentException("invalid full surface buffer");
+            int[] rects=damage==null||damage.length==0?new int[]{0,0,surface.width,surface.height}:damage;
+            if(rects.length%4!=0||rects.length>32)throw new IllegalArgumentException("invalid damage list");
+            int minX=surface.width,minY=surface.height,maxX=-1,maxY=-1,base=fullPixels.position();
+            for(int i=0;i<rects.length;i+=4){int x=rects[i],y=rects[i+1],width=rects[i+2],height=rects[i+3];
+                if(x<0||y<0||width<=0||height<=0||x+width>surface.width||y+height>surface.height)throw new IllegalArgumentException("damage outside surface");
+                for(int row=0;row<height;row++){int offset=(y+row)*surface.width+x;for(int col=0;col<width;col++){int index=offset+col;byte value=fullPixels.get(base+index);if(surface.pixels[index]!=value){surface.pixels[index]=value;int px=x+col,py=y+row;minX=Math.min(minX,px);minY=Math.min(minY,py);maxX=Math.max(maxX,px);maxY=Math.max(maxY,py);}}}
+            }
+            if(maxX>=minX&&surface.visible)markScreenRectDirtyLocked(surface.x+minX,surface.y+minY,maxX-minX+1,maxY-minY+1);
+            surface.fingerprint=contentFingerprint==null?"":contentFingerprint;surface.draws=parsed;return compositeLocked(snapshotGray);
     }
 
     /**
@@ -332,10 +415,15 @@ public final class SurfaceCompositor {
                 throw new IllegalArgumentException("update buffer for " + surfaceId + " has "
                         + (pixels == null ? 0 : pixels.remaining()) + " bytes, expected " + expectedBytes);
             }
+            int minX=rectX+rectWidth,minY=rectY+rectHeight,maxX=-1,maxY=-1;
             for (int row = 0; row < rectHeight; row++) {
                 int dstOffset = (rectY + row) * surface.width + rectX;
-                pixels.get(surface.pixels, dstOffset, rectWidth);
+                for(int col=0;col<rectWidth;col++){
+                    byte value=pixels.get();int index=dstOffset+col;
+                    if(surface.pixels[index]!=value){surface.pixels[index]=value;int x=rectX+col,y=rectY+row;minX=Math.min(minX,x);minY=Math.min(minY,y);maxX=Math.max(maxX,x);maxY=Math.max(maxY,y);}
+                }
             }
+            if(maxX>=minX&&surface.visible)markScreenRectDirtyLocked(surface.x+minX,surface.y+minY,maxX-minX+1,maxY-minY+1);
             surface.fingerprint = contentFingerprint == null ? "" : contentFingerprint;
             surface.draws = parsed;
             return compositeLocked();
@@ -404,8 +492,8 @@ public final class SurfaceCompositor {
             if (screenWidth <= 0 || screenHeight <= 0) {
                 return null;
             }
-            byte[] gray = buildGrayLocked();
-            return new Composite(gray, screenWidth, screenHeight, "preview", 0, NO_DRAWS);
+            recomposeDirtyLocked();
+            return new Composite(retainedGray.clone(), screenWidth, screenHeight, "preview", 0, NO_DRAWS, new int[0]);
         }
     }
 
@@ -428,12 +516,13 @@ public final class SurfaceCompositor {
         return gray;
     }
 
-    private Composite compositeLocked() {
-        byte[] gray = new byte[screenWidth * screenHeight];
-        if (blanked) {
-            return new Composite(gray, screenWidth, screenHeight,
-                    "blanked:" + screenWidth + "x" + screenHeight, nextCompositeSeq++, NO_DRAWS);
-        }
+    private Composite compositeLocked() { return compositeLocked(true); }
+    private Composite compositeLocked(boolean snapshotGray) {
+        int[] damage=recomposeDirtyLocked();
+        if(!retainedPackedValid){BmpUtil.patch4bppFromGray8(retainedGray,screenWidth,screenHeight,null,retainedPacked);retainedPackedValid=true;}
+        else if(damage.length>0)BmpUtil.patch4bppFromGray8(retainedGray,screenWidth,screenHeight,damage,retainedPacked);
+        if (blanked) return new Composite(snapshotGray?retainedGray.clone():null, screenWidth, screenHeight,
+                "blanked:" + screenWidth + "x" + screenHeight, nextCompositeSeq++, NO_DRAWS, damage);
         List<Surface> ordered = new ArrayList<>(surfaces.values());
         ordered.sort(Comparator
                 .comparingInt((Surface s) -> s.zOrder)
@@ -445,7 +534,6 @@ public final class SurfaceCompositor {
             // Zero means fully hidden, including cached glyph/image identities.
             // dimValue's positive-brightness floor must not reveal the old app.
             if (!surface.visible || dimForLocked(surface) == 0) continue;
-            blendLocked(gray, surface);
             int dim = dimForLocked(surface);
             for (ScreenDraw draw : surface.draws) {
                 if (dim < 256 && draw.kind == ScreenDraw.KIND_IMAGE) continue;
@@ -464,8 +552,45 @@ public final class SurfaceCompositor {
                 fingerprint.append(":dim").append(dim);
             }
         }
-        return new Composite(gray, screenWidth, screenHeight, fingerprint.toString(), nextCompositeSeq++,
-                draws.toArray(new ScreenDraw[0]));
+        return new Composite(snapshotGray?retainedGray.clone():null, screenWidth, screenHeight, fingerprint.toString(), nextCompositeSeq++,
+                draws.toArray(new ScreenDraw[0]), damage);
+    }
+
+    private int[] recomposeDirtyLocked() {
+        if (!retainedValid) markAllDirtyLocked();
+        int minX=screenWidth,minY=screenHeight,maxX=-1,maxY=-1;
+        List<Surface> ordered = new ArrayList<>(surfaces.values());
+        ordered.sort(Comparator.comparingInt((Surface s)->s.zOrder).thenComparing(s->s.id));
+        for(int tile=0;tile<dirtyTiles.length;tile++){
+            if(!dirtyTiles[tile])continue;dirtyTiles[tile]=false;
+            int tx=(tile%tileColumns)*TILE_WIDTH,ty=(tile/tileColumns)*TILE_HEIGHT;
+            int right=Math.min(screenWidth,tx+TILE_WIDTH),bottom=Math.min(screenHeight,ty+TILE_HEIGHT);
+            for(int y=ty;y<bottom;y++)java.util.Arrays.fill(retainedGray,y*screenWidth+tx,y*screenWidth+right,(byte)0);
+            if(!blanked)for(Surface surface:ordered)if(surface.visible&&dimForLocked(surface)!=0)blendRegionLocked(retainedGray,surface,tx,ty,right,bottom);
+            minX=Math.min(minX,tx);minY=Math.min(minY,ty);maxX=Math.max(maxX,right);maxY=Math.max(maxY,bottom);
+        }
+        retainedValid=true;
+        if(compareDirtyWithFull){byte[] full=buildGrayLocked();if(!java.util.Arrays.equals(full,retainedGray))throw new IllegalStateException("Dirty compositor diverged from full composition");}
+        return maxX<minX?new int[0]:new int[]{minX,minY,maxX-minX,maxY-minY};
+    }
+
+    private void markAllDirtyLocked(){if(dirtyTiles!=null)java.util.Arrays.fill(dirtyTiles,true);}
+    private void markScreenRectDirtyLocked(int x,int y,int width,int height){
+        if(dirtyTiles==null||width<=0||height<=0)return;int left=Math.max(0,x),top=Math.max(0,y),right=Math.min(screenWidth,x+width),bottom=Math.min(screenHeight,y+height);if(left>=right||top>=bottom)return;
+        int firstCol=left/TILE_WIDTH,lastCol=(right-1)/TILE_WIDTH,firstRow=top/TILE_HEIGHT,lastRow=(bottom-1)/TILE_HEIGHT;
+        for(int row=firstRow;row<=lastRow;row++)for(int col=firstCol;col<=lastCol;col++)dirtyTiles[row*tileColumns+col]=true;
+    }
+
+    private void blendRegionLocked(byte[] gray, Surface surface, int regionLeft, int regionTop, int regionRight, int regionBottom) {
+        int dstX=Math.max(Math.max(0,surface.x),regionLeft),dstY=Math.max(Math.max(0,surface.y),regionTop);
+        int right=Math.min(Math.min(screenWidth,surface.x+surface.width),regionRight),bottom=Math.min(Math.min(screenHeight,surface.y+surface.height),regionBottom);
+        if(dstX>=right||dstY>=bottom)return;int copyWidth=right-dstX,copyHeight=bottom-dstY,srcX=dstX-surface.x,srcY=dstY-surface.y,dim=dimForLocked(surface);
+        for(int row=0;row<copyHeight;row++){
+            int srcOffset=(srcY+row)*surface.width+srcX,dstOffset=(dstY+row)*screenWidth+dstX;
+            if(dim<256){for(int col=0;col<copyWidth;col++){int value=surface.pixels[srcOffset+col]&0xff;if(value!=0)gray[dstOffset+col]=(byte)dimValue(value,dim);else if(surface.transparency==TRANSPARENCY_OPAQUE)gray[dstOffset+col]=0;}}
+            else if(surface.transparency==TRANSPARENCY_OPAQUE)System.arraycopy(surface.pixels,srcOffset,gray,dstOffset,copyWidth);
+            else for(int col=0;col<copyWidth;col++){byte value=surface.pixels[srcOffset+col];if(value!=0)gray[dstOffset+col]=value;}
+        }
     }
 
     private void blendLocked(byte[] gray, Surface surface) {

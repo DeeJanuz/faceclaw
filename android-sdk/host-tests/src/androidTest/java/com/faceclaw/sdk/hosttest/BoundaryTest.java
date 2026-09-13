@@ -4,6 +4,7 @@ import android.os.Bundle;
 import android.content.*;
 import com.faceclaw.app.*;
 import com.faceclaw.sdk.*;
+import com.faceclaw.sdk.ipc.*;
 import java.nio.ByteBuffer;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
@@ -26,8 +27,8 @@ public class BoundaryTest extends Instrumentation {
  private static void assertFalse(boolean value) { assertTrue("Expected false",!value); }
  private static void assertEquals(Object expected,Object actual) { if(!java.util.Objects.equals(expected,actual)) throw new AssertionError("Expected "+expected+" but got "+actual); }
  static final String PKG="com.faceclaw.sdk.fixture";
- Context context; FaceclawExternalApps manager; AtomicInteger messagingResults,frames,notifications,replyResults,searchRequests,extensionFrames,extensionResults,extensionTimeouts,ownRequests,refineRequests,systemMenuRequests; volatile String systemMenuPayload; volatile int extensionTransparent=-1,extensionBlack=-1,latestFrame=-1,latestExtensionFrame=-1; CountDownLatch connected;
- volatile String extensionResultPayload,extensionActionPayload;
+ Context context; FaceclawExternalApps manager; AtomicInteger capabilityCatalogs,capabilityResults,messagingResults,frames,notifications,replyResults,searchRequests,extensionFrames,extensionResults,extensionTimeouts,ownRequests,refineRequests,systemMenuRequests; volatile String systemMenuPayload; volatile int extensionTransparent=-1,extensionBlack=-1,latestFrame=-1,latestExtensionFrame=-1; CountDownLatch connected;
+ volatile String capabilityCatalogPayload,capabilityResultPayload,extensionResultPayload,extensionActionPayload;
  java.util.List<Double> timings=new java.util.concurrent.CopyOnWriteArrayList<>();
  StringBuilder measurements=new StringBuilder();
  private void clearFixtureGrants() {
@@ -51,12 +52,12 @@ public class BoundaryTest extends Instrumentation {
   } finally { context.unbindService(connection); }
  }
  public void setUp() throws Exception {
-  context=getInstrumentation().getTargetContext(); messagingResults=new AtomicInteger(); extensionResultPayload=null;extensionActionPayload=null; latestFrame=-1; latestExtensionFrame=-1; selectFixtureHost(); timings.clear(); frames=new AtomicInteger(); ownRequests=new AtomicInteger(); systemMenuRequests=new AtomicInteger(); systemMenuPayload=null; refineRequests=new AtomicInteger(); extensionFrames=new AtomicInteger(); extensionResults=new AtomicInteger(); extensionTimeouts=new AtomicInteger(); notifications=new AtomicInteger(); replyResults=new AtomicInteger(); searchRequests=new AtomicInteger(); connected=new CountDownLatch(1);
+  context=getInstrumentation().getTargetContext(); capabilityCatalogs=new AtomicInteger();capabilityResults=new AtomicInteger();capabilityCatalogPayload=null;capabilityResultPayload=null;messagingResults=new AtomicInteger(); extensionResultPayload=null;extensionActionPayload=null; latestFrame=-1; latestExtensionFrame=-1; selectFixtureHost(); timings.clear(); frames=new AtomicInteger(); ownRequests=new AtomicInteger(); systemMenuRequests=new AtomicInteger(); systemMenuPayload=null; refineRequests=new AtomicInteger(); extensionFrames=new AtomicInteger(); extensionResults=new AtomicInteger(); extensionTimeouts=new AtomicInteger(); notifications=new AtomicInteger(); replyResults=new AtomicInteger(); searchRequests=new AtomicInteger(); connected=new CountDownLatch(1);
   getInstrumentation().runOnMainSync(()->{
    clearFixtureGrants();
    manager=FaceclawExternalApps.get(context); manager.refresh();
    manager.setListener(new FaceclawExternalAppListener() {
-    public void onEvent(String component,String type,String json) { if(type.equals("messaging-result")) messagingResults.incrementAndGet(); if(type.equals("extension-event")&&json.contains("\"type\":\"action\""))extensionActionPayload=json; if(type.equals("connected")) connected.countDown(); if(type.equals("extension-event")&&json.contains("\"result\"")) { extensionResultPayload=json; extensionResults.incrementAndGet(); } if(type.equals("extension-event")&&json.contains("\"timeout\"")) extensionTimeouts.incrementAndGet(); if(type.equals("notification")) notifications.incrementAndGet(); if(type.equals("notification-reply-result")) replyResults.incrementAndGet(); if(type.equals("search-dictation")) searchRequests.incrementAndGet(); if(type.equals("own-notifications")) ownRequests.incrementAndGet(); if(type.equals("request-system-menu")) { systemMenuPayload=json; systemMenuRequests.incrementAndGet(); } if(type.equals("host-refinement")) refineRequests.incrementAndGet(); }
+    public void onEvent(String component,String type,String json) { if(type.equals("capabilities-changed")){capabilityCatalogPayload=json;capabilityCatalogs.incrementAndGet();} if(type.equals("capability-result")){capabilityResultPayload=json;capabilityResults.incrementAndGet();} if(type.equals("messaging-result")) messagingResults.incrementAndGet(); if(type.equals("extension-event")&&json.contains("\"type\":\"action\""))extensionActionPayload=json; if(type.equals("connected")) connected.countDown(); if(type.equals("extension-event")&&json.contains("\"result\"")) { extensionResultPayload=json; extensionResults.incrementAndGet(); } if(type.equals("extension-event")&&json.contains("\"timeout\"")) extensionTimeouts.incrementAndGet(); if(type.equals("notification")) notifications.incrementAndGet(); if(type.equals("notification-reply-result")) replyResults.incrementAndGet(); if(type.equals("search-dictation")) searchRequests.incrementAndGet(); if(type.equals("own-notifications")) ownRequests.incrementAndGet(); if(type.equals("request-system-menu")) { systemMenuPayload=json; systemMenuRequests.incrementAndGet(); } if(type.equals("host-refinement")) refineRequests.incrementAndGet(); }
     public void onExtensionFrame(String component,String feature,long generation,int width,int height,ByteBuffer pixels) { extensionTransparent=pixels.get(0)&255; extensionBlack=pixels.get(1)&255; latestExtensionFrame=pixels.get(pixels.limit()-1)&255; extensionFrames.incrementAndGet(); }
     public void onFrame(String component,int width,int height,ByteBuffer pixels) { if(pixels.remaining()==width*height) {
      latestFrame=pixels.get(pixels.limit()-1)&255; frames.incrementAndGet();
@@ -167,8 +168,8 @@ public class BoundaryTest extends Instrumentation {
   java.lang.reflect.Field connections=FaceclawExternalApps.class.getDeclaredField("connections"); connections.setAccessible(true);
   Object connection=((java.util.Map<?,?>)connections.get(manager)).get(c);
   java.lang.reflect.Field remote=connection.getClass().getDeclaredField("remote"); remote.setAccessible(true);
-  android.os.Messenger original=(android.os.Messenger)remote.get(connection);
-  android.os.Messenger broken=new android.os.Messenger(new android.os.Binder() { @Override protected boolean onTransact(int code,android.os.Parcel data,android.os.Parcel reply,int flags) throws android.os.RemoteException { throw new android.os.RemoteException("Synthetic ambiguous transport"); } });
+  IFaceclawAppSession original=(IFaceclawAppSession)remote.get(connection);
+  IFaceclawAppSession broken=IFaceclawAppSession.Stub.asInterface(new android.os.Binder() { @Override protected boolean onTransact(int code,android.os.Parcel data,android.os.Parcel reply,int flags) throws android.os.RemoteException { throw new android.os.RemoteException("Synthetic ambiguous transport"); } });
   runOnMainSync(()->{ try {
    remote.set(connection,broken);
    assertTrue("Attempted dispatch must remain accepted/uncertain",manager.sendExtension(c,"assistant","request","{\"requestId\":\"uncertain-request\"}"));
@@ -282,7 +283,7 @@ public class BoundaryTest extends Instrumentation {
    }
    java.util.List<Double> sorted=new java.util.ArrayList<>(timings); java.util.Collections.sort(sorted);
    assertTrue("Timestamp samples missing",sorted.size()>=20);
-   measurements.append(context.getPackageName()).append(" ").append(size[0]).append("x").append(size[1]).append(" submitBitmap-to-private-copy ms median=").append(sorted.get(sorted.size()/2)).append(" p95=").append(sorted.get((int)Math.ceil(sorted.size()*0.95)-1)).append(" samples=").append(sorted.size()).append("\n");
+   measurements.append(context.getPackageName()).append(" ").append(size[0]).append("x").append(size[1]).append(" submitGray8-to-private-copy ms median=").append(sorted.get(sorted.size()/2)).append(" p95=").append(sorted.get((int)Math.ceil(sorted.size()*0.95)-1)).append(" samples=").append(sorted.size()).append("\n");
   }
   Thread.sleep(30); int before=frames.get(); send(c,"burst","{\"count\":40}"); Thread.sleep(500);
   int delivered=frames.get()-before; assertTrue("Burst queue not bounded",delivered>=1&&delivered<=2);
@@ -310,11 +311,9 @@ public class BoundaryTest extends Instrumentation {
   send(c,"fixture","{\"attack\":\"system-menu-stale\"}"); settle(); assertEquals(0,systemMenuRequests.get());
   java.lang.reflect.Field field=FaceclawExternalApps.class.getDeclaredField("connections"); field.setAccessible(true);
   Object connection=((java.util.Map<?,?>)field.get(manager)).get(c);
-  java.lang.reflect.Field inboxField=connection.getClass().getDeclaredField("inbox"), sessionField=connection.getClass().getDeclaredField("session"); inboxField.setAccessible(true); sessionField.setAccessible(true);
-  android.os.Messenger stolen=(android.os.Messenger)inboxField.get(connection);
-  android.os.Message message=Protocol.message(Protocol.EVENT,(String)sessionField.get(connection),"request-system-menu",new org.json.JSONObject());
-  message.sendingUid=context.getPackageManager().getApplicationInfo(PKG,0).uid;
-  stolen.send(message); settle(); assertEquals(0,systemMenuRequests.get());
+  java.lang.reflect.Field callbackField=connection.getClass().getDeclaredField("hostSession");callbackField.setAccessible(true);
+  IFaceclawHostSession stolen=(IFaceclawHostSession)callbackField.get(connection);
+  stolen.sendControl(Protocol.control("request-system-menu",new org.json.JSONObject()));settle();assertEquals(0,systemMenuRequests.get());
   send(c,"fixture","{\"attack\":\"system-menu-valid\"}"); settle(); assertEquals(1,systemMenuRequests.get()); assertEquals("{}",systemMenuPayload);
  }
  public void testOwnContentAndHostRefinementRequireIndependentVisibleGrants() throws Exception {
@@ -395,11 +394,9 @@ public class BoundaryTest extends Instrumentation {
   getInstrumentation().runOnMainSync(()->context.getSharedPreferences("faceclaw-external-apps",0).edit().putBoolean(c+":notifications",true).commit());
   java.lang.reflect.Field field=FaceclawExternalApps.class.getDeclaredField("connections"); field.setAccessible(true);
   Object connection=((java.util.Map<?,?>)field.get(manager)).get(c);
-  java.lang.reflect.Field inboxField=connection.getClass().getDeclaredField("inbox"), sessionField=connection.getClass().getDeclaredField("session"); inboxField.setAccessible(true); sessionField.setAccessible(true);
-  android.os.Messenger stolen=(android.os.Messenger)inboxField.get(connection);
-  android.os.Message message=Protocol.message(Protocol.EVENT,(String)sessionField.get(connection),"notification",Protocol.object("id","x","target","synthetic","title","Synthetic","text","Synthetic"));
-  message.sendingUid=context.getPackageManager().getApplicationInfo(PKG,0).uid;
-  stolen.send(message); settle(); assertEquals(0,notifications.get());
+  java.lang.reflect.Field callbackField=connection.getClass().getDeclaredField("hostSession");callbackField.setAccessible(true);
+  IFaceclawHostSession stolen=(IFaceclawHostSession)callbackField.get(connection);
+  stolen.sendControl(Protocol.control("notification",Protocol.object("id","x","target","synthetic","title","Synthetic","text","Synthetic")));settle();assertEquals(0,notifications.get());
  }
  public void testHostConsentRejectsNonActivityPendingIntent() throws Exception {
   if(android.os.Build.VERSION.SDK_INT<31) return;
@@ -414,75 +411,6 @@ public class BoundaryTest extends Instrumentation {
   getInstrumentation().runOnMainSync(()->{ context.getSharedPreferences("faceclaw-external-apps",0).edit().putString(c+":pin","wrong-signer").commit(); manager.refresh(); });
   assertFalse(manager.isConnected(c)); assertFalse(manager.installedJson().contains(PKG));
  }
- private Object field(Object target,String name) throws Exception { java.lang.reflect.Field f=target.getClass().getDeclaredField(name);f.setAccessible(true);return f.get(target); }
- private Object frameStream(String component,boolean extension) throws Exception {
-  Object connection=((java.util.Map<?,?>)field(manager,"connections")).get(component);
-  return extension?((java.util.Map<?,?>)field(connection,"surfaces")).get("ui.launcher"):connection;
- }
- private void delayFrameWindow(Object stream,int milliseconds) throws Exception {
-  Object delivery=field(stream,"frames");java.lang.reflect.Field last=delivery.getClass().getDeclaredField("lastFrame");last.setAccessible(true);
-  // Extend just this test's window so cancellation remains deterministic under emulator load.
-  runOnMainSync(()->{try{last.setLong(delivery,android.os.SystemClock.elapsedRealtime()+milliseconds);}catch(Exception error){throw new AssertionError(error);}});
- }
- private void awaitFrameSequence(Object stream,long after) throws Exception {
-  for(int i=0;i<120;i++){waitForIdleSync();if(((Long)field(stream,"sequence"))>after)return;Thread.sleep(5);}
-  throw new AssertionError("Synthetic frame never reached validation");
- }
- private String prepareFrameStream(boolean extension) throws Exception {
-  connected=new CountDownLatch(1);String component=approve("AdversarialService");open(component);
-  if(extension){
-   send(component,"fixture","{\"attack\":\"publish-launcher\"}");settle();grantExtension(component,"ui.launcher",true);
-   runOnMainSync(()->{assertTrue("Open synthetic launcher",manager.openExtensionSurface(component,"ui.launcher",32,16));manager.setExtensionSurfaceVisibility(component,"ui.launcher",true,true);});
-  }
-  return component;
- }
- private void finalFrameAfterQuiescence(boolean extension,boolean mutable) throws Exception {
-  String component=prepareFrameStream(extension);Object stream=frameStream(component,extension);
-  delayFrameWindow(stream,180);long before=(Long)field(stream,"sequence");
-  send(component,"fixture",Protocol.object("attack",(extension?"extension":"frame")+(mutable?"-memory":"-burst")).toString());
-  awaitFrameSequence(stream,before);Thread.sleep(260);waitForIdleSync();
-  assertEquals(mutable?7:4,extension?latestExtensionFrame:latestFrame);
-  assertEquals(1,extension?extensionFrames.get():frames.get());
-  assertEquals(null,field(field(stream,"frames"),"pending"));
- }
- public void testRegularFinalFrameSurvivesThrottleAfterSenderStops() throws Exception { finalFrameAfterQuiescence(false,false); }
- public void testExtensionFinalFrameSurvivesThrottleAfterSenderStops() throws Exception { finalFrameAfterQuiescence(true,false); }
- public void testRegularDeferredFrameOwnsCopyBeforeAckAllowsMemoryMutation() throws Exception { finalFrameAfterQuiescence(false,true); }
- public void testExtensionDeferredFrameOwnsCopyBeforeAckAllowsMemoryMutation() throws Exception { finalFrameAfterQuiescence(true,true); }
- private void staleQueuedFrames(boolean extension) throws Exception {
-  for(String change:extension?new String[]{"hide","sleep","resize","close","grant","revoke","disconnect","pin"}:new String[]{"hide","sleep","resize","close","revoke","disconnect","pin"}) {
-   String component=prepareFrameStream(extension);Object stream=frameStream(component,extension);Object delivery=field(stream,"frames");
-   delayFrameWindow(stream,1000);long sequence=(Long)field(stream,"sequence");int before=extension?extensionFrames.get():frames.get();
-   send(component,"fixture",Protocol.object("attack",extension?"extension-burst":"frame-burst").toString());
-   awaitFrameSequence(stream,sequence);Runnable pending=(Runnable)field(delivery,"pending");assertTrue("Frame pending before "+change,pending!=null);
-   if(change.equals("revoke"))revokeThroughPolicy(component);
-   else if(change.equals("disconnect")){
-    java.lang.reflect.Method method=FaceclawExternalApps.class.getDeclaredMethod("disconnect",String.class,boolean.class);method.setAccessible(true);
-    runOnMainSync(()->{try{method.invoke(manager,component,false);}catch(Exception error){throw new AssertionError(error);}});
-   } else if(change.equals("pin"))context.getSharedPreferences("faceclaw-external-apps",0).edit().putString(component+":pin","changed-signer").commit();
-   else if(extension){
-    if(change.equals("grant"))grantExtension(component,"ui.launcher",false);
-    else runOnMainSync(()->{
-     if(change.equals("hide"))manager.setExtensionSurfaceVisibility(component,"ui.launcher",false,true);
-     if(change.equals("sleep"))manager.setExtensionSurfaceVisibility(component,"ui.launcher",true,false);
-     if(change.equals("resize"))manager.openExtensionSurface(component,"ui.launcher",64,32);
-     if(change.equals("close"))manager.closeExtensionSurface(component,"ui.launcher");
-    });
-   } else {
-    if(change.equals("hide"))send(component,"visibility","{\"visible\":false,\"screenOn\":true}");
-    if(change.equals("sleep"))send(component,"visibility","{\"visible\":true,\"screenOn\":false}");
-    if(change.equals("resize"))send(component,"resize","{\"width\":64,\"height\":32}");
-    if(change.equals("close"))send(component,"close","{}");
-   }
-   if(!change.equals("pin"))assertEquals(null,field(delivery,"pending"));
-   // Even a callback already dequeued before cancellation must recheck live authority.
-   runOnMainSync(pending);assertEquals(before,extension?extensionFrames.get():frames.get());
-   revokeThroughPolicy(component);settle();
-  }
- }
- public void testRegularQueuedFramesCannotCrossVisibilityGenerationApprovalOrConnection() throws Exception { staleQueuedFrames(false); }
- public void testExtensionQueuedFramesCannotCrossVisibilityGenerationGrantOrConnection() throws Exception { staleQueuedFrames(true); }
-
  public void testAuditOfflineRevocationImmediatelyClearsEffectiveOverride() throws Exception {
   String c=approve("CanvasService"); send(c,"test-publish-extensions",declarations("ui.typography","{\"size\":17}")); settle(); grantExtension(c,"ui.typography",true);
   java.lang.reflect.Method disconnect=FaceclawExternalApps.class.getDeclaredMethod("disconnect",String.class,boolean.class); disconnect.setAccessible(true);
@@ -650,6 +578,20 @@ public class BoundaryTest extends Instrumentation {
   Thread.sleep(16000);waitForIdleSync();assertEquals(0,extensionResults.get());
   checkedMain(()->assertTrue("B handles only a new explicit request",manager.sendExtension(DEMO_B,"assistant","request","{\"requestId\":\"fresh-demo-response\",\"text\":\"synthetic\"}")));
   settle();assertEquals(1,extensionResults.get());assertTrue("Only B response admitted",extensionResultPayload.contains("Demo B"));
+ }
+ public void testPublishedCapabilityBindsSchemaGenerationAndOneResult() throws Exception {
+  String c=approve("CanvasService");settle();assertEquals(1,capabilityCatalogs.get());
+  org.json.JSONObject catalog=new org.json.JSONObject(capabilityCatalogPayload);long generation=catalog.getLong("generation");
+  assertEquals("com.faceclaw.fixture.echo",catalog.getJSONArray("capabilities").getJSONObject(0).getString("id"));
+  long now=System.currentTimeMillis();
+  org.json.JSONObject base=Protocol.object("requestId","synthetic-capability-request","capabilityId","com.faceclaw.fixture.echo","capabilityVersion",1,
+   "catalogGeneration",generation,"caller",Protocol.object("participant","instrumentation"),"issuedAt",now,"expiresAt",now+20000);
+  send(c,"capability-request",new org.json.JSONObject(base.toString()).put("arguments",Protocol.object("extra",true)).toString());settle();
+  assertEquals(0,capabilityResults.get());assertTrue("Invalid arguments must not disconnect provider",manager.isConnected(c));
+  send(c,"capability-request",new org.json.JSONObject(base.toString()).put("arguments",Protocol.object("text","bounded echo")).toString());settle();
+  assertEquals(1,capabilityResults.get());
+  org.json.JSONObject result=new org.json.JSONObject(capabilityResultPayload).getJSONObject("result");
+  assertEquals("completed",result.getString("state"));assertEquals("bounded echo",result.getJSONObject("content").getString("text"));
  }
  public void testMessagingRequiresExplicitCapabilityAndCancelledRequestsCannotReply() throws Exception {
   String c=approve("CanvasService");

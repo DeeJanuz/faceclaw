@@ -2,7 +2,6 @@ package com.faceclaw.sdk;
 
 /** Window-motion contract v1. Pure geometry/lifecycle; retains no app content. */
 public final class WindowMotion {
-    public static final int FRAME_INTERVAL_MS = 40;
     public static final int DURATION_MS = 360;
     public static final double BODY_REVEAL_PROGRESS = 0.9;
     public static final class Rect {

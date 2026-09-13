@@ -11,7 +11,7 @@
        mutual consent and connection session on every message instead of a signature permission. -->
   <service android:name=".DemoService" android:label="@string/app_name" android:exported="true" tools:ignore="ExportedService">
    <intent-filter><action android:name="com.faceclaw.action.APP_SERVICE" /></intent-filter>
-   <meta-data android:name="com.faceclaw.PROTOCOL_MAJOR" android:value="1" />
+   <meta-data android:name="com.faceclaw.PROTOCOL_MAJOR" android:value="2" />
   </service>
  </application>
 </manifest>

@@ -2,7 +2,7 @@ plugins { id("com.android.application") }
 android {
  namespace = "com.faceclaw.sdk.hosttest"
  compileSdk = 35
- defaultConfig { applicationId = "com.faceclaw.sdk.hosttest"; minSdk = 24; targetSdk = 35; testInstrumentationRunner = "com.faceclaw.sdk.hosttest.BoundaryTest" }
+ defaultConfig { applicationId = "com.faceclaw.sdk.hosttest"; minSdk = 27; targetSdk = 35; testInstrumentationRunner = "com.faceclaw.sdk.hosttest.BoundaryTest" }
  flavorDimensions += "host"
  productFlavors {
   create("standalone") { dimension = "host" }
@@ -15,7 +15,7 @@ android {
 dependencies { implementation(project(":sdk")) }
 
 val copyHostSources by tasks.registering(Sync::class) {
- from(rootProject.file("../App_Resources/Android/src/main/java")) { include("com/faceclaw/app/FaceclawMessaging*.java", "com/faceclaw/app/FaceclawSms*.java", "com/faceclaw/app/FaceclawExternalApps.java", "com/faceclaw/app/FaceclawExtensions.java", "com/faceclaw/app/FaceclawSettings.java", "com/faceclaw/app/FaceclawSettingsListener.java", "com/faceclaw/app/FaceclawExternalAppListener.java", "com/faceclaw/app/FaceclawAppSettingsActivity.java") }
+ from(rootProject.file("../App_Resources/Android/src/main/java")) { include("com/faceclaw/app/FaceclawMessaging*.java", "com/faceclaw/app/FaceclawSms*.java", "com/faceclaw/app/FaceclawExternalApps.java", "com/faceclaw/app/FaceclawExtensions.java", "com/faceclaw/app/FaceclawSettings.java", "com/faceclaw/app/FaceclawSettingsListener.java", "com/faceclaw/app/FaceclawExternalAppListener.java", "com/faceclaw/app/FaceclawAppSettingsActivity.java", "com/faceclaw/app/DisplayScheduler.java", "com/faceclaw/app/ExternalFrameOutcomeListener.java") }
  into(layout.buildDirectory.dir("generated/host"))
 }
 tasks.named("preBuild") { dependsOn(copyHostSources) }

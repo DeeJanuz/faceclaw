@@ -11,6 +11,7 @@ function harness(external = false) {
   '../../ui/shell/shell': { shell }, '../../native/notification-icons': { readActiveNotifications: () => sourcePresent ? [source] : [], replyToNotification: () => { sends++; return nativeAccepted; }, dismissNotification: (key, version) => { dismissed.push([key, version]); return true; } },
   '../../native/external-notifications': { getExternalNotificationReply: () => ({ isCurrent: () => sourcePresent, send: (_text, done) => { sends++; finish = done; return true; } }) },
   './extension-policy': { boundedToken: value => typeof value === 'string' },
+  './app-capabilities': { AppCapabilityRegistry: class {} },
  };
  vm.runInNewContext(ts.transpileModule(fs.readFileSync('app/apps/external/extension-platform.ts', 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText,
   { module, exports: module.exports, require: name => imports[name] || {}, setTimeout: fn => timers.push(fn) });

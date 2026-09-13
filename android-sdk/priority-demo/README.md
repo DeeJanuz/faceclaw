@@ -35,9 +35,7 @@ priority-demo/build/outputs/apk/beta/debug/priority-demo-beta-debug.apk
 
 Install these APKs on the explicitly selected test device with `adb -s SERIAL install -r APK`. The host and SDK must contain the matching feature-generation lifecycle fixes. For T3 comparison, rebuild the standalone T3 application against this SDK as well. Do not replace an installed app with a different signing identity or uninstall the host to work around an installation failure.
 
-Compatibility is source-based during this preview: use the host and `:sdk` from the same checkout, including the per-feature authority-epoch changes described in [the SDK contract](../README.md#global-customizations-and-providers). The demo depends directly on `project(":sdk")`. The local SDK coordinate `com.faceclaw:sdk:0.1.0`, protocol major `1`, and advertised `extensions: 1` do not distinguish older preview builds from this lifecycle revision.
-
-Upgrade this pre-release host and its extension clients together. Older bundled SDKs clear every extension surface when a snapshot arrives and cannot provide the new preservation behavior. Client capability/version compatibility needs to be finalized before publishing the extension SDK for independent consumers.
+The demo depends directly on the stable local `project(":sdk")`. Use it with a protocol-2 host from the same checkout. Protocol incompatibility is reported as `UPDATE_REQUIRED`; there is no prerelease compatibility adapter.
 
 Open each demo from the phone launcher. **Faceclaw permissions and priority** opens the host manager. Approve the app, select that Faceclaw host through the SDK consent dialog, then grant the desired features and set their priority. Declaration toggles never change host grants or the host's underlying preferences.
 
@@ -84,7 +82,7 @@ The suite runs the native boundary regressions and seven scenarios:
 1. B -> A priority, ordinary disconnect, offline revocation -> B, then host baseline.
 2. A's in-flight request and launcher frames survive a lower contender's unrelated change; lower-app disconnect preserves A's epoch.
 3. Different features have different winners; per-feature revocation and reconnect preserve the user's order.
-4. Disable, withdraw and republish declarations through the actual demo APK and Messenger boundary.
+4. Disable, withdraw and republish declarations through the actual demo APK and typed AIDL session.
 5. Same-owner dependencies govern eligibility, and live dependency outages invalidate dependent epochs.
 6. Launcher row input supplies a bounded action identity; tapping the header does not open an app.
 7. An old A reply cannot cross a change to B. Only a new explicit B request succeeds.

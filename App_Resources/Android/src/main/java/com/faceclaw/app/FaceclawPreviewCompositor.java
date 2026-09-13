@@ -15,7 +15,7 @@ import android.content.Context;
  */
 public final class FaceclawPreviewCompositor {
     private final Context appContext;
-    private final SurfaceCompositor compositor = new SurfaceCompositor();
+    private final RenderBroker compositor = new RenderBroker();
     private final android.os.Handler mainHandler = new android.os.Handler(android.os.Looper.getMainLooper());
 
     // Notified (on the main looper, where the phone UI's JS runs) after each

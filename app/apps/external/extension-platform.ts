@@ -7,6 +7,7 @@ import { getExternalNotificationReply, invokeExternalNotification } from "../../
 import { readNotificationApps } from "../../native/notification-apps";
 import { initializeSharedHostStyle } from "../../native/shared-style";
 import { boundedToken, record, ExtensionToolCalls, NotificationLeases } from "./extension-policy";
+import { AppCapabilityRegistry } from "./app-capabilities";
 
 declare const java: any;
 export type ExtensionFeature = { feature: string; component: string; configuration: Record<string, unknown>; live: boolean; available: boolean; generation: number };
@@ -29,6 +30,7 @@ const newId = (): string => String(java.util.UUID.randomUUID().toString());
 /** APK code stays in its UID. This adapter alone resolves sensitive host actions. */
 export class ExtensionPlatform {
   private messaging?: HostMessaging;
+  private readonly appCapabilities: AppCapabilityRegistry;
   private generation = 0;
   private features: ExtensionFeature[] = [];
   private readonly reviews = new Map<string, { cancel: () => void; current: () => boolean }>();
@@ -46,7 +48,12 @@ export class ExtensionPlatform {
   private readonly conversationIds = new Map<string, string>();
   private lastGesture = new Map<string, number>();
   constructor(private readonly native: any, private readonly hooks: ExtensionHooks, private readonly isLocked: () => boolean, private readonly isProtected: () => boolean = () => false) {
-    active = this; initializeSharedHostStyle(); this.refresh();
+    active = this;
+    this.appCapabilities = new AppCapabilityRegistry((component, type, data) => {
+      if (!this.native?.isConnected(component)) return false;
+      this.native.send(component, type, JSON.stringify(data)); return true;
+    }, () => this.publishTools(), newId);
+    initializeSharedHostStyle(); this.refresh();
     if (typeof global !== 'undefined' && global.isAndroid) {
       try { this.messaging = new HostMessaging(this.native, owner => !this.isLocked() && !this.isProtected() && this.controls(owner, "device-tools")); }
       catch { /* Fail closed if encrypted messaging storage cannot be opened. */ }
@@ -100,6 +107,8 @@ export class ExtensionPlatform {
     this.publishState(); this.publishTools(); this.notificationsChanged();
   }
   onNativeEvent(component: string, type: string, data: any): boolean {
+    if (["capabilities-changed", "capability-result", "capability-progress"].includes(type)) return this.appCapabilities.event(component, type, data);
+    if (type === "disconnected" || type === "changed") this.appCapabilities.remove(component);
     if (this.messaging?.event(component, type, data)) return true;
     if (type === "extensions-changed") { this.refresh(); return true; }
     if (type !== "extension-event") return false;
@@ -289,7 +298,8 @@ export class ExtensionPlatform {
   private publishTools(): void {
     const selected = this.feature("device-tools"); if (!selected) return;
     const custom = ["list", "reply", "dismiss"].map(kind => ({ name: `host.notifications.${kind}`, description: `${kind} current Android notifications under this app's device-tool grant. Never retry an uncertain action.`, inputSchema: { type: "object", properties: { key: { type: "string" }, postTime: { type: "integer" }, actionIndex: { type: "integer" }, text: { type: "string" } }, additionalProperties: false } }));
-    const tools = [...toolRegistry.listTools().map(({ name, description, inputSchema }) => ({ name, description, inputSchema })), ...custom, ...(this.messaging ? messagingTools : [])];
+    const builtIn = [...toolRegistry.listTools().map(({ name, description, inputSchema }) => ({ name, description, inputSchema })), ...custom, ...(this.messaging ? messagingTools : [])];
+    const tools = [...builtIn, ...this.appCapabilities.tools(new Set(builtIn.map(tool => tool.name)))];
     this.event(selected.component, "device-tools", { event: "tool-catalog", tools });
   }
   private async action(component: string, feature: string, generation: number, action: string, data: Record<string, unknown>): Promise<void> {
@@ -388,6 +398,11 @@ export class ExtensionPlatform {
   }
   private async tool(component: string, generation: number, name: string, args: Record<string, unknown>, scope?: MessagingScope): Promise<ToolResult> {
     if (!this.controls(component, "device-tools", generation) || this.isLocked()) return { ok: false, error: "Device tools unavailable" };
+    if (this.appCapabilities) {
+      const reserved = new Set([...toolRegistry.listTools().map(tool => tool.name), ...messagingTools.map(tool => tool.name), "host.notifications.list", "host.notifications.reply", "host.notifications.dismiss"]);
+      if (this.appCapabilities.has(name, reserved)) return this.appCapabilities.call({ participant: component, origin: scope ? "bridge" : "host",
+        ...(scope?.project ? { project: scope.project } : {}), ...(scope?.session ? { session: scope.session } : {}) }, name, args);
+    }
     if (name.startsWith("messaging.")) {
       if (!scope || !this.messaging) return { ok: false, error: "Update and connect T3 to use messaging" };
       try { return { ok: true, content: JSON.stringify(await this.messaging.broker.call(scope, name, args)) }; }

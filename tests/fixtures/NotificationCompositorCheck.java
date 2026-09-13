@@ -50,5 +50,19 @@ public final class NotificationCompositorCheck {
         pixels(restored, 90, 200, 100);
         pixels(compositor.previewComposite(), 90, 200, 100);
         if (restored.draws.length != 2 || restored.draws[0].encoding != 950) throw new AssertionError("retained content did not restore");
+
+        SurfaceCompositor packedCompositor = new SurfaceCompositor();
+        packedCompositor.configureScreen(4, 2);
+        packedCompositor.configureSurface("apk", 0, 0, 4, 2, 0, SurfaceCompositor.TRANSPARENCY_OPAQUE);
+        byte[] target = new byte[4];
+        SurfaceCompositor.PackedComposite first = packedCompositor.applyDamageAndCompositePacked("apk",
+            ByteBuffer.wrap(new byte[]{0, 16, 32, 48, 64, 80, 96, 112}), new int[]{0, 0, 4, 2}, "one", null, target);
+        if (first.composite.gray != null || first.packed != target) throw new AssertionError("packed intake allocated a Gray8 snapshot");
+        byte[] changed = new byte[]{0, 16, 32, 48, 64, (byte) 240, 96, 112};
+        byte[] nextTarget = new byte[4];
+        SurfaceCompositor.PackedComposite second = packedCompositor.applyDamageAndCompositePacked("apk",
+            ByteBuffer.wrap(changed), new int[]{1, 1, 1, 1}, "two", null, nextTarget);
+        byte[] expected = BmpUtil.pack4bppFromGray8(changed, 4, 2);
+        if (!java.util.Arrays.equals(second.packed, expected)) throw new AssertionError("dirty packed output diverged from full packing");
     }
 }

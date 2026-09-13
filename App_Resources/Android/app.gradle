@@ -3,6 +3,7 @@ import org.apache.tools.ant.taskdefs.condition.Os
 // You can add your native dependencies here
 dependencies {
 //  implementation 'androidx.multidex:multidex:2.0.1'
+  implementation project(':faceclaw-sdk')
   // WebSocket transport for the g2mirror terminal-mirroring client.
   implementation 'com.squareup.okhttp3:okhttp:4.12.0'
   // WebViewCompat.addDocumentStartJavaScript, for injecting the EvenHub bridge
@@ -260,13 +261,10 @@ android {
   buildToolsVersion "35"
   // ndkVersion ""
 
-  sourceSets.main {
-    java.srcDirs += ["$rootDir/../../android-sdk/sdk/src/main/java"]
-    jniLibs.srcDirs += ["$projectDir/src/main/jniLibs"]
-  }
+  sourceSets.main { jniLibs.srcDirs += ["$projectDir/src/main/jniLibs"] }
 
   defaultConfig {
-    minSdkVersion 24
+    minSdkVersion 27
     targetSdkVersion 35
     ndk {
       // The NativeScript platform build.gradle has already added all four

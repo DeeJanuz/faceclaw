@@ -157,6 +157,38 @@ public final class GlyphAtlas {
     }
 
     /**
+     * Register one application-supplied Gray8 glyph as an antialiased glyph
+     * cell. The content-addressed font key makes immutable registrations safe
+     * across application reconnects while retaining draw-time brightness.
+     */
+    public static int ensureGray(String contentKey, int encoding, int width, int height, ByteBuffer gray8) {
+        if (contentKey == null || contentKey.isEmpty() || width <= 0 || width > 255
+                || height <= 0 || height > 255 || gray8 == null || gray8.remaining() != width * height) {
+            throw new IllegalArgumentException("bad glyph registration " + width + "x" + height);
+        }
+        synchronized (lock) {
+            Integer known = fontIds.get(contentKey);
+            int fontId;
+            if (known == null) {
+                fontId = nextFontId++;
+                fontIds.put(contentKey, fontId);
+            } else {
+                fontId = known;
+            }
+            long glyphKey = key(fontId, encoding);
+            if (!glyphs.containsKey(glyphKey)) {
+                ByteBuffer source = gray8.duplicate();
+                byte[] coverage = new byte[width * height];
+                for (int i = 0; i < coverage.length; i++) {
+                    coverage[i] = (byte) BmpUtil.nibbleForGray(source.get() & 0xff);
+                }
+                glyphs.put(glyphKey, new Glyph(width, height, 0, height, 0, null, coverage));
+            }
+            return fontId;
+        }
+    }
+
+    /**
      * Register a batch of glyph rasters. Little-endian buffer, a sequence of
      * font groups:
      *   [keyLen u8][key utf8][cellHeight u8][count u16]

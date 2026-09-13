@@ -62,6 +62,32 @@ public class BmpUtil {
         return out;
     }
 
+    /** Patch only damaged pixel rows into an existing full packed framebuffer. */
+    public static void patch4bppFromGray8(byte[] gray8, int width, int height, int[] damage, byte[] out) {
+        int stride = (width + 1) >> 1;
+        if (width <= 0 || height <= 0 || gray8 == null || gray8.length < width * height
+                || (damage != null && damage.length % 4 != 0)
+                || out == null || out.length != stride * height) {
+            throw new IllegalArgumentException("Invalid Gray8 packing buffers");
+        }
+        int[] rects = damage == null || damage.length == 0 ? new int[]{0, 0, width, height} : damage;
+        for (int r = 0; r < rects.length; r += 4) {
+            int left = Math.max(0, rects[r]);
+            int top = Math.max(0, rects[r + 1]);
+            int right = Math.min(width, left + rects[r + 2]);
+            int bottom = Math.min(height, top + rects[r + 3]);
+            int firstPair = left >> 1, lastPair = (right - 1) >> 1;
+            for (int y = top; y < bottom; y++) {
+                for (int pair = firstPair; pair <= lastPair; pair++) {
+                    int x = pair << 1, src = y * width + x;
+                    int high = GRAY_TO_NIBBLE[gray8[src] & 0xff] & 0xff;
+                    int low = x + 1 < width ? GRAY_TO_NIBBLE[gray8[src + 1] & 0xff] & 0xff : 0;
+                    out[y * stride + pair] = (byte) ((high << 4) | low);
+                }
+            }
+        }
+    }
+
     /**
      * Wrap a packed 4bpp frame in BMP framing (BITMAPINFOHEADER + 16-entry gray
      * palette, bottom-up rows padded to a 4-byte stride). Only the full-frame

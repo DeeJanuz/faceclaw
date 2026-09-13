@@ -53,6 +53,10 @@ See [APK extensions and override behavior](docs/APK-EXTENSIONS.md) for global UI
 
 See the [Android SDK and Kotlin example](android-sdk/README.md) for the service
 contract, drawing API, permissions, lifecycle, and verification fixtures.
+Apps may also publish provider-owned operations and interface entry points through
+the [public Faceclaw capability protocol](docs/CAPABILITY-PROTOCOL.md). Bridge
+adapters discover the resulting tool catalog through the separately granted
+`device-tools` SDK role; T3 is one adapter rather than a privileged protocol peer.
 
 
 ## Compiling

@@ -2,15 +2,15 @@ package com.faceclaw.demo;
 
 import android.content.ComponentName;
 import android.content.SharedPreferences;
-import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.os.Handler;
 import android.os.Looper;
 import com.faceclaw.sdk.FaceclawAppService;
-import com.faceclaw.sdk.Protocol;
-import com.faceclaw.sdk.Ui;
+import com.faceclaw.sdk.*;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.HashMap;
 import java.util.Map;
 import org.json.JSONArray;
@@ -20,6 +20,8 @@ import org.json.JSONObject;
 public final class DemoService extends FaceclawAppService {
   static DemoService instance;
   private final Handler main = new Handler(Looper.getMainLooper());
+  private final ExecutorService renderer=Executors.newSingleThreadExecutor();
+  private FaceclawSession session;
   private SharedPreferences prefs;
   // Surface epochs belong to individual features, not the overall snapshot revision.
   private final Map<String, View> surfaces = new HashMap<>();
@@ -75,27 +77,32 @@ public final class DemoService extends FaceclawAppService {
   @Override
   public void onDestroy() {
     prefs.unregisterOnSharedPreferenceChangeListener(settingsChanged);
+    renderer.shutdownNow();
     cancelAll();
     instance = null;
     super.onDestroy();
   }
 
   @Override
-  protected void onHostConnected() {
+  protected void onSessionReady(FaceclawSession value) {
+    session=value;session.windowSurface().setCanvasRenderer(renderer,(canvas,request)->drawWindow(canvas));
     DemoState.connected = true;
     DemoState.log("Host connected");
     publishExtensions(DemoSettings.declarations(prefs));
   }
 
   @Override
-  protected void onHostDisconnected() {
+  protected void onSessionLost(DisconnectInfo info) {
     DemoState.connected = false;
-    DemoState.log("Host disconnected; snapshot is last known");
+    DemoState.log(info.recoverable?"Host recovering; retained scene is preserved":"Host disconnected");
     cancelAll();
-    surfaces.clear();
-    window = null;
+    if(!info.recoverable){surfaces.clear();window=null;session=null;}
     apps = new JSONArray();
     menu = new JSONArray();
+  }
+
+  @Override protected void onHostSnapshot(HostSnapshot snapshot){
+    if(snapshot.windowOpen){window=new View(Protocol.object("width",snapshot.windowWidth,"height",snapshot.windowHeight,"extensionGeneration",snapshot.windowGeneration));window.visible=snapshot.windowVisible;window.awake=snapshot.screenOn;}
   }
 
   // A disconnected session never carries requests, catalogs or surfaces into the next one.
@@ -125,7 +132,8 @@ public final class DemoService extends FaceclawAppService {
   }
 
   @Override
-  protected void onHostEvent(String type, JSONObject data) {
+  protected void onControlEvent(ControlEvent event) {
+    String type=event.type;JSONObject data=event.data;
     if (type.equals("extensions")) {
       JSONArray previous = DemoState.snapshot.optJSONArray("features"),
           next = extensions().optJSONArray("features");
@@ -182,14 +190,12 @@ public final class DemoService extends FaceclawAppService {
       renderWindow();
       return;
     }
-    if (type.equals("input")) {
-      if (data.optString("type").equals("long-press")) requestSystemMenu();
-      return;
-    }
     if (type.equals("extension-surface")) {
       String name = data.optString("feature"), operation = data.optString("type");
-      if (operation.equals("open") || operation.equals("resize"))
+      if (operation.equals("open") || operation.equals("resize")) {
         surfaces.put(name, new View(data));
+        if(session!=null)session.extensionSurface(name).setCanvasRenderer(renderer,(canvas,request)->drawSurface(name,surfaces.get(name),canvas));
+      }
       View view = surfaces.get(name);
       if (operation.equals("close")) surfaces.remove(name);
       if (operation.equals("visibility") && view != null) {
@@ -272,6 +278,8 @@ public final class DemoService extends FaceclawAppService {
     }
     // Real notification payloads and microphone audio are deliberately ignored and never logged.
   }
+
+  @Override protected void onInput(RenderSurface surface,FaceclawInputEvent event){if("long-press".equals(event.type))requestSystemMenu();surface.invalidate(InvalidateReason.INPUT);}
 
   private static boolean validRequestId(String value) {
     return com.faceclaw.sdk.ExtensionContract.token(value);
@@ -369,9 +377,7 @@ public final class DemoService extends FaceclawAppService {
       renderSurface(entry.getKey(), entry.getValue());
   }
 
-  private Bitmap background(View view, String title) {
-    Bitmap bitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888);
-    Canvas canvas = new Canvas(bitmap);
+  private void background(Canvas canvas, View view, String title) {
     canvas.drawColor(Color.BLACK);
     Paint border = new Paint();
     border.setColor(Color.WHITE);
@@ -386,15 +392,16 @@ public final class DemoService extends FaceclawAppService {
         Ui.style().cornerRadius(4),
         border);
     Ui.text(canvas, title, 16, 32, 18, Color.WHITE);
-    return bitmap;
   }
 
   private void renderWindow() {
     if (window == null || !window.visible || !window.awake || !prefs.getBoolean("frames", true))
       return;
-    Bitmap bitmap = background(window, BuildConfig.DEMO_NAME + " / shared style");
-    try {
-      Canvas canvas = new Canvas(bitmap);
+    if(session!=null)session.windowSurface().invalidate(InvalidateReason.STATE);
+  }
+
+  private void drawWindow(Canvas canvas) {
+    View current=window;if(current==null)return;background(canvas,current,BuildConfig.DEMO_NAME + " / shared style");
       int y = 66;
       String[] lines = {
         "The quick brown fox jumps over the lazy dog.",
@@ -405,15 +412,11 @@ public final class DemoService extends FaceclawAppService {
       };
       Paint paint = Ui.style().textPaint(16, Color.WHITE);
       for (String line : lines)
-        for (String wrapped : Ui.wrap(line, paint, Math.max(1, window.width - 32))) {
-          if (y > window.height - 16) break;
+        for (String wrapped : Ui.wrap(line, paint, Math.max(1, current.width - 32))) {
+          if (y > current.height - 16) break;
           canvas.drawText(wrapped, 16, y, paint);
           y += rowHeight();
         }
-      submitBitmap(bitmap);
-    } finally {
-      bitmap.recycle();
-    }
   }
 
   private void renderSurface(String name, View view) {
@@ -421,14 +424,11 @@ public final class DemoService extends FaceclawAppService {
         || !view.awake
         || !prefs.getBoolean("frames", true)
         || !owns(name, view.epoch)) return;
-    Bitmap bitmap =
-        background(
-            view,
-            BuildConfig.DEMO_NAME
-                + " / "
-                + (name.equals("ui.app-menu") ? menuTitle : name.substring(3)));
-    try {
-      Canvas canvas = new Canvas(bitmap);
+    if(session!=null)session.extensionSurface(name).invalidate(InvalidateReason.STATE);
+  }
+
+  private void drawSurface(String name,View view,Canvas canvas) {
+    if(view==null)return;background(canvas,view,BuildConfig.DEMO_NAME+" / "+(name.equals("ui.app-menu")?menuTitle:name.substring(3)));
       if (name.equals("ui.notifications")) {
         Ui.text(canvas, "Synthetic notification surface", 16, 70, 16, Color.WHITE);
         Ui.text(
@@ -454,9 +454,5 @@ public final class DemoService extends FaceclawAppService {
         if (rows.length() == 0)
           Ui.text(canvas, "Waiting for the host catalog...", 16, 75, 16, Color.WHITE);
       }
-      submitExtensionBitmap(name, bitmap);
-    } finally {
-      bitmap.recycle();
-    }
   }
 }

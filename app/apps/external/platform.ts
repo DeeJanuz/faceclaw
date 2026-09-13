@@ -133,6 +133,16 @@ export class ExternalAppPlatform {
       return;
     }
     const state = this.windows.get(component);
+    if (type === "recovering") {
+      if (state) { state.ready = false; state.frame = null; this.cancelOwnedWork(state); }
+      this.options.requestRender(); return;
+    }
+    if (type === "connected" && state) {
+      const size = appViewportSize(state.window.heightMode ?? "min");
+      state.ready = true;
+      this.send(component, "open", { ...size, target: state.target });
+      this.send(component, "visibility", { visible: state.visible, screenOn: shell.isScreenOn() && !this.options.isLocked() });
+    }
     if (type === "disconnected") { if (state) this.cancelOwnedWork(state); if (state) shell.closeWindow(state.window.windowId); clearExternalNotifications(component); }
     if (["connected", "disconnected", "changed", "grants-changed"].includes(type)) {
       if (type === "grants-changed") { if (state) this.cancelOwnedWork(state); clearExternalNotifications(component); }

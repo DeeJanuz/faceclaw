@@ -1139,13 +1139,14 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         synchronized (lock) { return running && sessionReady && fixedLayoutCreated && !chargingMode && !shutdownRequested; }
     }
 
+    private final RenderPacer renderPacer = new RenderPacer();
+
     @Override public long renderCreditDelayMs() {
         synchronized (lock) {
             if (!running || !sessionReady || chargingMode || shutdownRequested) return 100;
-            int queuedImages=0;for(OutboundMessage message:pendingMessages)if("image".equals(message.kind))queuedImages++;for(OutboundMessage message:inFlightMessages)if("image".equals(message.kind))queuedImages++;
-            if (queuedImages>1 || desiredFrameId!=0) return 48;
-            if (!pendingMessages.isEmpty() || !inFlightMessages.isEmpty()) return 24;
-            return 0;
+            synchronized (desiredTilesLock) {
+                return renderPacer.delay(SystemClock.elapsedRealtime(), desiredFrameId != 0);
+            }
         }
     }
 
@@ -2506,6 +2507,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         FaceclawBleManager.recordDisplayFrameSent();
         BleImageOptimizer.ImageUpdateStats stats = imageUpdateStats.remove(message.imageUpdateId);
         if (stats != null && stats.firstWriteStartedAtMs > 0) {
+            renderPacer.acknowledged(ackedAtMs - stats.firstWriteStartedAtMs);
             emitFrameMetrics(stats.paintMs, (int) Math.max(0, ackedAtMs - stats.firstWriteStartedAtMs), stats.tileCount);
         }
         if (stats != null) {

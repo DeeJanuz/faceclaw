@@ -1,13 +1,19 @@
 package com.faceclaw.sdk.ipc;
 
-import android.os.Bundle;
+import com.faceclaw.sdk.ControlEvent;
+import com.faceclaw.sdk.DisconnectInfo;
+import com.faceclaw.sdk.FaceclawInputEvent;
+import com.faceclaw.sdk.FrameOutcome;
+import com.faceclaw.sdk.HostSnapshot;
+import com.faceclaw.sdk.RenderCredit;
 
 /** Host-to-app half of one authenticated Faceclaw session. */
 interface IFaceclawAppSession {
-    oneway void applyHostSnapshot(in Bundle snapshot);
-    oneway void grantRenderCredit(in Bundle credit);
+    oneway void applyHostSnapshot(in HostSnapshot snapshot);
+    oneway void grantRenderCredit(in RenderCredit credit);
     oneway void onBufferReleased(String surfaceId, long generation, int slotId, long sequence);
-    oneway void onFrameOutcome(in Bundle outcome);
-    oneway void sendControl(in Bundle event);
-    oneway void close(in Bundle reason);
+    oneway void onFrameOutcome(in FrameOutcome outcome);
+    oneway void onInput(String surfaceId, in FaceclawInputEvent event);
+    oneway void sendControl(in ControlEvent event);
+    oneway void close(in DisconnectInfo reason);
 }

@@ -1,6 +1,5 @@
 package com.faceclaw.sdk;
 
-import android.os.*;
 import org.json.JSONObject;
 /** Stable SDK 1.0 wire contract. Protocol 2 intentionally rejects prerelease V1 builds. */
 public final class Protocol {
@@ -15,17 +14,7 @@ public final class Protocol {
   if(width<1 || height<1 || width>MAX_WIDTH || height>MAX_HEIGHT) throw new IllegalArgumentException("Invalid viewport");
   return width*height;
  }
- public static JSONObject json(Bundle data) throws Exception {
-  String text=data==null?"{}":data.getString("json","{}");
-  if(text.length()>MAX_JSON) throw new IllegalArgumentException("Control message too large");
-  return new JSONObject(text);
- }
- public static Bundle control(String type,JSONObject json) {
-  Bundle b=new Bundle(); b.putString("type",type);
-  String text=json==null?"{}":json.toString();
-  if(text.length()>MAX_JSON) throw new IllegalArgumentException("Control message too large");
-  b.putString("json",text); return b;
- }
+ public static ControlEvent control(String type,JSONObject json){return new ControlEvent(type,json);}
  public static JSONObject object(Object... fields) {
   JSONObject result=new JSONObject();
   try { for(int i=0;i<fields.length;i+=2) result.put((String)fields[i],fields[i+1]); }

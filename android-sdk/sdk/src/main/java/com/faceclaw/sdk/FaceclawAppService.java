@@ -25,16 +25,17 @@ public abstract class FaceclawAppService extends Service {
  private Boolean lastMenuAvailable,lastProtected;
  private volatile ConnectionState connectionState=ConnectionState.DISCOVERED;
  private final IFaceclawAppEndpoint.Stub endpoint=new IFaceclawAppEndpoint.Stub(){
-  @Override public void connect(Bundle hello,IFaceclawHostSession remote){int uid=Binder.getCallingUid();handler.post(()->receiveHello(uid,hello,remote));}
+  @Override public void connect(SessionHello hello,IFaceclawHostSession remote){int uid=Binder.getCallingUid();handler.post(()->receiveHello(uid,hello,remote));}
  };
  private final IFaceclawAppSession.Stub appSession=new IFaceclawAppSession.Stub(){
   private boolean authorized(){return Binder.getCallingUid()==hostUid;}
-  @Override public void applyHostSnapshot(Bundle value){if(authorized())handler.post(()->{if(faceclawSession!=null)faceclawSession.applySnapshot(value);});}
-  @Override public void grantRenderCredit(Bundle value){if(authorized())handler.post(()->{if(faceclawSession!=null)faceclawSession.grant(value);});}
+  @Override public void applyHostSnapshot(HostSnapshot value){if(authorized())handler.post(()->{if(faceclawSession!=null)faceclawSession.applySnapshot(value);});}
+  @Override public void grantRenderCredit(RenderCredit value){if(authorized())handler.post(()->{if(faceclawSession!=null)faceclawSession.grant(value);});}
   @Override public void onBufferReleased(String id,long generation,int slot,long sequence){if(authorized())handler.post(()->{if(faceclawSession!=null)faceclawSession.released(id,generation,slot,sequence);});}
-  @Override public void onFrameOutcome(Bundle value){if(authorized())handler.post(()->{if(faceclawSession!=null)faceclawSession.outcome(value);});}
-  @Override public void sendControl(Bundle value){if(authorized())handler.post(()->receiveControl(value));}
-  @Override public void close(Bundle value){if(authorized())handler.post(()->disconnect(disconnectInfo(value),false));}
+  @Override public void onFrameOutcome(FrameOutcome value){if(authorized())handler.post(()->{if(faceclawSession!=null)faceclawSession.outcome(value);});}
+  @Override public void onInput(String surfaceId,FaceclawInputEvent value){if(authorized())handler.post(()->{if(faceclawSession!=null)faceclawSession.applyInput(surfaceId,value);});}
+  @Override public void sendControl(ControlEvent value){if(authorized())handler.post(()->receiveControl(value));}
+  @Override public void close(DisconnectInfo value){if(authorized())handler.post(()->disconnect(value==null?new DisconnectInfo(DisconnectInfo.Reason.UNKNOWN,false,""):value,false));}
  };
  public final ConnectionState connectionState(){return connectionState;}
  public final JSONObject sharedStyle() { try { return new JSONObject(sharedStyle.toString()); } catch(Exception ignored) { return new JSONObject(); } }
@@ -116,22 +117,22 @@ public abstract class FaceclawAppService extends Service {
   try { return getPackageManager().getApplicationLabel(getPackageManager().getApplicationInfo(selectedHostPackage(),0)).toString(); }
   catch(Exception ignored) { return ""; }
  }
- private void receiveHello(int uid,Bundle hello,IFaceclawHostSession remote) {
+ private void receiveHello(int uid,SessionHello hello,IFaceclawHostSession remote) {
   try {
    connectionState=ConnectionState.AUTHENTICATING;
-   if(remote==null||hello==null)return;String supplied=hello.getString("session","");int version=hello.getInt("protocolMajor");
-   if(version!=Protocol.VERSION){connectionState=ConnectionState.PERMANENTLY_REJECTED;Bundle reason=new Bundle();reason.putString("reason",DisconnectInfo.Reason.UPDATE_REQUIRED.name());reason.putBoolean("recoverable",false);reason.putString("detail","Faceclaw protocol "+Protocol.VERSION+" required");remote.close(reason);return;}
+   if(remote==null||hello==null)return;String supplied=hello.sessionId;int version=hello.protocolMajor;
+   if(version!=Protocol.VERSION){connectionState=ConnectionState.PERMANENTLY_REJECTED;remote.close(new DisconnectInfo(DisconnectInfo.Reason.UPDATE_REQUIRED,false,"Faceclaw protocol "+Protocol.VERSION+" required"));return;}
    if(supplied.length()<20||supplied.length()>80)return;String identity=PackageIdentity.forUid(this,uid),pin=approvals.getString("identity","");
    if(!identity.equals(pin)){
     if(SystemClock.elapsedRealtime()<pendingUntil&&!identity.equals(pendingPin))return;
     pendingPin=identity;pendingSession=supplied;pendingHost=remote;pendingUid=uid;pendingToken=UUID.randomUUID().toString();pendingUntil=SystemClock.elapsedRealtime()+120000;
     Intent intent=new Intent(this,HostApprovalActivity.class).putExtra("token",pendingToken).setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-    PendingIntent consent=PendingIntent.getActivity(this,0,intent,PendingIntent.FLAG_UPDATE_CURRENT|PendingIntent.FLAG_IMMUTABLE);Bundle value=new Bundle();value.putParcelable("consent",consent);value.putString("session",supplied);remote.onConsentRequired(value);return;
+    PendingIntent consent=PendingIntent.getActivity(this,0,intent,PendingIntent.FLAG_UPDATE_CURRENT|PendingIntent.FLAG_IMMUTABLE);remote.onConsentRequired(new ConsentRequest(consent,supplied));return;
    }
    connect(remote,identity,supplied,uid);
   }catch(Exception ignored){}
  }
- private void receiveControl(Bundle wire){if(faceclawSession!=null)faceclawSession.applyControl(wire);}
+ private void receiveControl(ControlEvent wire){if(faceclawSession!=null)faceclawSession.applyControl(wire);}
  private void handleControl(ControlEvent event){
   String type=event.type;JSONObject data=event.data;
   try{
@@ -162,15 +163,14 @@ public abstract class FaceclawAppService extends Service {
   disconnect(new DisconnectInfo(DisconnectInfo.Reason.HOST_STOPPED,true,"Host replaced"),false);host=remote;hostIdentity=identity;wireSession=newSession;hostUid=uid;lastMenuAvailable=null;lastProtected=null;
   if(faceclawSession==null)faceclawSession=new FaceclawSession(remote,new FaceclawSession.Callback(){public void onSnapshot(HostSnapshot snapshot){onHostSnapshot(snapshot);}public void onControl(ControlEvent event){handleControl(event);}public void onInput(RenderSurface surface,FaceclawInputEvent event){FaceclawAppService.this.onInput(surface,event);}public void onCreditWithoutRenderer(RenderSurface surface,RenderCredit credit){long targetMs=System.currentTimeMillis()+Math.max(0,(credit.targetPresentationTimeNanos-SystemClock.elapsedRealtimeNanos())/1_000_000L);onControlEvent(new ControlEvent("render",Protocol.object("surfaceId",surface.id(),"targetPresentationTimeNanos",credit.targetPresentationTimeNanos,"targetPresentationTimeMs",targetMs,"traceId",credit.traceId)));}public void onOutcome(FrameOutcome outcome){onFrameOutcome(outcome);}});else faceclawSession.attach(remote);
   final String connectedSession=wireSession;death=()->handler.post(()->{if(wireSession.equals(connectedSession))disconnect(new DisconnectInfo(DisconnectInfo.Reason.BINDER_DIED,true,"Host binder died"),false);});remote.asBinder().linkToDeath(death,0);
-  Bundle hello=new Bundle();hello.putInt("protocolMajor",Protocol.VERSION);hello.putString("sdkVersion",Protocol.SDK_VERSION);hello.putString("session",wireSession);remote.onReady(hello,appSession);connectionState=ConnectionState.READY;onSessionReady(faceclawSession);
+  remote.onReady(new SessionHello(Protocol.VERSION,Protocol.SDK_VERSION,wireSession),appSession);connectionState=ConnectionState.READY;onSessionReady(faceclawSession);
  }
- private static DisconnectInfo disconnectInfo(Bundle b){try{return new DisconnectInfo(DisconnectInfo.Reason.valueOf(b.getString("reason","UNKNOWN")),b.getBoolean("recoverable"),b.getString("detail",""));}catch(Exception ignored){return new DisconnectInfo(DisconnectInfo.Reason.UNKNOWN,false,"");}}
  private void disconnect(DisconnectInfo info,boolean notifyHost) {
   messagingAllowed=false; messagingRequests.clear(); capabilityRequests.clear();
   extensionSnapshot=new JSONObject(); sharedStyle=new JSONObject(); Ui.resetSharedStyle();
   notificationReplyAllowed=false; notificationReplies.clear();
   if(host!=null) {
-   IFaceclawHostSession previous=host;if(notifyHost)try{Bundle reason=new Bundle();reason.putString("reason",info.reason.name());reason.putBoolean("recoverable",info.recoverable);reason.putString("detail",info.detail);previous.close(reason);}catch(Exception ignored){}
+   IFaceclawHostSession previous=host;if(notifyHost)try{previous.close(info);}catch(Exception ignored){}
    if(death!=null)previous.asBinder().unlinkToDeath(death,0);host=null;hostIdentity="";wireSession="";hostUid=-1;if(faceclawSession!=null){if(info.recoverable)faceclawSession.detach();else{faceclawSession.closeSilently();faceclawSession=null;}}boolean permanent=info.reason==DisconnectInfo.Reason.IDENTITY_CHANGED||info.reason==DisconnectInfo.Reason.REVOKED||info.reason==DisconnectInfo.Reason.UPDATE_REQUIRED||info.reason==DisconnectInfo.Reason.PROTOCOL_ABUSE;connectionState=info.recoverable?ConnectionState.RECOVERING:permanent?ConnectionState.PERMANENTLY_REJECTED:ConnectionState.DISCOVERED;onSessionLost(info);
   }
  }

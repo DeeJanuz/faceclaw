@@ -64,6 +64,10 @@ Recoverable binding attempts use 0 ms, 250 ms, 1 s, 2 s, 5 s, then 10 s interval
 
 ## Rendering
 
+See [Window animation patterns](ANIMATION_PATTERNS.md) for credit pacing,
+lightweight dismissal, invalidation categories, sparse damage, and transition
+diagnostics. The guide separates validated behavior from proposed optimizations.
+
 All shell, built-in, APK-window, and APK-extension surfaces enter the same host `RenderBroker`, retained compositor, planner, and display transport. Each raster surface registers three persistent `SharedMemory` slots. The SDK writes them and the host maps them read-only.
 
 Choose one surface API:

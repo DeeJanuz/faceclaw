@@ -132,3 +132,17 @@ a bounded diagnostic and retry category, and resume on a valid surface/generatio
 or transport recovery event. Distinguish supersession during healthy delivery
 from invalid geometry or missing surface registration. A rejected frame must not
 generate an unbounded retry loop that competes with the foreground animation.
+
+## A3 reference implementation follow-up
+
+T3's host integration now classifies ordinary host-state refreshes as `ambient`
+and suppresses value-identical refresh notifications. An ambient refresh may
+invalidate the destination backdrop but preserves the closing motion's clock and
+geometry. Notification snapshots, content updates, revocation and lifecycle
+events retain their existing invalidation paths. Regression tests cover repeated
+ambient updates during collapse, unchanged state received via both window and
+extension routes, and immediate content invalidation. This is application-side
+reference behavior, not a new SDK wire event or public lifecycle contract.
+
+The notification rejection-loop observation and proposed scratch-buffer/resource
+optimizations remain separate follow-ups; this change does not implement them.

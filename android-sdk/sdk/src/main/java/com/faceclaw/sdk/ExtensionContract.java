@@ -39,6 +39,7 @@ public final class ExtensionContract {
   else if(feature.equals("ui.window-layout")) { rules.put("centered","boolean"); rules.put("sidebarMode","overlay|persistent"); rules.put("switcherHeight","display|minimum"); rules.put("dividerWidth","1:4"); rules.put("ownTopBar","boolean"); rules.put("ownHeightMode","min|medium|max"); rules.put("inputDialogs","compact|viewport"); }
   else if(feature.equals("ui.typography")) { rules.put("font","(?:Inter_18pt|Roboto|RobotoMono|Montserrat)-(?:Regular|Light|Bold)\\.ttf"); rules.put("size","8:20"); rules.put("raster","antialiased|crisp|hinted"); rules.put("borderWidth","1:4"); rules.put("selectionBorderWidth","1:5"); rules.put("cardRadius","0:24"); }
   else if(feature.equals("ui.app-menu")) { rules.put("title","text"); rules.put("systemTitle","text"); rules.put("displayOffFirst","boolean"); rules.put("systemActionsLast","boolean"); }
+  else if(feature.equals("assistant")) { rules.put("label","text"); rules.put("invocation","app|host"); }
   else rules.put("label","text");
   for(Iterator<String> keys=data.keys();keys.hasNext();) {
    String key=keys.next(),rule=rules.get(key); Object value=data.get(key);

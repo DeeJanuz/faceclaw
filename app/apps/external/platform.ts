@@ -40,9 +40,16 @@ export class ExternalAppPlatform {
   private readonly listener: any;
   readonly extensions: ExtensionPlatform;
   constructor(private readonly options: ExternalPlatformOptions) {
-    this.extensions = new ExtensionPlatform(this.native, options.extensions ?? {}, options.isLocked, () => {
+    this.extensions = new ExtensionPlatform(this.native, { ...options.extensions, openAssistant: async (component, current) => {
+      if (!current()) return false;
+      await this.open(component);
+      const state = this.windows.get(component);
+      if (!current() || !state?.ready || !state.visible) return false;
+      state.lastInput = Date.now();
+      return true;
+    } }, options.isLocked, () => {
       const id = shell.foregroundWindow()?.windowId;
-      return [...this.windows.values()].some(state => state.window.windowId === id && (state.protected || !!state.reviewId));
+      return [...this.windows.values()].some(state => state.window.windowId === id && (state.protected || !!state.reviewId || !!state.refinement));
     });
     configureExternalNotifications((component, target) => { void this.open(component, target); }, publishExternalNotificationPosted);
     configureExternalNotificationReplies(

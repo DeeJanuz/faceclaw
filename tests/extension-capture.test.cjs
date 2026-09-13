@@ -21,6 +21,11 @@ test('raw capture output is draft-purpose only and revocation invalidates callba
  assert.equal(h.calls[0].type,'capture-dictation-transcript');assert.equal(h.calls[0].data.purpose,'capture');assert.equal(h.calls[0].data.confirmed,undefined);
  h.own(false);h.captures[0][1]({text:'Revoked',isFinal:true});assert.equal(h.calls.length,1);
 });
+test('successful capture close forwards the canonical complete reason',()=>{
+ const h=setup();h.begin();h.captures[0][1]({text:'Authoritative final',isFinal:true});h.captures[0][3]('complete');
+ assert.equal(h.calls[1].type,'capture-dictation-closed');assert.equal(h.calls[1].data.reason,'complete');
+ assert.equal(h.state.completedCapture.text,'Authoritative final');
+});
 test('capture cancellation and finish are isolated from search and reviewed-send requests',()=>{
  const h=setup();h.begin();h.platform.onEvent('app','cancel-search-dictation',{requestId:'capture-id'});assert.equal(h.state.reviewPurpose,'capture');
  h.platform.onEvent('app','finish-capture-dictation',{requestId:'wrong'});assert.equal(h.calls.length,0);

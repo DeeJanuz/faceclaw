@@ -415,14 +415,16 @@ public final class FaceclawExternalApps {
    .setPositiveButton("Faceclaw permissions",(d,w)->showApp(activity,app)).setNegativeButton("Close",null).show();
  }
  /** Navigation only. The package hint never supplies service metadata, identity or grants. */
- public void showAppSettings(Activity activity,String appPackage) {
+ public void showAppSettings(Activity activity,String appPackage) { showAppSettings(activity,appPackage,null); }
+ /** Opens the app's host settings, optionally focused on one global feature. */
+ public void showAppSettings(Activity activity,String appPackage,String feature) {
   if(activity==null) return;
   // The exported settings Activity can be the first screen in a cold host process.
   // Reconnect only previously approved apps before presenting their host-selection state.
   refresh();
   if(appPackage!=null && appPackage.length()<=255 && appPackage.matches("[a-zA-Z0-9_]+(?:\\.[a-zA-Z0-9_]+)+")) {
    for(ResolveInfo app:discover()) if(appPackage.equals(app.serviceInfo.packageName)) {
-    showApp(activity,app); return;
+    showApp(activity,app,feature); return;
    }
   }
   showPermissionsManager(activity);
@@ -492,7 +494,8 @@ public final class FaceclawExternalApps {
   for(String key:prefs.getAll().keySet()) if(key.startsWith(component+":extension")) edit.remove(key);
   edit.apply(); disconnect(component,false); extensionsChanged(); emit(component,"changed",new JSONObject());
  }
- private void showApp(Activity a,ResolveInfo resolved) {
+ private void showApp(Activity a,ResolveInfo resolved) { showApp(a,resolved,null); }
+ private void showApp(Activity a,ResolveInfo resolved,String requestedFeature) {
   ServiceInfo s=resolved.serviceInfo; String k=key(s);
   if(!validService(s)) { new AlertDialog.Builder(a).setMessage("This app requires an incompatible Faceclaw protocol or its service is disabled.").setPositiveButton("OK",null).show(); return; }
   if(!approved(s)) {
@@ -513,12 +516,13 @@ public final class FaceclawExternalApps {
     AlertDialog consent=new AlertDialog.Builder(a).setTitle("Approve "+resolved.loadLabel(context.getPackageManager()))
      .setView(scroll).setNegativeButton("Cancel",null).setPositiveButton("Approve",(d,w)->{
       if(!approveSelection(s,pin,choices)) { new AlertDialog.Builder(a).setMessage("App identity changed or approval could not be saved. Reopen app settings and try again.").setPositiveButton("OK",null).show(); return; }
-      refresh(); main.postDelayed(()->showApp(a,resolved),400);
+      refresh(); main.postDelayed(()->showApp(a,resolved,requestedFeature),400);
      }).create();
     consent.show(); consent.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
     consent.getButton(AlertDialog.BUTTON_POSITIVE).setFilterTouchesWhenObscured(true);
    } catch(Exception ignored) {} return;
   }
+  if(requestedFeature!=null && Arrays.asList(ExtensionContract.FEATURES).contains(requestedFeature)) { showExtensionFeature(a,k,requestedFeature); return; }
   Connection c=connections.get(k);
   ArrayList<String> options=new ArrayList<>(); options.add(c!=null&&c.ready?"Host selected":"Select this host on app");
   options.add("Notifications: "+prefs.getBoolean(k+":notifications",false)); options.add("Dictation/review: "+prefs.getBoolean(k+":dictation",false));
@@ -667,6 +671,21 @@ public final class FaceclawExternalApps {
    default: return feature;
   }
  }
+ private void showExtensionFeature(Activity activity,String component,String feature) {
+  if(!ExtensionContract.known(feature) || extensions.declaration(component,feature)==null) {
+   new AlertDialog.Builder(activity).setMessage("This feature is not published by the app. Open its settings and enable it first.").setPositiveButton("OK",null).show(); return;
+  }
+  boolean granted=extensions.granted(component,feature);
+  boolean active=extensions.controls(component,feature);
+  String state=!granted?"Permission needed":active?"Active":!extensions.declaration(component,feature).optBoolean("enabled")?"Disabled by app":!isConnected(component)?"Waiting for connection":"Allowed; another provider or dependency takes priority";
+  String[] actions={granted?"Revoke permission":"Grant permission","Set feature priority"};
+  new AlertDialog.Builder(activity).setTitle(extensionLabel(feature)+": "+state).setItems(actions,(dialog,index)->{
+   if(index==1) { showExtensionOrder(activity,feature); return; }
+   if(granted) { extensions.grant(component,feature,false); extensionsChanged(); return; }
+   AlertDialog consent=new AlertDialog.Builder(activity).setTitle("Allow global feature?").setMessage(extensionLabel(feature)+" can affect Faceclaw outside this app. You can revoke this permission here.").setNegativeButton("Cancel",null).setPositiveButton("Allow",(ignored,which)->{ if(extensions.grant(component,feature,true)) extensionsChanged(); }).create();
+   consent.show(); consent.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE); consent.getButton(AlertDialog.BUTTON_POSITIVE).setFilterTouchesWhenObscured(true);
+  }).setNegativeButton("Close",null).show();
+ }
  private void showExtensions(Activity activity,String component) {
   ArrayList<String> features=new ArrayList<>(),labels=new ArrayList<>();
   for(String feature:ExtensionContract.FEATURES) if(extensions.declaration(component,feature)!=null) {
@@ -676,13 +695,7 @@ public final class FaceclawExternalApps {
   }
   if(features.isEmpty()) { new AlertDialog.Builder(activity).setMessage("This app has not published customization features. Open its settings and connect it first.").setPositiveButton("OK",null).show(); return; }
   new AlertDialog.Builder(activity).setTitle("Global customizations").setItems(labels.toArray(new String[0]),(d,index)->{
-   String feature=features.get(index); boolean granted=extensions.granted(component,feature);
-   new AlertDialog.Builder(activity).setTitle(extensionLabel(feature)).setItems(new String[]{granted?"Revoke permission":"Grant permission","Set feature priority"},(dialog,choice)->{
-    if(choice==1) { showExtensionOrder(activity,feature); return; }
-    if(granted) { extensions.grant(component,feature,false); extensionsChanged(); return; }
-    AlertDialog consent=new AlertDialog.Builder(activity).setTitle("Allow global feature?").setMessage(extensionLabel(feature)+" can affect Faceclaw outside this app. Android system settings are not granted. You can revoke this permission here.").setNegativeButton("Cancel",null).setPositiveButton("Allow",(ignored,which)->{ if(extensions.grant(component,feature,true)) extensionsChanged(); }).create();
-    consent.show(); consent.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE); consent.getButton(AlertDialog.BUTTON_POSITIVE).setFilterTouchesWhenObscured(true);
-   }).setNegativeButton("Close",null).show();
+   showExtensionFeature(activity,component,features.get(index));
   }).setNegativeButton("Close",null).show();
  }
  private void showExtensionOrder(Activity activity,String feature) {

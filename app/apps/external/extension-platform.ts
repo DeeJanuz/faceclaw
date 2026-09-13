@@ -14,6 +14,7 @@ export type ExtensionFeature = { feature: string; component: string; configurati
 export type ExtensionHooks = {
   apps?: () => { appId: string; title: string; icon?: string; uninstallable?: boolean }[];
   launchApp?: (appId: string) => void;
+  openAssistant?: (component: string, current: () => boolean) => Promise<boolean>;
   uninstallApp?: (appId: string) => Promise<void> | void;
   hostState?: () => { weather?: unknown };
   showSurface?: (feature: string, component: string, target?: string) => boolean;
@@ -69,6 +70,22 @@ export class ExtensionPlatform {
   controls(component: string, feature: string, generation?: number): boolean {
     const winner = this.feature(feature);
     return !!winner && winner.component === component && (generation === undefined || winner.generation === generation);
+  }
+  private assistantOpening = false;
+  /** A wakeword is a user gesture; only the selected provider may own its UI. */
+  openAssistant(): boolean {
+    const provider = this.feature("assistant");
+    if (provider?.configuration.invocation !== "app" || !this.hooks.openAssistant) return false;
+    if (this.assistantOpening || this.isLocked() || this.isProtected()) return true;
+    for (const feature of ["ui.launcher", "ui.app-menu", "ui.notifications"]) this.hooks.closeSurface?.(feature, false);
+    if (!shell.canShowExtensionOverlay()) return true;
+    const current = () => !this.isLocked() && !this.isProtected() && shell.isScreenOn() &&
+      shell.canShowExtensionOverlay() && this.controls(provider.component, "assistant", provider.generation);
+    this.assistantOpening = true;
+    void this.hooks.openAssistant(provider.component, current).then(opened => {
+      if (opened && current()) this.event(provider.component, "assistant", { event: "invoke" });
+    }).catch(() => {}).finally(() => { this.assistantOpening = false; });
+    return true;
   }
   handlesNotifications(): boolean { return !!this.feature("ui.notifications") && !this.isLocked(); }
   private refresh(): void {

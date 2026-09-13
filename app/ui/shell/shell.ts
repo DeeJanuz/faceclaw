@@ -700,6 +700,7 @@ class Shell {
       this.lastInputAtMs = Date.now();
       const wokeScreen = !this.screenOn && this.wake(navigationPolicy().wakeFocus);
       if (action === "voice-input" && !this.activeVoiceLayer && !this.activeKeyboardLayer) {
+        if (extensionPlatform()?.openAssistant()) return { shell: true, window: false };
         if (this.assistantLayer) {
           // The assistant overlay is up; a wakeword continues that conversation.
           this.startAssistantFollowUp(true);

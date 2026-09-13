@@ -111,6 +111,10 @@ Bounded JSON remains only for versioned control/extension data. It is never part
 
 The existing notification, dictation, reviewed reply, messaging, host-state, shared-style, and extension methods remain typed SDK helpers. Capability authority is always bound to the current session, Android identity, grant, feature generation, request ID, and expiry. Treat timeouts and unknown side-effect outcomes as non-retryable without new user intent.
 
+The [app-owned assistant invocation contract](ASSISTANT_INVOCATION.md) defines how
+a selected assistant provider handles "Hey Even" in its own window, including
+declarations, event ordering, permissions, and older-host compatibility limits.
+
 The complete application-owned capability contract is in [CAPABILITY-PROTOCOL.md](../docs/CAPABILITY-PROTOCOL.md). Independent extension surfaces use the same render pool, scheduler, outcomes, recovery, and scene/resource APIs as the main window.
 
 ## Examples and verification

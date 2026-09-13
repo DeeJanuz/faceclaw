@@ -10,7 +10,7 @@ function harness() {
   const imports = {
     "../../assistant/messaging-runtime": {},
     "../../assistant/messaging": { messagingTools: [] },
-    '../../ui/shell/shell': { shell: { isScreenOn: () => true, getBatteryLevels: () => ({}), getWindows: () => [], foregroundWindow: () => undefined } },
+    '../../ui/shell/shell': { shell: { canShowExtensionOverlay: () => true, isScreenOn: () => true, getBatteryLevels: () => ({}), getWindows: () => [], foregroundWindow: () => undefined } },
     '../../assistant/tool-registry': { toolRegistry: { onToolsChanged() {}, listTools: () => [] } },
     '../../native/notification-icons': { readActiveNotifications: () => [], onAndroidNotificationPosted() {}, onAndroidNotificationRemoved() {}, onAndroidNotificationsChanged() {} },
     '../../native/external-notifications': {},
@@ -72,4 +72,36 @@ test('own transcription remains grant-bound when its app does not own the global
   h.grant(false);h.update([transcription]);await rejected;
   h.grant(true);h.result(request,'B','transcription',7);
   assert.equal(h.platform.pending.size,0);
+});
+
+
+test('wakeword opens selected app assistant once and drops revoked invocations', async () => {
+  const h = harness(), provider = { ...h.state('assistant'), configuration: { invocation: 'app' } };
+  let complete, opens = 0;
+  h.platform.hooks.openAssistant = async () => { opens++; return new Promise(resolve => { complete = resolve; }); };
+  h.update([provider]);
+  assert.equal(h.platform.openAssistant(), true);
+  assert.equal(h.platform.openAssistant(), true);
+  assert.equal(opens, 1);
+  complete(true);
+  await new Promise(setImmediate);
+  assert.equal(h.sent.filter(item => item.feature === 'assistant' && item.data.event === 'invoke').length, 1);
+  h.platform.openAssistant();
+  h.update([{ ...provider, generation: 8, component: 'B' }]);
+  complete(true);
+  await new Promise(setImmediate);
+  assert.equal(h.sent.filter(item => item.feature === 'assistant' && item.data.event === 'invoke').length, 1);
+});
+test('host fallback remains available and locked or protected flows never open the app', () => {
+  const h = harness(); let opens = 0;
+  h.platform.hooks.openAssistant = async () => { opens++; return true; };
+  h.update([h.state('assistant')]);
+  assert.equal(h.platform.openAssistant(), false);
+  h.update([{ ...h.state('assistant'), configuration: { invocation: 'app' } }]);
+  h.platform.isLocked = () => true;
+  assert.equal(h.platform.openAssistant(), true);
+  h.platform.isLocked = () => false;
+  h.platform.isProtected = () => true;
+  assert.equal(h.platform.openAssistant(), true);
+  assert.equal(opens, 0);
 });

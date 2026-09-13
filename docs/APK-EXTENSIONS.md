@@ -20,6 +20,15 @@ Notification presentation uses a separate SDK surface. The host owns admission, 
 
 The layout provider may change generic window positioning and switcher behavior. `switcherHeight: display` spans the full panel independently of the foreground app's shorter content band; drawing, touch targets, and screenshot bounds use that same height. Header and height choices for the provider's own window apply only to that APK. Input dialogs can use the compact host layout or fill the configured viewport. Other apps retain their own identity and display settings.
 
+## Assistant invocation
+
+An assistant provider may opt into owning the wakeword interaction in its normal
+SDK window with `configuration.invocation: "app"`. Omitting the field retains
+Faceclaw's voice dialog and text-provider behavior. See the
+[assistant invocation contract](../android-sdk/ASSISTANT_INVOCATION.md) for the
+event, independent permissions, lifecycle, audit rationale, and initial host/app
+upgrade requirement. Older hosts do not silently ignore this new field.
+
 ## Shared style
 
 The host publishes effective typography tokens through the SDK. `Ui.style()` supplies one typeface and measurement/drawing policy to cooperative apps. Signal uses that same style for text measurement, wrapping, row sizes, selection borders, and drawing. Removing the override publishes the host's current base style.

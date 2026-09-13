@@ -146,3 +146,22 @@ reference behavior, not a new SDK wire event or public lifecycle contract.
 
 The notification rejection-loop observation and proposed scratch-buffer/resource
 optimizations remain separate follow-ups; this change does not implement them.
+
+## Lifecycle correction and on-device validation follow-up
+
+Content-free T3 motion logs distinguish skipped transitions (including inactive
+overlay state), explicit cancellation, safe content invalidation and completion.
+An ADB run at 10:11:43 acknowledged eight opening frames; a closing run at
+10:11:42 logged content cancellation about 190 ms after starting. Thus the
+remaining failure was not universally an absence of render credits.
+
+The reference implementation now discards outgoing content/heading pixels on
+closing invalidation and continues the existing trajectory with a neutral outline
+and refreshed destination backdrop. Privacy invalidation erases pixels immediately
+without requiring geometry cancellation. Real input/lifecycle cancellation remains.
+
+A pending notification preview is an overlay only while its host notification
+surface is active. Closing that surface or losing the session clears the local
+preview so stale state cannot disable unrelated window animations. Active capture
+continues to count as an overlay. Tests cover inactive previews, surface reopening,
+disconnect and safe continuation after content invalidation.

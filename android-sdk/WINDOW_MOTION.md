@@ -1,18 +1,145 @@
-# Credit-driven window motion
+# Building reliable animations
 
-`WindowMotion` is a timer-free geometry model shared by the Java and JavaScript SDKs. Create or retarget a motion when state changes, invalidate the surface once, and sample it from the host-provided presentation time inside the renderer.
+Start here for every new animated SDK application. This is the current integration
+recipe; [ANIMATION_PATTERNS.md](ANIMATION_PATTERNS.md) contains engineering rationale
+and historical T3 findings. No firmware changes or additional SDK API are required.
+A fixed frame rate or optical presentation time is not guaranteed.
 
-```java
-surface.setCanvasRenderer(renderExecutor, (canvas, request) -> {
-  WindowMotion.Frame frame = motion.sample(request.credit.targetPresentationTimeNanos / 1_000_000L);
-  if (frame == null) return;
-  Ui.transitionCard(canvas, frame, "TITLE", bodyCanvas -> drawBody(bodyCanvas));
-  if (!frame.done) request.requestNextFrame();
-});
+## Ownership
+
+| Owner | Responsibility |
+| --- | --- |
+| Host | Credits, visibility gating, grant-to-grant pacing, retained pixels, sparse composition/packing, latest desired frame, BLE recovery and outcomes |
+| SDK RenderSurface | Gray8 leases or Canvas conversion, credit callbacks, slot release and generations |
+| SDK WindowMotion | Timer-free geometry, elapsed-time sampling, retargeting and body-reveal flag; no content or overlay state |
+| Application | Desired state, authorized content, caches, overlay lifecycle, serialized access, final-state redraw and safe retries |
+
+The geometry model alone does not prevent stale overlays, coalesce host snapshots,
+or manage private content. The example hooks below are application helpers, not
+new SDK lifecycle methods or wire events.
+
+## Standard transition lifecycle
+
+1. Update desired open/closed state on input. Ignore redundant input. Reverse from
+   the last sampled rectangle, not a guessed future position. That rectangle is
+   not necessarily already displayed on the glasses.
+2. Prepare a lightweight heading and destination background. Release outgoing body
+   pixels on close. Do not sort or lay out a list on every animation frame.
+3. Invalidate once to request a credit. Do not start a fixed-rate animation timer.
+4. Render on credit: sample once, paint, and submit even the terminal sample.
+   Request another frame only while motion is active.
+5. Retain the desired final state, not a completed motion object. Later invalidation
+   or recovery must still be able to redraw settled content.
+6. On hide/loss/removal, stop work and release unsafe caches. On return, redraw the
+   authorized desired state using current geometry/generation, not old intermediate frames.
+
+### One clock domain
+
+In Java, sample `request.credit.targetPresentationTimeNanos / 1_000_000L`.
+Initialize the motion clock on the first render, after preparing lightweight
+caches, not from an earlier idle credit. Never mix epoch milliseconds, elapsed
+realtime milliseconds and nanoseconds. Never start a new motion at an expired target.
+
+Bridges exposing epoch-millisecond targets must normalize to a current,
+nondecreasing clock. T3's wall-clock floor fixes its idle-credit problem, but new
+native SDK apps should use the monotonic credit clock directly.
+
+### Submission and ownership
+
+Canvas: paint a valid frame and call `request.requestNextFrame()` only if unfinished.
+The adapter submits the canvas. Returning without painting does not skip submission;
+paint settled content when no motion is active.
+
+Gray8: paint through the current `FrameLease`; submit `FrameMetadata` with the
+credit trace ID, valid damage and `requestNextFrame(!frame.done)`. Do not hold a
+lease between samples. `BUFFER_RELEASED` permits slot reuse, not display confirmation.
+Application scratch and phone-preview buffers need their own ownership discipline.
+
+Start with full client damage for correctness: the host detects changed pixels.
+Partial client damage needs a baseline correct after rejection. Include old/new
+edges and newly exposed background. Never blindly retry an old lease after failure.
+
+## Standard invalidation policy
+
+| Event | Cache action | Motion action |
+| --- | --- | --- |
+| Identical host refresh | None | Suppress repaint notification |
+| Relevant battery/weather/background change | Refresh affected destination backdrop | Keep clock and trajectory |
+| Body content changes while opening | Drop body cache; rebuild from current model when needed | Keep motion |
+| Outgoing content changes/revocation during closing | Erase body and sensitive heading immediately; use safe background and neutral outline | Keep safe geometry or settle safely |
+| Explicit navigation/reversal | Drop obsolete content | Retarget from last sampled geometry |
+| Hide, resize/generation change, session loss, removal | Release unsafe caches | Cancel/suspend; restore desired state on valid return |
+
+Compare relevant values/versions before notifying listeners. Never route every
+heartbeat through blanket cancellation. Conversely, do not classify notification
+text changes, revocation or disconnect as ambient updates. Neutral continuation
+must not retain stale text in bitmaps, glyph lists, preview buffers or draw batches.
+
+## Standard overlay lifecycle
+
+A queued preview is not a visible overlay. Gate notification previews on
+`preview != null && notificationSurfaceActive`. Clear preview state on surface
+close, disconnect and removal; reopening must not resurrect it. Real active
+capture is independently an overlay and must still block conflicting transitions.
+Use one authoritative overlay state or clear every mirror through one lifecycle function.
+
+## Starter examples
+
+- [AnimatedCardAppService.java](examples/AnimatedCardAppService.java): pooled Canvas,
+  serialized state access, redundant-input handling, current-state redraw, cached
+  body release and neutral dismissal.
+- [animated-card.cjs](examples/animated-card.cjs): injectable timer-free controller.
+  Submit its `render()` result through your SDK surface; make `invalidate()` request
+  a credit. `ambientChanged()`, `invalidateContent()`, `cancel()` and `resume()`
+  deliberately have different meanings.
+
+The examples draw over black. Add your destination-background cache and overlay
+ownership using this guide. The T3 reference is in sibling `faceclaw-t3-app`:
+`app/extensions/host.ts`, `app/ui/shell/shell.ts`, `app/apps/t3/t3-app.ts` and their tests.
+
+Current shared-model policy: 360 ms motion, opening body reveal at 90%, immediate
+closing body removal. These are visual policies, not a promise of 60 Hz or a
+particular number of transmitted frames. `FrameRequest` coalesces requests; it
+does not authorize rendering without credits or implement BLE backpressure.
+
+## New-application acceptance checklist
+
+- [ ] Opening after idle does not finish on its first credit.
+- [ ] Redundant open/close commands are no-ops; reversal is continuous.
+- [ ] Ambient updates during open/close do not restart or cancel progress.
+- [ ] Changed/revoked content is erased immediately, including cached headings.
+- [ ] Pending/closed previews do not suppress window animations.
+- [ ] Active capture still blocks conflicts; disconnect clears local overlay state.
+- [ ] Delayed credits skip obsolete samples and submit the final state.
+- [ ] Settled content redraws after invalidation/recovery.
+- [ ] Hidden surfaces stop work; resize/reconnect use current generations.
+- [ ] Sparse output matches full composition, including newly revealed background.
+- [ ] Overload and unavailable-surface retries remain bounded.
+- [ ] Scratch/cache/preview ownership is safe across callbacks and executors.
+
+## Verification and diagnostics
+
+With JDK 17+ and Android API 35 configured, run from `android-sdk`:
+
+```sh
+bash scripts/check-animation-examples.sh
 ```
 
-The scheduler grants the next credit according to display availability, BLE queue/ack timing, shell work, visibility, and priority. A delayed renderer samples the current target time and skips obsolete intermediate states. The terminal state is still submitted once. Cancel motion on content invalidation; recoverable host loss may retain the model because the next credit supplies a new presentation target.
+This local-only command runs the JavaScript and SDK unit tests and compiles the
+Java starter against the actual SDK classes and Android API. It does not install,
+publish, or change device state.
 
-Opening body content becomes visible at 90% progress. Closing content is hidden immediately, preventing stale private pixels from surviving a reverse transition. Retargeting begins at the last submitted rectangle.
+Example tests cover final redraw, invalidation during close, ambient updates,
+reversal and lifecycle suspension. Host tests cover cadence/sparse composition;
+T3 tests cover actual overlay integration. None proves optical smoothness.
 
-Install the local JavaScript package as `@faceclaw/motion`; it exports `WindowMotion`, `FrameRequest`, and the same geometry constants. It intentionally exports no fixed-rate animation driver.
+Record bounded content-free events: `started`, `skipped` with reason, `invalidated`
+with category/continuation policy, `cancelled` with reason, and `completed`. Associate
+transition ID/direction and surface/generation with frame trace IDs where supported.
+The full A6 schema remains guidance, not automatic SDK instrumentation. Never log
+application text or pixels.
+
+Before tuning pacing, distinguish skipped/cancelled motion, sparse submissions,
+superseded frames and uneven transport feedback. Measure opening and closing
+separately. ACKs are not optical-vsync measurements; average app FPS alone cannot
+establish a firmware ceiling.

@@ -1,5 +1,11 @@
 # Window animation patterns
 
+For new applications, use [Building reliable animations](WINDOW_MOTION.md) and its
+tested starter examples first. This file preserves engineering rationale and a
+chronological investigation; older findings below describe historical behavior,
+not instructions to reinstate blanket cancellation. The final reference behavior
+erases stale content while continuing safe neutral closing geometry.
+
 Engineering guidance for SDK 1.0 applications and the host. These patterns do not
 add public APIs or promise a display refresh rate. Proposed instrumentation below
 is a logging convention, not an already implemented SDK facility.

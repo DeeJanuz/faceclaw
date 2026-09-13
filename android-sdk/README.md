@@ -64,9 +64,10 @@ Recoverable binding attempts use 0 ms, 250 ms, 1 s, 2 s, 5 s, then 10 s interval
 
 ## Rendering
 
-See [Window animation patterns](ANIMATION_PATTERNS.md) for credit pacing,
-lightweight dismissal, invalidation categories, sparse damage, and transition
-diagnostics. The guide separates validated behavior from proposed optimizations.
+For a new animated app, start with [Building reliable animations](WINDOW_MOTION.md):
+the ownership model, standard transition lifecycle, invalidation table, starter
+examples and acceptance checklist. [Engineering patterns](ANIMATION_PATTERNS.md)
+preserve rationale and historical findings; the lifecycle guide is the current recipe.
 
 All shell, built-in, APK-window, and APK-extension surfaces enter the same host `RenderBroker`, retained compositor, planner, and display transport. Each raster surface registers three persistent `SharedMemory` slots. The SDK writes them and the host maps them read-only.
 
@@ -117,13 +118,15 @@ The complete application-owned capability contract is in [CAPABILITY-PROTOCOL.md
 - [CanvasAppService.kt](examples/CanvasAppService.kt) demonstrates the pooled Canvas adapter.
 - [AnimatedCardAppService.java](examples/AnimatedCardAppService.java) demonstrates presentation-time animation.
 - [animated-card.cjs](examples/animated-card.cjs) demonstrates the same timer-free motion model in JavaScript.
+- `bash scripts/check-animation-examples.sh` verifies the documented animation
+  starters, including compilation of the Java example against the SDK.
 - `priority-demo` contains independent installable provider applications.
 
 Run local checks with:
 
 ```sh
 ./gradlew build
-node --test javascript/test.cjs
+node --test javascript/test.cjs javascript/animation-example.test.cjs
 ```
 
 `fixture` and `host-tests` exercise separate-UID AIDL identity, malformed submissions, generations, revocation, recovery, and bounded protocol behavior. Set `-Dfaceclaw.compositor.compareDirty=true` in a developer build to compare dirty composition against deterministic full composition without changing the SDK API.

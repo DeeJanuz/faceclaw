@@ -374,12 +374,23 @@ public final class SurfaceCompositor {
             if(fullPixels==null||fullPixels.remaining()!=surface.width*surface.height)throw new IllegalArgumentException("invalid full surface buffer");
             int[] rects=damage==null||damage.length==0?new int[]{0,0,surface.width,surface.height}:damage;
             if(rects.length%4!=0||rects.length>32)throw new IllegalArgumentException("invalid damage list");
-            int minX=surface.width,minY=surface.height,maxX=-1,maxY=-1,base=fullPixels.position();
+            int base=fullPixels.position();
+            // Validate the complete batch before touching retained pixels.
+            for(int i=0;i<rects.length;i+=4){int x=rects[i],y=rects[i+1],width=rects[i+2],height=rects[i+3];
+                if(x<0||y<0||width<=0||height<=0||x>surface.width-width||y>surface.height-height)throw new IllegalArgumentException("damage outside surface");
+            }
             for(int i=0;i<rects.length;i+=4){int x=rects[i],y=rects[i+1],width=rects[i+2],height=rects[i+3];
                 if(x<0||y<0||width<=0||height<=0||x+width>surface.width||y+height>surface.height)throw new IllegalArgumentException("damage outside surface");
-                for(int row=0;row<height;row++){int offset=(y+row)*surface.width+x;for(int col=0;col<width;col++){int index=offset+col;byte value=fullPixels.get(base+index);if(surface.pixels[index]!=value){surface.pixels[index]=value;int px=x+col,py=y+row;minX=Math.min(minX,px);minY=Math.min(minY,py);maxX=Math.max(maxX,px);maxY=Math.max(maxY,py);}}}
+                for(int row=0;row<height;row++){int offset=(y+row)*surface.width+x;
+                    for(int col=0;col<width;){
+                        // Split at display tile boundaries, including translated surfaces.
+                        int run=Math.min(width-col,32-Math.floorMod(surface.x+x+col,32));boolean changed=false;
+                        for(int step=0;step<run;step++){int index=offset+col+step;byte value=fullPixels.get(base+index);if(surface.pixels[index]!=value){surface.pixels[index]=value;changed=true;}}
+                        if(changed&&surface.visible)markScreenRectDirtyLocked(surface.x+x+col,surface.y+y+row,run,1);
+                        col+=run;
+                    }
+                }
             }
-            if(maxX>=minX&&surface.visible)markScreenRectDirtyLocked(surface.x+minX,surface.y+minY,maxX-minX+1,maxY-minY+1);
             surface.fingerprint=contentFingerprint==null?"":contentFingerprint;surface.draws=parsed;return compositeLocked(snapshotGray);
     }
 
@@ -564,7 +575,8 @@ public final class SurfaceCompositor {
 
     private int[] recomposeDirtyLocked() {
         if (!retainedValid) markAllDirtyLocked();
-        int minX=screenWidth,minY=screenHeight,maxX=-1,maxY=-1;
+        int count=0;for(boolean dirty:dirtyTiles)if(dirty)count++;
+        int[] damage=new int[count*4];int used=0;
         List<Surface> ordered = new ArrayList<>(surfaces.values());
         ordered.sort(Comparator.comparingInt((Surface s)->s.zOrder).thenComparing(s->s.id));
         for(int tile=0;tile<dirtyTiles.length;tile++){
@@ -573,11 +585,12 @@ public final class SurfaceCompositor {
             int right=Math.min(screenWidth,tx+TILE_WIDTH),bottom=Math.min(screenHeight,ty+TILE_HEIGHT);
             for(int y=ty;y<bottom;y++)java.util.Arrays.fill(retainedGray,y*screenWidth+tx,y*screenWidth+right,(byte)0);
             if(!blanked)for(Surface surface:ordered)if(surface.visible&&dimForLocked(surface)!=0)blendRegionLocked(retainedGray,surface,tx,ty,right,bottom);
-            minX=Math.min(minX,tx);minY=Math.min(minY,ty);maxX=Math.max(maxX,right);maxY=Math.max(maxY,bottom);
+            if(used>=4&&damage[used-3]==ty&&damage[used-4]+damage[used-2]==tx){damage[used-2]=right-damage[used-4];}
+            else{damage[used++]=tx;damage[used++]=ty;damage[used++]=right-tx;damage[used++]=bottom-ty;}
         }
         retainedValid=true;
         if(compareDirtyWithFull){byte[] full=buildGrayLocked();if(!java.util.Arrays.equals(full,retainedGray))throw new IllegalStateException("Dirty compositor diverged from full composition");}
-        return maxX<minX?new int[0]:new int[]{minX,minY,maxX-minX,maxY-minY};
+        return used==damage.length?damage:java.util.Arrays.copyOf(damage,used);
     }
 
     private void markAllDirtyLocked(){if(dirtyTiles!=null)java.util.Arrays.fill(dirtyTiles,true);}

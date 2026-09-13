@@ -81,5 +81,22 @@ public final class NotificationCompositorCheck {
         SurfaceCompositor.PackedComposite valid = windowed.applyDamageAndCompositePacked("apk", ByteBuffer.wrap(white), null, "valid", null, new byte[windowed.packedFrameSize()]);
         if (valid.composite.damage.length == 0) throw new AssertionError("failed submission consumed damage");
         pixels(windowed.previewComposite(), 0,0,0,0,255,255,255,255,255,255,255,255);
+
+        SurfaceCompositor sparse = new SurfaceCompositor();
+        sparse.configureScreen(96,48);
+        sparse.configureSurface("outline",0,0,96,48,0,SurfaceCompositor.TRANSPARENCY_OPAQUE);
+        byte[] outline=new byte[96*48];
+        sparse.applyAndComposite("outline",ByteBuffer.wrap(outline),0,0,96,48,"empty");
+        outline[0]=(byte)255;outline[outline.length-1]=(byte)255;
+        SurfaceCompositor.PackedComposite corners=sparse.applyDamageAndCompositePacked("outline",ByteBuffer.wrap(outline),null,"corners",null,new byte[sparse.packedFrameSize()]);
+        int area=0;for(int i=0;i<corners.composite.damage.length;i+=4)area+=corners.composite.damage[i+2]*corners.composite.damage[i+3];
+        if(area>=96*48)throw new AssertionError("sparse damage recomposed the entire bounding box");
+        if(!java.util.Arrays.equals(corners.packed,BmpUtil.pack4bppFromGray8(outline,96,48)))throw new AssertionError("sparse tiles differ from full packing");
+        java.util.Random random=new java.util.Random(73);
+        for(int frame=0;frame<40;frame++){
+            for(int change=0;change<12;change++)outline[random.nextInt(outline.length)]=(byte)random.nextInt(256);
+            SurfaceCompositor.PackedComposite update=sparse.applyDamageAndCompositePacked("outline",ByteBuffer.wrap(outline),null,"random-"+frame,null,new byte[sparse.packedFrameSize()]);
+            if(!java.util.Arrays.equals(update.packed,BmpUtil.pack4bppFromGray8(outline,96,48)))throw new AssertionError("dirty packing diverged on frame "+frame);
+        }
     }
 }

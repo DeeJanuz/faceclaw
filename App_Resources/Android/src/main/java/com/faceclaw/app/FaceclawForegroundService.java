@@ -24,6 +24,8 @@ public class FaceclawForegroundService extends Service {
 
     private static final String CHANNEL_ID = "faceclaw-dashboard";
     private static final int NOTIFICATION_ID = 4201;
+    private String currentText;
+    private boolean foregroundStarted;
 
     @Override
     public IBinder onBind(Intent intent) {
@@ -37,27 +39,26 @@ public class FaceclawForegroundService extends Service {
 
         if (ACTION_STOP.equals(action)) {
             stopForeground(STOP_FOREGROUND_REMOVE);
+            currentText = null;
+            foregroundStarted = false;
             stopSelf();
             return START_NOT_STICKY;
         }
 
+        String nextText = text != null && !text.trim().isEmpty() ? text : "Keeping the dashboard connected";
+        if (ACTION_UPDATE.equals(action) && foregroundStarted && nextText.equals(currentText)) {
+            return START_STICKY;
+        }
         ensureNotificationChannel();
-        Notification notification = buildNotification(
-                text != null && !text.trim().isEmpty() ? text : "Keeping the dashboard connected"
-        );
+        Notification notification = buildNotification(nextText);
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, foregroundServiceType());
         } else {
             startForeground(NOTIFICATION_ID, notification);
         }
-
-        if (ACTION_UPDATE.equals(action)) {
-            NotificationManager manager = getSystemService(NotificationManager.class);
-            if (manager != null) {
-                manager.notify(NOTIFICATION_ID, notification);
-            }
-        }
+        foregroundStarted = true;
+        currentText = nextText;
 
         return START_STICKY;
     }

@@ -147,6 +147,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     private long lastEvenAppConflictAtMs;
     private int consecutiveAckTimeouts;
     private int lastAudioControlAckMagic = 0;
+    private int audioControlGeneration;
 
     private ConnectionOptions connectionOptions = new ConnectionOptions();
     private final BleMagicPool magicPool = new BleMagicPool();
@@ -366,22 +367,20 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     }
 
     public void stopG2AudioCapture() {
-        int magic = 0;
         synchronized (lock) {
             audioPacketListener = null;
             audioCaptureActive = false;
             clearMessagesOfKindLocked("audio-control");
             if (running && sessionReady) {
                 OutboundMessage message = createAudioControlMessageLocked(false);
-                magic = message.magic;
                 pendingMessages.addFirst(message);
                 logLine("queue G2 mic disable");
             }
         }
         interruptibleSleep.interrupt();
-        if (magic != 0) {
-            waitForAudioControlAck(magic, "disable");
-        }
+        // Local capture ownership is already terminated above. Delivery and
+        // transport recovery continue on the BLE worker; callers must never
+        // block the app/UI thread waiting for a firmware ACK to stop locally.
     }
 
     public boolean isSessionReady() {
@@ -1753,6 +1752,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 startupProbePending = false;
                 chargingMode = false;
                 audioCaptureActive = false;
+                audioControlGeneration++;
                 audioPacketListener = null;
                 clearAllMessagesLocked("connection lost");
                 displayedFingerprint = "";
@@ -1801,6 +1801,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 lastHeartbeatAckedAtMs = 0;
                 consecutiveAckTimeouts = 0;
                 lastAudioControlAckMagic = 0;
+                audioControlGeneration++;
                 audioCaptureActive = false;
                 faceclawWakePendingNonce = -1;
                 cfwCleanupDelivered = false;
@@ -2854,14 +2855,19 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     }
 
     private OutboundMessage createAudioControlMessageLocked(boolean enable) {
+        final int generation = ++audioControlGeneration;
         OutboundMessage message = messageBuilder.enableOrDisableMic(enable);
         message.onAck = () -> {
+            if (generation != audioControlGeneration) {
+                logLine("ignore superseded G2 mic control ack");
+                return;
+            }
             lastAudioControlAckMagic = message.magic;
-            audioCaptureActive = message.label != null && message.label.contains("enable");
+            audioCaptureActive = enable;
             logLine(audioCaptureActive ? "G2 mic enabled" : "G2 mic disabled");
         };
         message.onTimeout = () -> {
-            handleTransportFailure("audio control ack timeout");
+            if (generation == audioControlGeneration) handleTransportFailure("audio control ack timeout");
         };
         return message;
     }
@@ -3479,6 +3485,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         lastSessionReadyAtMs = 0;
         consecutiveAckTimeouts = 0;
         lastAudioControlAckMagic = 0;
+        audioControlGeneration++;
         audioCaptureActive = false;
         audioPacketListener = null;
         compassControlLastSent = -1;

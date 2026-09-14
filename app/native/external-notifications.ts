@@ -42,6 +42,17 @@ export function externalNotifications(now = Date.now()): ExternalNotification[] 
   }
   return [...entries.values()].filter(entry => permittedSource(entry.packageName)).sort((a, b) => b.postTime - a.postTime);
 }
+
+/**
+ * Prune expired external notifications and report whether the visible set
+ * changed. Callers that are polling for expiry can avoid publishing a
+ * synthetic notification event when nothing actually expired.
+ */
+export function expireExternalNotifications(now = Date.now()): boolean {
+  const before = entries.size;
+  externalNotifications(now);
+  return entries.size !== before;
+}
 export function putExternalNotification(component: string, appName: string, data: any, previews: boolean, now = Date.now()): string | null {
   if (!data || typeof data.id !== "string" || !data.id || data.id.length > 128 || typeof data.target !== "string" || !data.target || data.target.length > 512) return null;
   if (typeof data.title !== "string" || data.title.length > 160 || typeof data.text !== "string" || data.text.length > 4096) return null;

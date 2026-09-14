@@ -1282,7 +1282,7 @@ class DashboardController {
     // the preview safety-net poll, and the screen timeout (a timed-out
     // preview screen wakes on double-tap, like the glasses would).
     this.shellRefreshTimer = setInterval(() => {
-      this.requestShellRender();
+      if (shell.isScreenOn()) this.requestShellRender();
       this.updateCompositePreview();
     }, SHELL_REFRESH_INTERVAL_MS);
     this.previewTimer = setInterval(() => this.updateCompositePreview(), PREVIEW_INTERVAL_MS);
@@ -1557,7 +1557,7 @@ class DashboardController {
       // Refresh the top-bar clock and the phone-side preview once a minute,
       // and keep the Android persistent notification current.
       this.shellRefreshTimer = setInterval(() => {
-        this.requestShellRender();
+        if (shell.isScreenOn()) this.requestShellRender();
         this.updateCompositePreview();
         this.updateConnectedForegroundNotification();
       }, SHELL_REFRESH_INTERVAL_MS);

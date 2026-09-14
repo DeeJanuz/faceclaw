@@ -2,6 +2,7 @@ package com.faceclaw.app;
 
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 
 import java.util.concurrent.TimeUnit;
@@ -23,9 +24,15 @@ import okio.ByteString;
 public class FaceclawWebSocket {
     private static final String TAG = "FaceclawWebSocket";
     private static volatile OkHttpClient sharedClient;
+    private static final int MAX_QUEUED_TEXT_MESSAGES = 64;
+    private static final long MAX_QUEUED_TEXT_BYTES = 8L * 1024L * 1024L;
 
     private final Handler callbackHandler;
+    private final Object callbackToken = new Object();
+    private final Object callbackLock = new Object();
     private final WebSocket socket;
+    private int queuedTextMessages;
+    private long queuedTextBytes;
     private volatile boolean closeRequested;
 
     // Single constructor (no overloads) so NativeScript constructor resolution
@@ -56,7 +63,7 @@ public class FaceclawWebSocket {
                 + " headers=[" + headerLog.toString().trim() + "]");
         socket = getClient().newWebSocket(request, new WebSocketListener() {
             @Override public void onOpen(WebSocket webSocket, Response response) {
-                callbackHandler.post(() -> {
+                postControlCallback(() -> {
                     try {
                         listener.onOpen();
                     } catch (Throwable t) {
@@ -66,13 +73,13 @@ public class FaceclawWebSocket {
             }
 
             @Override public void onMessage(WebSocket webSocket, String text) {
-                callbackHandler.post(() -> {
+                if (!postTextCallback(text, () -> {
                     try {
                         listener.onTextMessage(text);
                     } catch (Throwable t) {
                         Log.w(TAG, "listener onTextMessage failed", t);
                     }
-                });
+                })) abortForBacklog(listener);
             }
 
             @Override public void onClosing(WebSocket webSocket, int code, String reason) {
@@ -80,7 +87,7 @@ public class FaceclawWebSocket {
             }
 
             @Override public void onClosed(WebSocket webSocket, int code, String reason) {
-                callbackHandler.post(() -> {
+                postControlCallback(() -> {
                     try {
                         listener.onClosed(code, reason == null ? "" : reason);
                     } catch (Throwable t) {
@@ -94,7 +101,7 @@ public class FaceclawWebSocket {
                     return;
                 }
                 final String message = t == null ? "unknown websocket failure" : String.valueOf(t);
-                callbackHandler.post(() -> {
+                postControlCallback(() -> {
                     try {
                         listener.onFailure(message);
                     } catch (Throwable inner) {
@@ -103,6 +110,60 @@ public class FaceclawWebSocket {
                 });
             }
         });
+    }
+
+    private void postControlCallback(Runnable callback) {
+        callbackHandler.postAtTime(() -> {
+            synchronized (callbackLock) {
+                if (closeRequested) return;
+            }
+            callback.run();
+        }, callbackToken, SystemClock.uptimeMillis());
+    }
+
+    private boolean postTextCallback(String text, Runnable callback) {
+        final long bytes = Math.max(0L, (long) (text == null ? 0 : text.length()) * 2L);
+        synchronized (callbackLock) {
+            if (closeRequested || bytes > MAX_QUEUED_TEXT_BYTES || queuedTextMessages >= MAX_QUEUED_TEXT_MESSAGES || queuedTextBytes + bytes > MAX_QUEUED_TEXT_BYTES) return false;
+            queuedTextMessages++;
+            queuedTextBytes += bytes;
+            boolean posted = callbackHandler.postAtTime(() -> {
+                synchronized (callbackLock) {
+                    if (queuedTextMessages > 0) queuedTextMessages--;
+                    queuedTextBytes = Math.max(0L, queuedTextBytes - bytes);
+                    if (closeRequested) return;
+                }
+                callback.run();
+            }, callbackToken, SystemClock.uptimeMillis());
+            if (!posted) {
+                queuedTextMessages--;
+                queuedTextBytes -= bytes;
+            }
+            return posted;
+        }
+    }
+
+    private void abortForBacklog(final FaceclawWebSocketListener listener) {
+        synchronized (callbackLock) {
+            if (closeRequested) return;
+            closeRequested = true;
+            queuedTextMessages = 0;
+            queuedTextBytes = 0;
+        }
+        callbackHandler.removeCallbacksAndMessages(callbackToken);
+        try { socket.cancel(); } catch (Throwable ignored) { }
+        callbackHandler.post(() -> {
+            try { listener.onFailure("network:callback-backlog"); }
+            catch (Throwable t) { Log.w(TAG, "listener onFailure failed", t); }
+        });
+    }
+
+    private void clearCallbacks() {
+        synchronized (callbackLock) {
+            queuedTextMessages = 0;
+            queuedTextBytes = 0;
+        }
+        callbackHandler.removeCallbacksAndMessages(callbackToken);
     }
 
     private static OkHttpClient getClient() {
@@ -140,6 +201,7 @@ public class FaceclawWebSocket {
 
     public void close(int code, String reason) {
         closeRequested = true;
+        clearCallbacks();
         try {
             if (!socket.close(code, reason)) {
                 socket.cancel();

@@ -31,3 +31,25 @@ test('system menu rejects hidden, stale, locked, protected and competing host wo
  }
  const h = setup(); h.request('unrelated-app'); assert.deepEqual(h.opened, []); assert.equal(h.state.lastInput, 100000);
 });
+
+test('external menu handoff finishes input ownership on every no-render return', async () => {
+ const module = { exports: {} }, windows = [], finishes = [];
+ const native = { installedJson: () => JSON.stringify([{ component: 'own-app', name: 'Own', connected: true }]), setListener() {}, send() {} };
+ class ExtensionPlatform { constructor() {} feature() { return undefined; } windowInput() {} }
+ const shell = { registerWindow: window => windows.push(window), focusWindow() {}, foregroundWindow: () => undefined,
+  isScreenOn: () => true, openSystemMenu() {}, canShowExtensionOverlay: () => true };
+ const imports = {
+  './extension-platform': { ExtensionPlatform }, './extension-policy': {}, '@nativescript/core': { Application: { android: {} }, Utils: { android: { getApplicationContext: () => ({}) } } },
+  '../../ui/shell/shell': { shell }, '../../ui/shell/chrome-layer': { windowIcon: () => ({}) }, '../../ui/shell/geometry': { appViewportSize: () => ({ width: 576, height: 452 }) },
+  '../../native/notification-icons': { publishExternalNotificationPosted() {} }, '../../native/external-notifications': { configureExternalNotifications() {}, configureExternalNotificationReplies() {}, expireExternalNotifications: () => false },
+  '../../native/anthropic': {}, '../../ui/dashboard-settings': { anthropicApiKeySetting: {} }, '../../native/frame-timings': { finishFrame: (id, outcome) => finishes.push([id, outcome]) },
+ };
+ vm.runInNewContext(ts.transpileModule(fs.readFileSync('app/apps/external/platform.ts', 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS } }).outputText,
+  { module, exports: module.exports, require: name => imports[name] || {}, global: { isAndroid: true }, com: { faceclaw: { app: { FaceclawExternalApps: { get: () => native }, FaceclawExternalAppListener: function() {} } } }, setInterval: () => 1, Date });
+ const platform = new module.exports.ExternalAppPlatform({ configureSurface: async () => {}, setSurfaceVisible() {}, removeSurface() {}, submitRaster: async () => {}, requestRender() {}, isLocked: () => false });
+ await platform.open('own-app');
+ await windows[0].handleInput({ type: 'short-then-long-press' }, 41);
+ await windows[0].handleInput({ type: 'system-menu-opened' }, 42);
+ assert.deepEqual(finishes.map(item => item[0]), [41, 42]);
+ assert.ok(finishes.every(item => /system menu/.test(item[1])));
+});

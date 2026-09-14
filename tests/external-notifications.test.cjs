@@ -18,6 +18,12 @@ test("expired or revoked content cannot be opened through a stale alert", () => 
  const revoked = store.putExternalNotification(A, "A", message(), true, now); store.clearExternalNotifications(A);
  assert.equal(store.invokeExternalNotification(revoked, 0), false); assert.equal(opened, false); reset();
 });
+test("expiry polling reports only real removals", () => {
+ reset(); store.putExternalNotification(A, "A", message({ expiresAt: now + 100 }), true, now);
+ assert.equal(store.expireExternalNotifications(now + 50), false);
+ assert.equal(store.expireExternalNotifications(now + 101), true);
+ assert.equal(store.expireExternalNotifications(now + 102), false); reset();
+});
 test("sender-only mode does not retain message body in the notification cache", () => {
  reset(); store.putExternalNotification(A, "A", message(), false, now);
  assert.equal(JSON.stringify(store.externalNotifications(now)).includes("Synthetic text"), false); reset();

@@ -5,7 +5,7 @@ import { shell, type ShellWindow } from "../../ui/shell/shell";
 import { windowIcon } from "../../ui/shell/chrome-layer";
 import { appViewportSize, type WindowHeightMode } from "../../ui/shell/geometry";
 import { publishExternalNotificationPosted } from "../../native/notification-icons";
-import { acceptExternalNotificationReplyResult, clearExternalNotifications, configureExternalNotifications, configureExternalNotificationReplies, putExternalNotification, removeExternalNotification, setSuppressedNotificationPackages } from "../../native/external-notifications";
+import { acceptExternalNotificationReplyResult, clearExternalNotifications, configureExternalNotifications, configureExternalNotificationReplies, expireExternalNotifications, putExternalNotification, removeExternalNotification, setSuppressedNotificationPackages } from "../../native/external-notifications";
 import { refineHostDictation } from "../../native/anthropic";
 import { anthropicApiKeySetting } from "../../ui/dashboard-settings";
 import * as frameTimings from "../../native/frame-timings";
@@ -39,6 +39,7 @@ export class ExternalAppPlatform {
   private readonly windows = new Map<string, WindowState>();
   private readonly listener: any;
   readonly extensions: ExtensionPlatform;
+  private readonly hostStateSnapshots = new Map<string, string>();
   constructor(private readonly options: ExternalPlatformOptions) {
     this.extensions = new ExtensionPlatform(this.native, { ...options.extensions, openAssistant: async (component, current) => {
       if (!current()) return false;
@@ -72,12 +73,18 @@ export class ExternalAppPlatform {
     this.native?.setListener(this.listener);
     // Expiry must retract popups even when the bridge is unreachable.
     setInterval(() => {
-      publishExternalNotificationPosted("");
+      if (expireExternalNotifications()) publishExternalNotificationPosted("");
       for (const [component, window] of this.windows) if (window.ready && window.visible && !this.options.isLocked() && shell.isScreenOn()) this.extensions.publishOwnNotifications(component);
-      for (const app of installedExternalApps()) if (app.connected) this.send(app.component, "host-state", this.extensions.ownHostState(app.component));
+      if (!this.options.isLocked()) for (const app of installedExternalApps()) if (app.connected) this.publishHostState(app.component);
     }, 1000);
   }
   private send(component: string, type: string, data: unknown = {}): void { this.native?.send(component, type, JSON.stringify(data)); }
+  private publishHostState(component: string): void {
+    const data = this.extensions.ownHostState(component), serialized = JSON.stringify(data);
+    if (serialized === this.hostStateSnapshots.get(component)) return;
+    this.hostStateSnapshots.set(component, serialized);
+    this.send(component, "host-state", data);
+  }
   private granted(component: string, capability: string): boolean { return Boolean(this.native?.allows(component, capability)); }
   private heightMode(component: string): WindowHeightMode {
     const layout = this.extensions.feature("ui.window-layout");
@@ -96,15 +103,22 @@ export class ExternalAppPlatform {
     const state: WindowState = { window: null!, ready: false, serial: 0, visible: false, frame: null, rendering: false, target, lastInput: 0 };
     const window: ShellWindow = {
       appId: id, windowId: id, title: app.name, surfaceId, closeable: true, heightMode, drawIcon: windowIcon("package", app.name.slice(0, 1)),
-      close: () => { state.ready = false; state.frame = null; this.cancelOwnedWork(state); this.send(component, "close"); this.windows.delete(component); this.options.removeSurface(surfaceId); },
+      close: () => { state.ready = false; state.frame = null; this.cancelOwnedWork(state); this.hostStateSnapshots.delete(component); this.send(component, "close"); this.windows.delete(component); this.options.removeSurface(surfaceId); },
       hasAppMenu: () => state.menuAvailable === true,
       handleInput: (event, frameId) => {
         if (state.visible) this.extensions.windowInput(component, event);
         if (event.type === "short-then-long-press") {
-          if (!state.menuAvailable) { shell.openSystemMenu(id); return; }
+          if (!state.menuAvailable) {
+            shell.openSystemMenu(id);
+            frameTimings.finishFrame(frameId, "external app system menu opened");
+            return;
+          }
           state.lastInput = Date.now(); this.send(component, "app-menu"); frameTimings.finishFrame(frameId, "external app menu dispatched"); return;
         }
-        if (event.type === "system-menu-opened") return;
+        if (event.type === "system-menu-opened") {
+          frameTimings.finishFrame(frameId, "external app yielded to system menu");
+          return;
+        }
         state.lastInput = Date.now(); this.send(component, "input", event); frameTimings.finishFrame(frameId, "external app input dispatched");
       },
       requestRender: () => this.send(component, "render"),
@@ -119,6 +133,7 @@ export class ExternalAppPlatform {
   }
   lockChanged(): void {
     this.extensions.lockChanged();
+    this.hostStateSnapshots.clear();
     for (const [component, state] of this.windows) {
       this.cancelOwnedWork(state); state.frame = null;
       this.send(component, "visibility", { visible: state.visible, screenOn: shell.isScreenOn() && !this.options.isLocked() });
@@ -135,6 +150,7 @@ export class ExternalAppPlatform {
     } finally { state.rendering = false; }
   }
   private onEvent(component: string, type: string, data: any): void {
+    if (["connected", "disconnected", "changed", "grants-changed", "extensions-changed"].includes(type)) this.hostStateSnapshots.delete(component);
     if (this.extensions.onNativeEvent(component, type, data)) {
       if (type === "extensions-changed") for (const [owner, state] of this.windows) if (state.window.heightMode !== this.heightMode(owner)) state.window.relayout?.();
       return;

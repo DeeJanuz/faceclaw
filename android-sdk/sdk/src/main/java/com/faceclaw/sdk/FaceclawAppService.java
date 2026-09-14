@@ -13,10 +13,12 @@ public abstract class FaceclawAppService extends Service {
  static FaceclawAppService active;
  private final Handler handler=new Handler(Looper.getMainLooper());
  private IFaceclawHostSession host,pendingHost;
- private FaceclawSession faceclawSession;
+ private volatile FaceclawSession faceclawSession;
  private android.content.SharedPreferences approvals;
- private String hostIdentity="",wireSession="",pendingToken="",pendingPin="",pendingSession="";
- private int hostUid=-1,pendingUid=-1;
+ private String hostIdentity="",pendingToken="",pendingPin="",pendingSession="";
+ private volatile String wireSession="";
+ private volatile int hostUid=-1;
+ private int pendingUid=-1;
  private long pendingUntil;
  private IBinder.DeathRecipient death;
  private JSONObject extensionSnapshot=new JSONObject(),sharedStyle=new JSONObject();
@@ -27,16 +29,18 @@ public abstract class FaceclawAppService extends Service {
  private final IFaceclawAppEndpoint.Stub endpoint=new IFaceclawAppEndpoint.Stub(){
   @Override public void connect(SessionHello hello,IFaceclawHostSession remote){int uid=Binder.getCallingUid();handler.post(()->receiveHello(uid,hello,remote));}
  };
- private final IFaceclawAppSession.Stub appSession=new IFaceclawAppSession.Stub(){
-  private boolean authorized(){return Binder.getCallingUid()==hostUid;}
-  @Override public void applyHostSnapshot(HostSnapshot value){if(authorized())handler.post(()->{if(faceclawSession!=null)faceclawSession.applySnapshot(value);});}
-  @Override public void grantRenderCredit(RenderCredit value){if(authorized())handler.post(()->{if(faceclawSession!=null)faceclawSession.grant(value);});}
-  @Override public void onBufferReleased(String id,long generation,int slot,long sequence){if(authorized())handler.post(()->{if(faceclawSession!=null)faceclawSession.released(id,generation,slot,sequence);});}
-  @Override public void onFrameOutcome(FrameOutcome value){if(authorized())handler.post(()->{if(faceclawSession!=null)faceclawSession.outcome(value);});}
-  @Override public void onInput(String surfaceId,FaceclawInputEvent value){if(authorized())handler.post(()->{if(faceclawSession!=null)faceclawSession.applyInput(surfaceId,value);});}
-  @Override public void sendControl(ControlEvent value){if(authorized())handler.post(()->receiveControl(value));}
-  @Override public void close(DisconnectInfo value){if(authorized())handler.post(()->disconnect(value==null?new DisconnectInfo(DisconnectInfo.Reason.UNKNOWN,false,""):value,false));}
- };
+ private IFaceclawAppSession.Stub appSession(String boundSession,FaceclawSession boundFaceclawSession){return new IFaceclawAppSession.Stub(){
+  private boolean current(){return boundSession.equals(wireSession)&&boundFaceclawSession==faceclawSession;}
+  private boolean authorized(){return Binder.getCallingUid()==hostUid&&current();}
+  private void post(Runnable action){handler.post(()->{if(current())action.run();});}
+  @Override public void applyHostSnapshot(HostSnapshot value){if(authorized())post(()->boundFaceclawSession.applySnapshot(value));}
+  @Override public void grantRenderCredit(RenderCredit value){if(authorized())post(()->boundFaceclawSession.grant(value));}
+  @Override public void onBufferReleased(String id,long generation,int slot,long sequence){if(authorized())post(()->boundFaceclawSession.released(id,generation,slot,sequence));}
+  @Override public void onFrameOutcome(FrameOutcome value){if(authorized())post(()->boundFaceclawSession.outcome(value));}
+  @Override public void onInput(String surfaceId,FaceclawInputEvent value){if(authorized())post(()->boundFaceclawSession.applyInput(surfaceId,value));}
+  @Override public void sendControl(ControlEvent value){if(authorized())post(()->boundFaceclawSession.applyControl(value));}
+  @Override public void close(DisconnectInfo value){if(authorized())post(()->disconnect(value==null?new DisconnectInfo(DisconnectInfo.Reason.UNKNOWN,false,""):value,false));}
+ };}
  public final ConnectionState connectionState(){return connectionState;}
  public final JSONObject sharedStyle() { try { return new JSONObject(sharedStyle.toString()); } catch(Exception ignored) { return new JSONObject(); } }
  public final JSONObject extensions() { try { return new JSONObject(extensionSnapshot.toString()); } catch(Exception ignored) { return new JSONObject(); } }
@@ -163,7 +167,7 @@ public abstract class FaceclawAppService extends Service {
   disconnect(new DisconnectInfo(DisconnectInfo.Reason.HOST_STOPPED,true,"Host replaced"),false);host=remote;hostIdentity=identity;wireSession=newSession;hostUid=uid;lastMenuAvailable=null;lastProtected=null;
   if(faceclawSession==null)faceclawSession=new FaceclawSession(remote,new FaceclawSession.Callback(){public void onSnapshot(HostSnapshot snapshot){onHostSnapshot(snapshot);}public void onControl(ControlEvent event){handleControl(event);}public void onInput(RenderSurface surface,FaceclawInputEvent event){FaceclawAppService.this.onInput(surface,event);}public void onCreditWithoutRenderer(RenderSurface surface,RenderCredit credit){long targetMs=System.currentTimeMillis()+Math.max(0,(credit.targetPresentationTimeNanos-SystemClock.elapsedRealtimeNanos())/1_000_000L);onControlEvent(new ControlEvent("render",Protocol.object("surfaceId",surface.id(),"targetPresentationTimeNanos",credit.targetPresentationTimeNanos,"targetPresentationTimeMs",targetMs,"traceId",credit.traceId)));}public void onOutcome(FrameOutcome outcome){onFrameOutcome(outcome);}});else faceclawSession.attach(remote);
   final String connectedSession=wireSession;death=()->handler.post(()->{if(wireSession.equals(connectedSession))disconnect(new DisconnectInfo(DisconnectInfo.Reason.BINDER_DIED,true,"Host binder died"),false);});remote.asBinder().linkToDeath(death,0);
-  remote.onReady(new SessionHello(Protocol.VERSION,Protocol.SDK_VERSION,wireSession),appSession);connectionState=ConnectionState.READY;onSessionReady(faceclawSession);
+  remote.onReady(new SessionHello(Protocol.VERSION,Protocol.SDK_VERSION,wireSession),appSession(connectedSession,faceclawSession));connectionState=ConnectionState.READY;onSessionReady(faceclawSession);
  }
  private void disconnect(DisconnectInfo info,boolean notifyHost) {
   messagingAllowed=false; messagingRequests.clear(); capabilityRequests.clear();

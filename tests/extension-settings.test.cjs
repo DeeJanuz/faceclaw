@@ -30,7 +30,18 @@ test('unavailable live providers and malformed snapshots use host defaults', () 
   const h = harness();
   h.set([entry('ui.navigation', { rootBack: 'sleep' }, 'example/Service', false)]);
   assert.equal(h.navigationPolicy().rootBack, 'switcher');
+  assert.equal(h.navigationPolicy().wakeFocus, 'window');
   h.corrupt(); assert.equal(h.effectiveExtension('ui.navigation'), undefined);
+  assert.equal(h.navigationPolicy().wakeFocus, 'window');
+});
+test('the effective priority owner supplies the complete global navigation policy', () => {
+  const h = harness();
+  h.set([entry('ui.navigation', {
+    doubleTap: 'sleep', rootBack: 'sleep', tapHold: 'switcher', hold: 'app-menu', wakeFocus: 'sidebar',
+  }, 'priority.one/NavigationService')]);
+  assert.deepEqual({ ...h.navigationPolicy() }, {
+    doubleTap: 'sleep', rootBack: 'sleep', tapHold: 'switcher', hold: 'app-menu', wakeFocus: 'sidebar',
+  });
 });
 test('a provider may hide only its own window header', () => {
   const h = harness(); h.set([entry('ui.window-layout', { ownTopBar: false })]);

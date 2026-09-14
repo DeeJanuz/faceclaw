@@ -12,9 +12,11 @@ The `ui.navigation` extension is a static, approved host override. The host defa
 | `rootBack` | `sleep`, `switcher` | `switcher` | What semantic back does after the current app reaches its root. |
 | `tapHold` | `switcher`, `app-menu` | `app-menu` | What the tap-then-hold gesture selects. |
 | `hold` | `app-menu`, `system-menu` | `system-menu` | What a plain hold selects. |
-| `wakeFocus` | `window`, `sidebar` | `sidebar` | Which existing host target receives focus when the display wakes. |
+| `wakeFocus` | `window`, `sidebar` | `window` | Which existing host target receives focus when the display wakes. |
 
 T3 currently declares `doubleTap: back`, `rootBack: sleep`, `tapHold: switcher`, `hold: app-menu`, and `wakeFocus: window`. These are provider settings, not SDK defaults. Static navigation remains effective while an approved provider is installed; provider grants, ordering, dependencies, revocation, and service-outage behavior follow [APK extensions](../docs/APK-EXTENSIONS.md).
+
+The first eligible provider in the user's priority order owns the complete navigation policy across the Faceclaw shell. The same policy therefore governs built-in apps, worker apps, native APK windows, Settings, and EvenHub compatibility windows at host-owned input boundaries. Priority does not grant permission: a disabled, ungranted, or dependency-ineligible provider is skipped. Revoking T3 navigation immediately restores the host defaults above.
 
 ## Input precedence
 
@@ -26,7 +28,7 @@ The host owns display power and protected gestures before forwarding app input.
 4. Watch swipe-left remains directional back. It is not physical double-tap power behavior.
 5. A semantic root-back follows `rootBack`. This is distinct from an explicit switcher command and from explicit display-off.
 
-`wakeFocus: window` focuses the retained foreground window when one exists. If there is no foreground window, the host wakes without inventing an app launch; the fallback is a host state that must be covered by device acceptance. `wakeFocus: sidebar` selects the app switcher.
+`wakeFocus: window` focuses the retained foreground window when one exists. This is also the host fallback, so a revoked or missing provider does not turn a wake gesture into an app-switcher gesture. If there is no foreground window, the host wakes without inventing an app launch; the fallback is a host state that must be covered by device acceptance. `wakeFocus: sidebar` selects the app switcher only when the effective provider explicitly requests it.
 
 Locked displays, protected flows, and notification-only wake keep their existing privacy and sequencing rules. A notification wake does not expose a retained private app frame before notification content is ready.
 

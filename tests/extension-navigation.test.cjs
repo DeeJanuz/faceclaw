@@ -16,7 +16,7 @@ function harness(options = {}) {
  const policy = () => enabled ? {
   doubleTap: options.doubleTap ?? 'sleep', tapHold: options.tapHold ?? 'switcher', hold: options.hold ?? 'app-menu',
   wakeFocus: options.wakeFocus ?? 'window', rootBack: options.rootBack ?? 'sleep'
- } : { doubleTap: 'back', tapHold: 'app-menu', hold: 'system-menu', wakeFocus: 'sidebar', rootBack: 'sleep' };
+ } : { doubleTap: 'back', tapHold: 'app-menu', hold: 'system-menu', wakeFocus: 'window', rootBack: 'switcher' };
  const imports = importMap('app/ui/shell/shell.ts');
  class Stack {
   constructor() { this.layers = []; }
@@ -149,6 +149,21 @@ test('removing navigation override restores app back; watch swipe-left still mea
  assert.equal(h.shell.isScreenOn(), true); assert.equal(h.delivered[0].type, 'double-click');
  const watch = harness(); await watch.send('swipe-left', 'watch');
  assert.equal(watch.shell.isScreenOn(), true); assert.equal(watch.delivered[0].type, 'double-click');
+});
+test('semantic root-back uses the selected policy for every window', () => {
+ for (const rootBack of ['sleep', 'switcher']) {
+  const h = harness({ rootBack });
+  h.shell.returnFromAppRoot();
+  assert.equal(h.shell.isScreenOn(), rootBack !== 'sleep');
+  assert.equal(h.shell.getFocus(), rootBack === 'sleep' ? 'window' : 'sidebar');
+ }
+});
+test('host fallback wakes the retained window when no navigation provider is effective', async () => {
+ const h = harness(); h.disable(); h.shell.sleep(); h.shell.focus = 'sidebar';
+ await h.send('double-click');
+ assert.equal(h.shell.isScreenOn(), true);
+ assert.equal(h.shell.getFocus(), 'window');
+ assert.equal(h.delivered.length, 0);
 });
 test('T3 double-tap back remains app back while a sleeping display only wakes', async () => {
  const h = harness({ doubleTap: 'back' }); await h.send('double-click');

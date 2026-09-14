@@ -58,7 +58,7 @@ export type NavigationPolicy = {
 };
 export function navigationPolicy(): NavigationPolicy {
   return {
-    doubleTap: "back", rootBack: "switcher", tapHold: "app-menu", hold: "system-menu", wakeFocus: "sidebar",
+    doubleTap: "back", rootBack: "switcher", tapHold: "app-menu", hold: "system-menu", wakeFocus: "window",
     ...effectiveExtension("ui.navigation")?.configuration,
   } as NavigationPolicy;
 }

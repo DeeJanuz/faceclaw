@@ -2115,7 +2115,9 @@ class DashboardController {
       let shellPreWoke = false;
       if (wakewordShouldWake || displayShouldWake) {
         if (!shell.isScreenOn()) {
-          shellPreWoke = shell.wake("sidebar");
+          // Pre-waking bypasses the shell's screen-off input branch, so use
+          // the same navigation policy before restoring the EvenHub session.
+          shellPreWoke = shell.wake(navigationPolicy().wakeFocus);
         }
         if (shellPreWoke || this.evenHubSessionSuspended || this.evenHubResumePromise) {
           const ready = await frameTimings.spanAsync(frameId, "wake-barrier", () =>

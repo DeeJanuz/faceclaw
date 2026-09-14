@@ -39,6 +39,10 @@ The SDK manifest contributes the non-exported host-selection UI. Protect applica
 
 ## Lifecycle
 
+Read [Navigation and display wake](NAVIGATION_AND_WAKE.md) for the host's
+gesture precedence, static navigation-provider fields, suspended EvenHub wake,
+and the boundary between explicit `requestSleep()` and semantic root-back.
+
 Extend `FaceclawAppService` and override the stable callbacks:
 
 ```java

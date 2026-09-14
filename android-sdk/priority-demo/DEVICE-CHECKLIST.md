@@ -34,6 +34,8 @@ Record observed owner/availability, per-feature epoch and a screenshot or short 
 | P12 | Test a silent renderer/provider, then cancel or use the reserved system escape gesture. | Host remains recoverable. Record any missing timeout/fallback behavior as an issue; a connected process is not proof of responsiveness. | Pending |
 | P13 | Restart the host and phone with A selected, first available and then unavailable. | User order, grants and baseline preferences persist; live/static outage policy remains consistent. | Pending |
 | P14 | Exercise notifications, app switcher, full/compact layouts and wake/sleep while changing providers. | No stale overlay, hidden input target, unintended wake, duplicate arrival or lost system escape. | Pending |
+| P15 | With a provider declaring `wakeFocus: window`, wake an asleep and a suspended retained app using ring and glasses-arm double-tap. Repeat with `wakeFocus: sidebar`. | Wake consumes the triggering gesture, restores the documented focus target, and does not flash the switcher or invoke app back. | Pending |
+| P16 | Exercise Settings root/inner back, legacy EvenHub `exitMode=1`, explicit `returnToAppSwitcher()`, `quit()`, and explicit display-off under both `rootBack` values. | Semantic root-back follows the provider; explicit switcher, quit, and display-off retain their separate meanings. | Pending |
 
 ## Finish
 

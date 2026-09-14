@@ -84,6 +84,13 @@ brief:
 | `replaceLayout(layout): Promise<boolean>` | Replace the page; `preserve` containers inherit content by name. |
 | `setAssistantTools(tools): void` | Contribute voice-assistant tools (namespaced by package name). |
 
+`returnToAppSwitcher()` is an explicit switcher action. It is not semantic
+root-back and is not changed by the host's `ui.navigation.rootBack` setting.
+Faceclaw's legacy EvenHub adapter interprets `shutDownPageContainer(exitMode=1)`
+as semantic root-back and applies the selected host policy while retaining the
+running session. Explicit display-off remains separate. See the [navigation and
+wake contract](../android-sdk/NAVIGATION_AND_WAKE.md).
+
 `ApiKeyService` is one of `"openai" | "anthropic" | "soniox" | "elevenlabs" | "mapbox"`.
 
 ### Compass

@@ -310,6 +310,8 @@ export type EvenHubWindowHooks = {
   closeWindow: () => void;
   /** Hand focus to the app switcher (used to decline an app's quit request). */
   focusSwitcher: () => void;
+  /** Apply the host's semantic root-back policy to a legacy app request. */
+  returnFromAppRoot: () => void;
   /** Push a modal overlay layer onto the app window (e.g. a consent prompt). */
   pushOverlay: (layer: Layer) => void;
   /** Switch the window between the stock 576x288 band and the full 576x452 canvas. */
@@ -895,13 +897,11 @@ export class EvenHubSession implements EvenHubMicClient, EvenHubImuClient, EvenH
 
   private shutDown(exitMode: number): boolean {
     if (exitMode === 1) {
-      // The app asked to quit (stock would pop an on-glasses confirm). We
-      // decline and hand focus to the app switcher instead, leaving the app
-      // running — so an app's double-tap-to-quit becomes double-tap-to-defocus.
-      // No FOREGROUND_EXIT: focusing the sidebar doesn't background the app
-      // (native Faceclaw apps behave the same), and refocusing the same window
-      // wouldn't re-fire ENTER, which would leave a pause-on-exit app stuck.
-      this.windowHooks?.focusSwitcher();
+      // Legacy EvenHub apps use exitMode 1 for their root-back request. Route
+      // it through the host policy so rootBack=sleep and rootBack=switcher
+      // behave consistently. Explicit returnToAppSwitcher remains a separate
+      // extension command, and this request keeps the session alive.
+      this.windowHooks?.returnFromAppRoot();
       return true;
     }
     // Immediate exit. Resolve first (the return travels via evaluateJs, and

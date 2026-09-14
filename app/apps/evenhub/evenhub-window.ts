@@ -95,6 +95,7 @@ export function createEvenHubWindow(
     requestRender: created.requestRender,
     closeWindow: () => shell.closeWindow(windowId),
     focusSwitcher: () => shell.yieldFocusToSidebar(),
+    returnFromAppRoot: () => shell.returnFromAppRoot(),
     pushOverlay: (layer) => created.stack.push(layer),
     // The extended layout uses the full 576x452 app area ("max"); stock apps
     // stay in the 576x288 band ("medium").

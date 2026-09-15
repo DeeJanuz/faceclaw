@@ -2,7 +2,8 @@
 
 Captured 2026-09-15 in the shared WSL2 checkout. This is a read-only baseline;
 no product source, build configuration, credentials, or device data was changed.
-The only file added by P00 is this evidence record.
+The evidence addition was accompanied in final commit `38705ff` by synchronization
+of seven WindowStateCache methods. That runtime change belongs to P03 review.
 
 ## Checkout state
 

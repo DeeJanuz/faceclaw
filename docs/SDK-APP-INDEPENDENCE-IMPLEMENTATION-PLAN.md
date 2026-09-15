@@ -1,6 +1,6 @@
 # SDK app independence implementation plan
 
-Status: ready for task assignment; implementation has not started.
+Status: implementation in progress; current acceptance is tracked in sdk-independence/STATUS.md.
 Prepared: 2026-09-15.
 Source: [SDK independence audit](SDK-APP-INDEPENDENCE-AUDIT-20260915.md).
 
@@ -133,7 +133,7 @@ open-window request that has no new window generation yet.
 Path shorthand: `SDK` = `android-sdk/sdk/src/main/java/com/faceclaw/sdk`;
 `HOST` = `App_Resources/Android/src/main/java/com/faceclaw/app`;
 `EXT` = `app/apps/external`. Unless stated otherwise, paths are in
-`faceclaw-app-platform`. Status of every task is **not started**.
+`faceclaw-app-platform`. Current task status is recorded in `docs/sdk-independence/STATUS.md`.
 
 ### P00. Reproduce baseline and make verification runnable
 

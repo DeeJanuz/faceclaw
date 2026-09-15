@@ -138,3 +138,10 @@ node --test javascript/test.cjs javascript/animation-example.test.cjs
 ```
 
 `fixture` and `host-tests` exercise separate-UID AIDL identity, malformed submissions, generations, revocation, recovery, and bounded protocol behavior. Set `-Dfaceclaw.compositor.compareDirty=true` in a developer build to compare dirty composition against deterministic full composition without changing the SDK API.
+
+## App-independence candidate
+
+The local `1.1.0-rc.1.a9881121c93e` candidate adds negotiated controls, window policy,
+draft capture, explicit resource release and phone/host presentation adapters.
+See the [candidate build and migration handoff](../docs/sdk-independence/CANDIDATE-HANDOFF.md)
+and [acceptance status](../docs/sdk-independence/STATUS.md) before consuming it.

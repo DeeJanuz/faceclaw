@@ -1,12 +1,13 @@
 # Candidate verification evidence, 2026-09-15
 
-Mode: local JVM/Node tests and Android compilation only. No emulator or physical
-device tests. Source commits: platform `4755777`, T3 `39a014b`, Signal `b2fbc59`,
-Spotify `39b0d0a`. See the delivery manifest for full SHAs and APK hashes.
+Mode: local JVM/Node tests, Android compilation, and a phone smoke pass. Source
+commits: platform `7292fbc`, T3 `19e3e3b`, Signal `a509245`, Spotify `da68177`.
+See the delivery manifest and [device evidence](device-20260915.md) for full
+hashes and device results.
 
 | Check | Command | Outcome |
 | --- | --- | --- |
-| SDK | `./gradlew :sdk:testDebugUnitTest :sdk:lintDebug :sdk:assembleRelease` | Exit 0; 64 tests, no failures/errors/skips. |
+| SDK | `./gradlew :sdk:testDebugUnitTest :sdk:lintDebug :sdk:assembleRelease` | Exit 0; 66 tests, no failures/errors/skips. |
 | SDK JS | `node --test android-sdk/javascript/test.cjs android-sdk/javascript/*.test.cjs` | Exit 0; 14 tests. |
 | Host | `npm test` | Exit 1; 424/427, same 3 baseline touch failures. |
 | Host APK | `npx nativescript build android` | Exit 0. |
@@ -21,7 +22,7 @@ SDK test totals come from JUnit XML, not source annotations. Host count includes
 six new production TypeScript contract-dispatch tests.
 
 The H1 hash before and after A1/A2 builds is
-`e9428f4a527be6eafcb5238ca3f7c1ba0a582cd9176378f43345ce92f51ff2a7`.
+`b7ee5760ac9b0fb9001ab3c28373130ab0d0adc79ebbb1c8805e92275799ac0e`.
 The independent Gradle project references only the immutable Maven coordinate.
 No SDK project inclusion or host build task is present in that project.
 
@@ -33,7 +34,7 @@ scene/writer pins, legacy resource replay, capture terminal races, cancellation
 without host acknowledgement, JavaScript terminal cleanup, protected shell control
 rejection, and async policy rechecks.
 
-Limitations: tests do not establish actual Binder failure delivery, microphone
-release, native resource memory plateau, physical input semantics or device
-compatibility. See STATUS.md for incomplete software requirements. Build success
-and mocks do not satisfy G1-G4 or release acceptance.
+Limitations: the phone pass does not establish Binder failure delivery, microphone
+release, native resource memory plateau, physical ring/temple/watch semantics or
+full host compatibility. See STATUS.md for incomplete software requirements. Build
+success, smoke checks, and mocks do not satisfy G1-G4 or release acceptance.

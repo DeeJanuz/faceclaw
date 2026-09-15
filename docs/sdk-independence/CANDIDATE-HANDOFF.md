@@ -5,18 +5,18 @@ See [status](STATUS.md) for the software gaps and pending device matrix.
 
 ## Prepared artifacts
 
-Workspace directory: `output/sdk-independence/delivery/1.1.0-rc.1.a9881121c93e/`.
+Workspace directory: `output/sdk-independence/delivery/1.1.0-rc.1.9dc05298f50a/`.
 It contains `host-H1.apk`, `t3.apk`, `signal.apk`, `spotify.apk`, `counter-A1.apk`,
 `counter-A2.apk`, `SHA256SUMS`, `release-manifest.json`, and fixed-host build evidence.
-All APKs are debug/test builds. Installation compatibility with an existing signed
-installation has not been checked. No install or data-clear commands were run.
+All APKs are debug/test builds. The four existing app packages were upgraded in
+place during the authorized smoke pass; no package was uninstalled or cleared.
 
 SDK distribution is in `output/sdk-independence/maven/` and `npm/`:
 
-- Maven: `com.faceclaw:sdk:1.1.0-rc.1.a9881121c93e`.
-- npm: `faceclaw-motion-1.1.0-rc.1.a9881121c93e.tgz`, package `@faceclaw/motion`.
-- SDK AAR SHA-256: `c364909e2dd80fb18abe7fdffe2f4771e5e0ac1b60d983c0057f2ac719d34284`.
-- npm SHA-256: `04db5e647178f41739f5c63a05fbdc0207a975f1b6182022a04db08c1c4463bb`.
+- Maven: `com.faceclaw:sdk:1.1.0-rc.1.9dc05298f50a`.
+- npm: `faceclaw-motion-1.1.0-rc.1.9dc05298f50a.tgz`, package `@faceclaw/motion`.
+- SDK AAR SHA-256: `bfaddfd9a92043f9f411df277cf36b98b2d3af8663fbac2cac4b4f8e3fe27544`.
+- npm SHA-256: `15099ef5515f8b599bbd7281b33ebe439c2170a6c1a2bc5c26896be261972f81`.
 
 The packaging script refuses to replace an existing artifact with different bytes.
 Previous candidate versions are retained. Copy the Maven repository and npm tarball
@@ -70,12 +70,13 @@ Catalog support does not grant microphone, notification, provider or window
 permissions. Current host checks remain authoritative. An absent/invalid catalog
 makes the new control API unsupported without emitting new protocol messages.
 T3 selects its existing capture path on old hosts. Old/new host runtime compatibility
-is not yet certified by a device run.
+is not yet certified by the full device matrix.
 
 The standalone counter shares one app controller between LocalPresentation and
 HostPresentation. The phone adapter has no microphone or messaging authority.
-A1 increments by one; A2 increments by two. Compilation proves artifact isolation;
-it does not prove persisted state across an installed upgrade.
+A1 increments by one; A2 increments by two. Compilation and the phone smoke pass
+prove artifact isolation and persisted state across this debug APK upgrade; they do
+not cover the full host/ring acceptance path.
 
 For negotiated resource release, the host uses raster fallback instead of placing
 releasable resources into global firmware atlases that cannot reclaim individual
@@ -83,9 +84,16 @@ entries. This preserves reclamation at a possible performance cost. Legacy hosts
 retain legacy resource behavior and quota limits; close cannot promise remote
 reclamation when release was not negotiated.
 
-## Resume device acceptance
+## Device smoke result and remaining acceptance
 
-Device work remains pending by user direction. Use the original P31 matrix after
-closing the software gaps in STATUS.md. Keep H1 fixed, use synthetic identities,
-and preserve existing app data and live accounts. Do not infer authorization to
-replace a signed installation or operate a live account from this build handoff.
+The authorized phone smoke pass is recorded in
+`docs/sdk-independence/evidence/device-20260915.md`. The phone was reached through
+the Windows ADB server's wireless transport. Existing packages were upgraded with
+`adb install -r`; first-install timestamps stayed unchanged. No uninstall, clear,
+or live-account action was used. The SDK zero-viewport startup crash found on the
+first pass was fixed in the `9dc05298f50a` candidate before the successful pass.
+
+The original P31 matrix is still required after the software gaps in STATUS.md are
+closed. Physical ring/temple/watch input, Binder replacement, revocation, capture,
+resource plateau, and protected-flow misuse checks are not established by this
+phone launch/persistence smoke test.

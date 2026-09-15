@@ -141,7 +141,7 @@ node --test javascript/test.cjs javascript/animation-example.test.cjs
 
 ## App-independence candidate
 
-The local `1.1.0-rc.1.a9881121c93e` candidate adds negotiated controls, window policy,
+The local `1.1.0-rc.1.9dc05298f50a` candidate adds negotiated controls, window policy,
 draft capture, explicit resource release and phone/host presentation adapters.
 See the [candidate build and migration handoff](../docs/sdk-independence/CANDIDATE-HANDOFF.md)
 and [acceptance status](../docs/sdk-independence/STATUS.md) before consuming it.

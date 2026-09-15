@@ -1,14 +1,15 @@
 # SDK app-independence candidate status
 
-Updated: 2026-09-15. Candidate: `1.1.0-rc.1.a9881121c93e`.
+Updated: 2026-09-15. Candidate: `1.1.0-rc.1.9dc05298f50a`.
 
-Build preparation is complete. Full plan acceptance is **not complete**. The user
-explicitly requested: "Prepare the builds; leave device checks pending". Nothing
-was installed, published, pushed, or exercised against live accounts.
+Build preparation and a first Android smoke pass are complete. Full plan acceptance
+is **not complete**. The user authorized installation over wireless ADB while
+preserving app data and live accounts. No uninstall, data clear, publication, push,
+or live-account operation was performed.
 
-Code: platform `4755777`, T3 `39a014b`, Signal `b2fbc59`, Spotify `39b0d0a`.
-Bridge remains unchanged at `626700f`. See [candidate handoff](CANDIDATE-HANDOFF.md)
-and [verification evidence](evidence/candidate-20260915.md).
+Code: platform `7292fbc`, T3 `19e3e3b`, Signal `a509245`, Spotify `da68177`.
+Bridge remains unchanged at `626700f`. See [candidate handoff](CANDIDATE-HANDOFF.md),
+[verification evidence](evidence/candidate-20260915.md), and [device evidence](evidence/device-20260915.md).
 
 ## Implementation against the original plan
 
@@ -36,15 +37,15 @@ remain authoritative. No G1-G4 acceptance is inferred from a successful build.
 | P25 | Partial | Standalone example and artifact-only A1/A2 consumer builds pass. Full deterministic local preview clock/credit test runtime is not implemented. |
 | P26 | Implemented, partial acceptance | Typed JS wrapper delegates to Java state machine. Unknown result and terminal capture cleanup tested; complete native JS parity matrix pending. |
 | P27 | Built | Immutable content-addressed Maven AAR/npm tarball, hashes recorded. |
-| P28 | Migrated, partial acceptance | T3 pinned artifact, local policy/back, typed capture and invocation route; 213 tests pass. Device behavior pending. |
-| P29 | Migrated, partial acceptance | Signal pinned artifact, coherent flags, local policy/back; 71 tests/lint pass. Existing reviewed-send authority retained; full capture-handle migration and device checks remain. |
-| P30 | Migrated, partial acceptance | Spotify pinned artifact and local policy/back; 2 tests/lint pass. Device selection/reopen/revoke checks pending. |
-| P31 | Build portion only | Independent A1/A2 builds preserve H1 hash. No device acceptance performed. |
-| P32 | Candidate handoff prepared | Artifacts, compatibility limits and checks documented. Release signoff depends on open software work and P31. |
+| P28 | Migrated, partial acceptance | T3 pinned artifact, local policy/back, typed capture and invocation route; 213 tests pass. Phone launch smoke passed; ring/temple interaction remains open. |
+| P29 | Migrated, partial acceptance | Signal pinned artifact, coherent flags, local policy/back; 71 tests/lint pass. Phone launch smoke passed; reviewed-send and capture behavior remain open. |
+| P30 | Migrated, partial acceptance | Spotify pinned artifact and local policy/back; 2 tests/lint pass. Phone launch smoke passed; selection/reopen/revoke checks remain open. |
+| P31 | Partial: phone smoke/persistence | H1 hash remained unchanged through independent A1/A2 builds. The phone accepted in-place APK upgrades; all four apps launched without SDK crash, and standalone A1→A2 preserved data. Full ring/temple/watch and misuse matrix remains open. |
+| P32 | Candidate handoff updated | Artifacts, device evidence, compatibility limits and checks documented. Release signoff depends on open software work and the remaining hardware matrix. |
 
 ## Current verification
 
-- SDK: 64/64 unit tests, lintDebug and assembleRelease pass.
+- SDK: 66/66 unit tests, lintDebug and assembleRelease pass.
 - JavaScript: 14/14 tests pass.
 - Host: 424/427 tests pass; APK build passes.
 - T3: typecheck, 213/213 tests and APK build pass.
@@ -52,6 +53,11 @@ remain authoritative. No G1-G4 acceptance is inferred from a successful build.
 - Spotify: 2/2 tests, lint and APK build pass.
 - Artifact-only standalone variants A1 and A2 build without SDK project inclusion
   or host build tasks; H1 SHA-256 is unchanged.
+- Device: Windows-host ADB wireless transport reached `SM-F966U` (Android API 36).
+  Host, T3, Signal and Spotify were upgraded with `adb install -r`; first-install
+  timestamps remained unchanged. Each launch stayed alive with no new fatal crash.
+  Standalone A1 and A2 were installed in sequence; one tap in A1 followed by one
+  tap in A2 left the persisted counter at `3`.
 
 The three host failures match the audited baseline: explicit temple provenance,
 pinball contact response, and held-contact clearing. Signal's loopback QR shutdown
@@ -63,7 +69,8 @@ runs passed. Treat that test as potentially flaky, not a proven SDK regression.
 First close the software gaps identified above, especially acknowledged state,
 policy result shape, claim expiry, invocation completion and deterministic local
 runtime. These are not device-only blockers. Then run the plan's H0/H1 compatibility,
-Binder failure, revocation, capture and resource matrix on an authorized test device.
+Binder failure, revocation, capture, resource, and physical ring/temple/watch matrix
+on an authorized test device.
 Record physical ring/temple/watch evidence separately from mocks. A host change
 requires a new frozen candidate and rerun of affected acceptance checks.
 

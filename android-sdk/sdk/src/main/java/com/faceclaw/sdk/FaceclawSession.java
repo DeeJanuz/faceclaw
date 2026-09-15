@@ -7,9 +7,10 @@ import java.util.*;
 
 /** Authenticated application-side session. Thread-safe; callbacks are marshalled by the service. */
 public final class FaceclawSession {
- interface Callback {void onSnapshot(HostSnapshot snapshot);void onControl(ControlEvent event);void onInput(RenderSurface surface,FaceclawInputEvent event);void onCreditWithoutRenderer(RenderSurface surface,RenderCredit credit);void onOutcome(FrameOutcome outcome);}
+ interface Callback {void onSnapshot(HostSnapshot snapshot);void onControl(ControlEvent event);void onInput(RenderSurface surface,FaceclawInputEvent event);void onCreditWithoutRenderer(RenderSurface surface,RenderCredit credit);void onOutcome(FrameOutcome outcome);void onDiagnostic(SdkDiagnostic diagnostic);}
  private IFaceclawHostSession host;
  private final Callback callback;
+ private final Handler callbackHandler=new Handler(Looper.getMainLooper());
  private final Map<String,RenderSurface> surfaces=new HashMap<>();
  private final ResourceRegistry resources;
  private long nextFrame=1,nextContent=1;
@@ -82,18 +83,19 @@ public final class FaceclawSession {
  void grant(RenderCredit credit){if(credit==null)return;RenderSurface surface=surface(credit.surfaceId);if(surface==null)return;boolean notify=!surface.hasRenderer();surface.grant(credit);if(notify)callback.onCreditWithoutRenderer(surface,credit);}
  void released(String id,long generation,int slot,long sequence){RenderSurface surface=surface(id);if(surface!=null)surface.release(generation,slot,sequence);}
  void outcome(FrameOutcome value){if(value!=null)callback.onOutcome(value);}
+ void reportDiagnostic(SdkDiagnostic.Category category,String operation,RenderSurface surface,long generation,boolean recoverable){try{SdkDiagnostic diagnostic=new SdkDiagnostic(category,operation,surface==null?"":surface.id(),generation,recoverable);callbackHandler.post(()->{try{callback.onDiagnostic(diagnostic);}catch(Exception ignored){}});}catch(Exception ignored){}}
 
  void registerSurface(RenderSurface surface,long generation,int width,int height,ArrayList<SharedMemory> memories){
   IFaceclawHostSession current=currentHost();if(current==null)return;
-  try{current.registerSurface(new SurfaceRegistration(surface.id(),generation,width,height,memories));}catch(RemoteException error){detach();}
+  try{current.registerSurface(new SurfaceRegistration(surface.id(),generation,width,height,memories));}catch(RemoteException error){reportDiagnostic(SdkDiagnostic.Category.TRANSPORT_FAILURE,"register-surface",surface,generation,true);detach();}
  }
  void unregisterSurface(RenderSurface surface,long generation){
   IFaceclawHostSession current=currentHost();if(current==null)return;
-  try{current.unregisterSurface(surface.id(),generation);}catch(RemoteException ignored){detach();}
+  try{current.unregisterSurface(surface.id(),generation);}catch(RemoteException error){reportDiagnostic(SdkDiagnostic.Category.TRANSPORT_FAILURE,"unregister-surface",surface,generation,true);detach();}
  }
  void requestRender(RenderSurface surface,InvalidateReason reason){
   long generation=surface.generation();IFaceclawHostSession current=currentHost();if(current==null)return;
-  try{current.requestRender(surface.id(),generation,reason.ordinal());}catch(RemoteException error){detach();}
+  try{current.requestRender(surface.id(),generation,reason.ordinal());}catch(RemoteException error){reportDiagnostic(SdkDiagnostic.Category.TRANSPORT_FAILURE,"request-render",surface,generation,true);detach();}
  }
  void submitFrame(RenderSurface surface,FrameLease lease,FrameMetadata metadata){
   IFaceclawHostSession current=currentHost();if(current==null){surface.release(lease.generation,lease.slotId,lease.sequence);return;}
@@ -101,14 +103,15 @@ public final class FaceclawSession {
    List<DamageRect> damage=metadata.damage.isEmpty()?Collections.singletonList(new DamageRect(0,0,lease.width,lease.height)):metadata.damage;
    int[] rects=new int[damage.size()*4];for(int i=0;i<damage.size();i++){DamageRect r=damage.get(i);rects[i*4]=r.x;rects[i*4+1]=r.y;rects[i*4+2]=r.width;rects[i*4+3]=r.height;}
    current.submitFrame(new FrameSubmission(surface.id(),lease.generation,lease.slotId,lease.sequence,lease.credit.creditId,metadata.clientFrameId,metadata.contentVersion,metadata.requestNextFrame,metadata.traceId,rects,metadata.draws==null?null:metadata.draws.encode()));
-  }catch(Exception error){surface.release(lease.generation,lease.slotId,lease.sequence);detach();}
+  }catch(RemoteException error){surface.release(lease.generation,lease.slotId,lease.sequence);reportDiagnostic(SdkDiagnostic.Category.TRANSPORT_FAILURE,"submit-frame",surface,lease.generation,true);detach();}
+  catch(RuntimeException error){surface.release(lease.generation,lease.slotId,lease.sequence);reportDiagnostic(SdkDiagnostic.Category.LOCAL_VALIDATION,"submit-frame",surface,lease.generation,false);}
  }
  boolean sendControl(String type,JSONObject json){return sendControlEvent(new ControlEvent(type,json));}
- private boolean sendControlEvent(ControlEvent event){IFaceclawHostSession current=currentHost();if(current==null)return false;try{current.sendControl(event);return true;}catch(Exception error){detach();return false;}}
- void registerResource(ResourceHandle handle,byte[] pixels){IFaceclawHostSession current=currentHost();if(current==null)return;try{current.registerResource(new ResourceRegistration(handle.id,handle.type.name(),handle.width,handle.height,handle.sha256,pixels));}catch(Exception error){detach();}}
+ private boolean sendControlEvent(ControlEvent event){IFaceclawHostSession current=currentHost();if(current==null)return false;try{current.sendControl(event);return true;}catch(RemoteException error){reportDiagnostic(SdkDiagnostic.Category.TRANSPORT_FAILURE,"send-control",null,0,true);detach();return false;}catch(RuntimeException error){reportDiagnostic(SdkDiagnostic.Category.LOCAL_VALIDATION,"send-control",null,0,false);return false;}}
+ void registerResource(ResourceHandle handle,byte[] pixels){IFaceclawHostSession current=currentHost();if(current==null)return;try{current.registerResource(new ResourceRegistration(handle.id,handle.type.name(),handle.width,handle.height,handle.sha256,pixels));}catch(RemoteException error){reportDiagnostic(SdkDiagnostic.Category.TRANSPORT_FAILURE,"register-resource",null,0,true);detach();}catch(RuntimeException error){reportDiagnostic(SdkDiagnostic.Category.LOCAL_VALIDATION,"register-resource",null,0,false);}}
  boolean commitScene(RenderSurface surface,SceneTransaction transaction){
   long generation=surface.generation();IFaceclawHostSession current=currentHost();if(current==null||generation==0)return false;
-  try{current.commitScene(transaction.wire(surface.id(),generation));return true;}catch(Exception error){detach();return false;}
+  try{current.commitScene(transaction.wire(surface.id(),generation));return true;}catch(RemoteException error){reportDiagnostic(SdkDiagnostic.Category.TRANSPORT_FAILURE,"commit-scene",surface,generation,true);detach();return false;}catch(RuntimeException error){reportDiagnostic(SdkDiagnostic.Category.LOCAL_VALIDATION,"commit-scene",surface,generation,false);return false;}
  }
 
  public void close(){

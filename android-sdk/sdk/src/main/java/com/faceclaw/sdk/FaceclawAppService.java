@@ -200,6 +200,8 @@ public abstract class FaceclawAppService extends Service {
  protected abstract void onControlEvent(ControlEvent event);
  protected void onSessionLost(DisconnectInfo info) {}
  protected void onFrameOutcome(FrameOutcome outcome) {}
+ /** Content-free local SDK failures; application logs must not add pixels or user text. */
+ protected void onSdkDiagnostic(SdkDiagnostic diagnostic) {}
  public final FaceclawSession session(){return faceclawSession;}
  public final String selectedHostPackage() {
   String pin=approvals.getString("identity","");
@@ -262,7 +264,7 @@ public abstract class FaceclawAppService extends Service {
  }
  private void connect(IFaceclawHostSession remote,String identity,String newSession,int uid) throws RemoteException {
   disconnect(new DisconnectInfo(DisconnectInfo.Reason.HOST_STOPPED,true,"Host replaced"),false);host=remote;hostIdentity=identity;wireSession=newSession;hostUid=uid;
-  if(faceclawSession==null)faceclawSession=new FaceclawSession(remote,new FaceclawSession.Callback(){public void onSnapshot(HostSnapshot snapshot){windowState.observeSnapshot(snapshot!=null&&snapshot.windowOpen,snapshot==null?0:snapshot.windowGeneration);onHostSnapshot(snapshot);windowState.replay();}public void onControl(ControlEvent event){handleControl(event);}public void onInput(RenderSurface surface,FaceclawInputEvent event){FaceclawAppService.this.onInput(surface,event);}public void onCreditWithoutRenderer(RenderSurface surface,RenderCredit credit){long targetMs=System.currentTimeMillis()+Math.max(0,(credit.targetPresentationTimeNanos-SystemClock.elapsedRealtimeNanos())/1_000_000L);onControlEvent(new ControlEvent("render",Protocol.object("surfaceId",surface.id(),"targetPresentationTimeNanos",credit.targetPresentationTimeNanos,"targetPresentationTimeMs",targetMs,"traceId",credit.traceId)));}public void onOutcome(FrameOutcome outcome){onFrameOutcome(outcome);}});else faceclawSession.attach(remote);
+  if(faceclawSession==null)faceclawSession=new FaceclawSession(remote,new FaceclawSession.Callback(){public void onSnapshot(HostSnapshot snapshot){windowState.observeSnapshot(snapshot!=null&&snapshot.windowOpen,snapshot==null?0:snapshot.windowGeneration);onHostSnapshot(snapshot);windowState.replay();}public void onControl(ControlEvent event){handleControl(event);}public void onInput(RenderSurface surface,FaceclawInputEvent event){FaceclawAppService.this.onInput(surface,event);}public void onCreditWithoutRenderer(RenderSurface surface,RenderCredit credit){long targetMs=System.currentTimeMillis()+Math.max(0,(credit.targetPresentationTimeNanos-SystemClock.elapsedRealtimeNanos())/1_000_000L);onControlEvent(new ControlEvent("render",Protocol.object("surfaceId",surface.id(),"targetPresentationTimeNanos",credit.targetPresentationTimeNanos,"targetPresentationTimeMs",targetMs,"traceId",credit.traceId)));}public void onOutcome(FrameOutcome outcome){onFrameOutcome(outcome);}public void onDiagnostic(SdkDiagnostic diagnostic){onSdkDiagnostic(diagnostic);}});else faceclawSession.attach(remote);
   final String connectedSession=wireSession;death=()->handler.post(()->{if(wireSession.equals(connectedSession))disconnect(new DisconnectInfo(DisconnectInfo.Reason.BINDER_DIED,true,"Host binder died"),false);});remote.asBinder().linkToDeath(death,0);
   remote.onReady(new SessionHello(Protocol.VERSION,Protocol.SDK_VERSION,wireSession),appSession(connectedSession,faceclawSession));connectionState=ConnectionState.READY;onSessionReady(faceclawSession);
  }

@@ -119,8 +119,8 @@ public final class RenderSurface implements AutoCloseable {
    lease=leaseLocked();if(lease==null)return;
    target=executor;raster=rasterRenderer;canvas=canvasRenderer;request=new RenderRequest(this,lease.credit,pendingReason);
   }
-  try{target.execute(()->{try{if(raster!=null)raster.render(lease,request);else renderCanvas(canvas,lease,request);}catch(Exception ignored){lease.close();invalidate(InvalidateReason.STATE);}});}
-  catch(Exception rejected){lease.close();invalidate(InvalidateReason.STATE);}
+  try{target.execute(()->{try{if(raster!=null)raster.render(lease,request);else renderCanvas(canvas,lease,request);}catch(Exception ignored){lease.close();session.reportDiagnostic(SdkDiagnostic.Category.RENDERER_FAILURE,"render",this,lease.generation,true);invalidate(InvalidateReason.STATE);}});}
+  catch(Exception rejected){lease.close();session.reportDiagnostic(SdkDiagnostic.Category.EXECUTOR_REJECTED,"render",this,lease.generation,true);invalidate(InvalidateReason.STATE);}
  }
  private void renderCanvas(CanvasRenderer renderer,FrameLease lease,RenderRequest request)throws Exception{
   synchronized(canvasLock){
@@ -134,8 +134,8 @@ public final class RenderSurface implements AutoCloseable {
  public boolean submitGray8(ByteBuffer source,FrameMetadata metadata){
   FrameLease lease;
   synchronized(this){lease=leaseLocked();}
-  if(lease==null){invalidate(InvalidateReason.STATE);return false;}
-  if(source==null||source.remaining()!=lease.width*lease.height){lease.close();return false;}
+  if(lease==null){session.reportDiagnostic(SdkDiagnostic.Category.LOCAL_VALIDATION,"submit-gray8",this,generation,false);invalidate(InvalidateReason.STATE);return false;}
+  if(source==null||source.remaining()!=lease.width*lease.height){lease.close();session.reportDiagnostic(SdkDiagnostic.Category.LOCAL_VALIDATION,"submit-gray8",this,lease.generation,false);return false;}
   lease.gray8().put(source.duplicate());lease.submit(metadata);return true;
  }
  private FrameLease leaseLocked(){

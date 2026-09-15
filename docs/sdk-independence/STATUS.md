@@ -34,6 +34,10 @@ PATH=/home/deej/.local/jdk-21/bin:/home/deej/.local/android-sdk/platform-tools:$
 
 Result: **PASS**, 42 SDK unit tests.
 
+After P06/P07 changes, `:sdk:lintDebug :sdk:assembleDebug` also passes with
+the same explicit JDK/Android SDK selection. Release assembly and device
+instrumentation remain pending.
+
 Host TypeScript checks with the JDK on `PATH` report **418/421 passing**. The
 remaining three failures are the pre-existing touch-input assertions in
 `tests/touch-input.test.cjs` (temple provenance, pinball contact response and

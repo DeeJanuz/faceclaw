@@ -30,10 +30,10 @@ modified by P00. The other three checkouts remained at the heads above.
 | npm | `11.17.0` |
 | NativeScript CLI | `9.1.1` from `npm exec` |
 | TypeScript | `5.4.5` in the host and T3 app node modules |
-| Java/JDK | unavailable: `java: command not found`, `javac: command not found` |
-| `JAVA_HOME` | unset |
-| `ANDROID_HOME` | unset |
-| `ANDROID_SDK_ROOT` | unset |
+| Java/JDK | JDK 21 at `/home/deej/.local/jdk-21`; not exported in the default shell |
+| `JAVA_HOME` | unset by default; explicit `/home/deej/.local/jdk-21` works |
+| `ANDROID_HOME` | unset by default; explicit `/home/deej/.local/android-sdk` works |
+| `ANDROID_SDK_ROOT` | unset by default; explicit `/home/deej/.local/android-sdk` works |
 | Gradle on PATH | unavailable; use repository wrappers |
 | Android SDK candidate | `/home/deej/.local/android-sdk`: platforms 35 and 36; build-tools 35.0.0 and 35.0.1; NDK 28.2.13676358; CMake 3.31.6 |
 | Alternate SDK candidate | `/home/deej/.local/share/even-realities/android-tools/sdk`: platforms 35 and 36; build-tools 35.0.0 and 36.0.0 |
@@ -48,10 +48,10 @@ and Spotify wrappers use Gradle 8.14.3; the generated host wrapper also declares
 Gradle 8.14.3. SDK AGP is 8.9.2; Signal and Spotify use AGP 8.13.2, with Signal
 Kotlin 2.3.20.
 
-The local SDK candidates are sufficient for the declared Android API levels, but
-the missing JDK means they cannot be used by Gradle or `sdkmanager` in this
-environment. No system settings were changed and no toolchain was installed as
-part of P00.
+The local SDK candidates and JDK are sufficient for the declared Android API
+levels when selected explicitly. No system settings were changed and no
+toolchain was installed as part of P00. The remaining setup issue is environment
+discovery in a default shell, not an absent local toolchain.
 
 ## Executed checks
 
@@ -61,14 +61,15 @@ exit codes. A blocked check is recorded separately from a test failure.
 | Area | Command | Result |
 | --- | --- | --- |
 | SDK JavaScript examples | `node --test javascript/test.cjs javascript/animation-example.test.cjs` from `faceclaw-app-platform/android-sdk` | PASS, 9/9 |
-| SDK animation examples | `ANDROID_HOME=/home/deej/.local/android-sdk ANDROID_SDK_ROOT=/home/deej/.local/android-sdk bash scripts/check-animation-examples.sh` | BLOCKED, exit 1 after the JavaScript portion: no `JAVA_HOME`/`java` |
-| SDK unit/lint/build | `./gradlew :sdk:testDebugUnitTest :sdk:lintDebug :sdk:assembleDebug :sdk:assembleRelease` from `android-sdk` | BLOCKED, exit 1 at wrapper startup: no `JAVA_HOME`/`java` |
+| SDK animation examples | `JAVA_HOME=/home/deej/.local/jdk-21 ANDROID_HOME=/home/deej/.local/android-sdk ANDROID_SDK_ROOT=/home/deej/.local/android-sdk bash scripts/check-animation-examples.sh` | NOT RUN in P00; JavaScript portion passed and the explicit JDK path is now known |
+| SDK unit tests | `JAVA_HOME=/home/deej/.local/jdk-21 ANDROID_HOME=/home/deej/.local/android-sdk ./gradlew :sdk:testDebugUnitTest` from `android-sdk` | PASS, Gradle build successful |
+| SDK lint/build | `JAVA_HOME=/home/deej/.local/jdk-21 ANDROID_HOME=/home/deej/.local/android-sdk ./gradlew :sdk:lintDebug :sdk:assembleDebug :sdk:assembleRelease` from `android-sdk` | NOT RUN in P00; schedule after implementation changes |
 | Host focused extension/external tests | `node --test tests/extension-*.test.cjs tests/external-*.test.cjs` | PASS, 91/91 |
 | Host full suite | `npm test` | FAIL, 416/421 passed, 5 failed; see failures below |
-| Host APK build | `npm run build` | BLOCKED, exit 127: NativeScript reported no compatible SDK/build-tools discoverable through the configured environment and no `javac` |
+| Host APK build | `JAVA_HOME=/home/deej/.local/jdk-21 ANDROID_HOME=/home/deej/.local/android-sdk npm run build` | BLOCKED, exit 127: NativeScript did not discover a compatible SDK/build-tools through its configured environment |
 | Host generated Gradle build | `./gradlew :app:assembleDebug` from `faceclaw-app-platform/platforms/android` | BLOCKED, exit 1 at wrapper startup: no `JAVA_HOME`/`java` |
 | T3 checks | `npm run check` | PASS, typecheck plus 213/213 tests |
-| T3 Android build | `npm run build` | BLOCKED, exit 1 at `scripts/build.sh:5`: `JAVA_HOME: Set JAVA_HOME to JDK 21` |
+| T3 Android build | `JAVA_HOME=/home/deej/.local/jdk-21 ANDROID_HOME=/home/deej/.local/android-sdk npm run build` | NOT RUN in P00; default invocation is blocked by unset `JAVA_HOME` |
 | Signal browser QR contract | `node --experimental-vm-modules --test app/src/test/qr-display/contract.test.mjs` | PASS, 11/11 |
 | Signal native APK validator | `python3 scripts/verify-native-apk.py app/build/outputs/apk/debug/app-debug.apk` | PASS against the pre-existing APK artifact; SHA-256 `d8ceacef5449a8e80431ee155c9a9e83382493c63c62c12084f48189899a1c6d` |
 | Signal Gradle checks | `./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug` | BLOCKED, exit 1 at wrapper startup: no `JAVA_HOME`/`java` |
@@ -149,9 +150,9 @@ was not installed.
 
 JavaScript-only verification is runnable and currently green for the SDK motion
 examples, host extension/external boundary tests, T3 checks, and Signal QR
-contract. Android SDK Java tests, lint, APK rebuilds, instrumentation, signing
-identity inspection, and physical/emulator checks remain blocked by two concrete
-environment prerequisites: install/select a JDK (JDK 21 satisfies all four
-projects) and expose the local Android SDK through `ANDROID_HOME` or
-`ANDROID_SDK_ROOT`. A device or emulator is additionally required for the
-separate-UID/native boundary and Android instrumentation checks.
+contract. The SDK Java unit suite also runs when the local JDK and Android SDK
+are selected explicitly. Lint, APK rebuilds, instrumentation, signing identity
+inspection, and physical/emulator checks remain pending. Default-shell builds
+still need `JAVA_HOME` and Android SDK variables configured. A device or
+emulator is additionally required for the separate-UID/native boundary and
+Android instrumentation checks.

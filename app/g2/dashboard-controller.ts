@@ -394,7 +394,9 @@ class DashboardController {
         ],
         launchApp: appId => { this.closeExtensionSurface("ui.app-menu"); void this.launchApp(appId); },
         uninstallApp: appId => this.uninstallApp(appId),
-        hostState: () => ({ weather: weatherBridge.snapshot() }),
+        hostState: () => ({ weather: weatherBridge.snapshotForDashboard(
+          shell.isScreenOn() && shell.getWindows().some(window => window.appId.startsWith("apk:") && shell.isWindowVisible(window.windowId)),
+        ) }),
         showSurface: (feature, component, target) => this.showExtensionSurface(feature, component, target),
         closeSurface: (feature, restoreSleep) => this.closeExtensionSurface(feature, restoreSleep),
         notificationReplyReturn: () => this.notificationReplyReturn(),

@@ -105,12 +105,13 @@ const DEFAULT_STATE: WeatherState = {
   lastUpdatedMs: null,
 };
 
-/** Shared weather state and periodic refresh, active only while its app is open. */
+/** Shared weather state for the Weather app and visible external dashboards. */
 export class WeatherBridge {
   private readonly listeners = new Set<(state: WeatherState) => void>();
   private state: WeatherState = cloneState(DEFAULT_STATE);
   private refreshHandle: ReturnType<typeof setInterval> | null = null;
   private refreshInFlight: Promise<void> | null = null;
+  private nextDashboardRefreshMs = 0;
 
   onStateChange(listener: (state: WeatherState) => void): () => void {
     this.listeners.add(listener);
@@ -120,6 +121,22 @@ export class WeatherBridge {
 
   snapshot(): WeatherState {
     return cloneState(this.state);
+  }
+
+  /** Dashboard polling owns refresh demand independently of the Weather window. */
+  snapshotForDashboard(visible: boolean): WeatherState {
+    if (visible) {
+      if (!hasLocationPermission()) {
+        this.nextDashboardRefreshMs = 0;
+        if (this.state.phase !== "permission-required") {
+          this.state = cloneState(DEFAULT_STATE);
+          this.emit();
+        }
+      } else if (!this.refreshInFlight && Date.now() >= this.nextDashboardRefreshMs) {
+        void this.refreshNow();
+      }
+    }
+    return this.snapshot();
   }
 
   start(): void {
@@ -144,10 +161,14 @@ export class WeatherBridge {
       return;
     }
 
-    this.refreshInFlight = this.refresh();
+    // Install the in-flight guard before refresh emits to reentrant consumers.
+    this.refreshInFlight = Promise.resolve().then(() => this.refresh());
     try {
       await this.refreshInFlight;
     } finally {
+      // Failed requests retry at most once a minute, never on every host poll.
+      this.nextDashboardRefreshMs = this.state.phase === "permission-required" ? 0
+        : Date.now() + (this.state.phase === "ready" ? WEATHER_REFRESH_MS : 60_000);
       this.refreshInFlight = null;
     }
   }
@@ -157,10 +178,21 @@ export class WeatherBridge {
       this.state = { ...this.state, phase: "locating", status: "Getting current location..." };
       this.emit();
       const location = await getCurrentLocation();
+      if (!hasLocationPermission()) {
+        this.state = cloneState(DEFAULT_STATE);
+        this.emit();
+        return;
+      }
 
       this.state = { ...this.state, phase: "loading", status: "Loading National Weather Service data..." };
       this.emit();
       const weather = await loadNwsWeather(location);
+      if (!hasLocationPermission()) {
+        this.state = cloneState(DEFAULT_STATE);
+        this.nextDashboardRefreshMs = 0;
+        this.emit();
+        return;
+      }
       this.state = {
         phase: "ready",
         status: "Weather updated.",

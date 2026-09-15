@@ -192,3 +192,17 @@ test('full-height switcher draws and hit-tests the panel, then restores compact 
  assert.equal(chrome.windowIndexAt(40, 42, 10), null);
  for (const icon of icons) assert.equal(chrome.windowIndexAt(icon.x + 4, icon.y + 4, 10), icon.index);
 });
+
+test('T3 back policy wakes only the retained app; tap then hold opens the switcher', async () => {
+ for (const suspended of [false, true]) {
+  const h = harness({ doubleTap: 'back', rootBack: 'sleep', tapHold: 'switcher', wakeFocus: 'window' });
+  h.shell.sleep(); h.shell.focus = 'sidebar';
+  if (suspended) await controllerFor(h).send(); else await h.send('double-click');
+  assert.equal(h.shell.isScreenOn(), true);
+  assert.equal(h.shell.getFocus(), 'window');
+  assert.equal(h.shell.foregroundWindow(), h.window);
+  assert.equal(h.delivered.length, 0, 'wake must not also dispatch back to the app');
+  await h.send('short-then-long-press');
+  assert.equal(h.shell.getFocus(), 'sidebar');
+ }
+});

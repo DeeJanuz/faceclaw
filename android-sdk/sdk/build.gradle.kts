@@ -6,6 +6,7 @@ android {
  compileSdk = 35
  defaultConfig { minSdk = 27; consumerProguardFiles("consumer-rules.pro") }
  buildFeatures { aidl = true }
+ sourceSets["test"].resources.srcDir(rootProject.file("test-vectors"))
  compileOptions { sourceCompatibility = JavaVersion.VERSION_11; targetCompatibility = JavaVersion.VERSION_11 }
  testOptions { unitTests.isReturnDefaultValues = true }
 }

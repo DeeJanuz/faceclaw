@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "catalogCases": [
+    {
+      "name": "absent",
+      "capabilities": {},
+      "state": "ABSENT",
+      "supports": []
+    },
+    {
+      "name": "valid-known-and-unknown",
+      "capabilities": {
+        "appIndependence": {
+          "contractVersion": 1,
+          "epoch": 7,
+          "features": [
+            { "id": "window.policy", "version": 1, "limits": { "maxPolicyBytes": 4096 } },
+            { "id": "future.feature", "version": 3, "limits": {} }
+          ]
+        }
+      },
+      "state": "VALID",
+      "supports": [
+        { "id": "window.policy", "minimumVersion": 1 },
+        { "id": "future.feature", "minimumVersion": 3 }
+      ]
+    },
+    {
+      "name": "duplicate-feature",
+      "capabilities": {
+        "appIndependence": {
+          "contractVersion": 1,
+          "epoch": 8,
+          "features": [
+            { "id": "window.policy", "version": 1, "limits": {} },
+            { "id": "window.policy", "version": 1, "limits": {} }
+          ]
+        }
+      },
+      "state": "MALFORMED",
+      "supports": []
+    },
+    {
+      "name": "invalid-epoch",
+      "capabilities": {
+        "appIndependence": {
+          "contractVersion": 1,
+          "epoch": 0,
+          "features": []
+        }
+      },
+      "state": "MALFORMED",
+      "supports": []
+    }
+  ],
+  "requestCases": [
+    { "name": "same-id-same-body", "requestId": "r_1", "body": "same", "expected": "idempotent" },
+    { "name": "same-id-different-body", "requestId": "r_1", "body": "different", "expected": "conflict" },
+    { "name": "stale-window", "requestId": "r_2", "windowGeneration": 4, "currentWindowGeneration": 5, "expected": "stale_window" },
+    { "name": "expired", "requestId": "r_3", "expiresAtElapsedMs": 10, "nowElapsedMs": 11, "expected": "expired" }
+  ]
+}

@@ -41,3 +41,10 @@ test('arrival surface ignores the centered app band and reader restores that ban
  let frame=layer.paint({},below);assert.equal(frame.pixels[1],190);assert.equal(frame.pixels[3*6+1],0);
  layer.alignTop=false;frame=layer.paint({},below);assert.equal(frame.pixels[1],0);assert.equal(frame.pixels[3*6+1],190);
 });
+test('extension cleanup reports the presentation identity it was bound to',()=>{
+ const image=load('app/graphics/image.ts',{'./bdffont':{},'./textwrap':{}});
+ const {ExtensionLayer}=load('app/ui/shell/extension-layer.ts',{'../../graphics/image':image,'./geometry':{appViewportRect:()=>({x:0,y:0,width:1,height:1})}});
+ const removed=[];const layer=new ExtensionLayer(()=>{},()=>{},id=>removed.push(id),'medium',false);
+ layer.setPresentationId('preview-1');layer.onRemoved();assert.deepEqual(removed,['preview-1']);
+ layer.setPresentationId('bad token');layer.onRemoved();assert.deepEqual(removed,['preview-1',undefined]);
+});

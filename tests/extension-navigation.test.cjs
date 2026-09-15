@@ -23,11 +23,12 @@ function harness(options = {}) {
   clearToBase() { this.layers = []; }
   isAtBase() { return this.layers.length === 0; }
   topMatches(predicate) { return this.layers.length > 0 && predicate(this.layers.at(-1)); }
+  popIfTop(predicate) { if (!this.layers.length || !predicate(this.layers.at(-1))) return false; this.layers.pop(); return true; }
   async handleInput(event) { this.layers.at(-1)?.handleInput(event); }
  }
  imports['../layers'] = { LayerStack: Stack };
  imports['./chrome-layer'] = { ShellChromeLayer: class {} };
- imports['../menu'] = { MenuLayer: class {} };
+ imports['../menu'] = { MenuLayer: class { selectItem() { return this; } } };
  imports['../gestures'] = load('app/ui/gestures.ts', {});
  imports['../extension-settings'] = { navigationPolicy: policy, windowLayoutPolicy: () => ({ switcherHeight: enabled ? 'display' : 'minimum' }) };
  imports['../dashboard-settings'] = { wakeWordActionSetting: { get: () => options.wakeWordAction ?? 'voice-input' } };
@@ -139,10 +140,33 @@ test('single hold requests App actions even when an app claims hold; text captur
  assert.equal(h.delivered.length, 1); assert.equal(h.delivered[0].type, 'short-then-long-press');
  assert.notEqual(h.shell.escapeMenuTimer, null); assert.equal(h.shell.getFocus(), 'window');
  await h.send('long-press-release'); assert.equal(h.shell.escapeMenuTimer, null);
+ assert.equal(h.delivered.length, 1, 'the opening release is consumed by the host');
  for (const field of ['activeVoiceLayer', 'activeKeyboardLayer']) {
   const protectedInput = harness(); protectedInput.shell[field] = {};
   await protectedInput.send('long-press'); assert.equal(protectedInput.delivered.length, 0);
  }
+});
+
+test('Compass-style hold opens actions without arming Display off', async () => {
+ const h = harness(); await h.send('long-press');
+ assert.equal(h.delivered[0].type, 'short-then-long-press');
+ // A firmware-generated click before the release must not reach the Compass
+ // layer and select the leading power row.
+ await h.send('click');
+ await h.send('long-press-release');
+ assert.equal(h.delivered.length, 1);
+ assert.equal(h.shell.isScreenOn(), true);
+});
+
+test('tap-then-hold app-menu consumes its opening click before later selection', async () => {
+ const h = harness({ tapHold: 'app-menu' });
+ await h.send('short-then-long-press');
+ assert.equal(h.delivered.length, 1);
+ await h.send('click');
+ assert.equal(h.delivered.length, 1, 'synthetic opening click is consumed');
+ await h.send('click');
+ assert.equal(h.delivered.length, 2, 'a later click remains a deliberate selection');
+ assert.equal(h.shell.isScreenOn(), true);
 });
 test('removing navigation override restores app back; watch swipe-left still means back', async () => {
  const h = harness(); h.disable(); await h.send('double-click');

@@ -23,7 +23,8 @@ function harness({ awake = true, protectedFlow = false } = {}) {
     getWindows: () => [],
   };
   class Surface {
-    constructor(input, resized, closed, heightMode, opaque, alignTop) { Object.assign(this, { input, resized, closed, heightMode, opaque, alignTop }); }
+    constructor(input, resized, closed, heightMode, opaque, alignTop) { Object.assign(this, { input, resized, closed, heightMode, opaque, alignTop, presentationId: undefined }); }
+    setPresentationId(id) { this.presentationId = id; }
   }
   const context = { shell, ExtensionLayer: Surface, setTimeout: fn => { timers.set(++timerId, fn); return timerId; }, clearTimeout: id => timers.delete(id) };
   vm.createContext(context);
@@ -31,12 +32,14 @@ function harness({ awake = true, protectedFlow = false } = {}) {
   const controller = new context.Harness(); Object.assign(controller, { extensionSurfaces: new Map(), glassesLocked: false, phase: 'connected', ensureEvenHubSessionActive() {}, requestShellRender() {}, externalApps: { extensions: { surfaceInput() {}, openSurface() {}, setSurfaceVisibility() {}, closeSurface() {} } } });
   return { controller, layer: () => layer, timers, awake: () => awake, wakes: () => wakes, sleeps: () => sleeps, foreground: id => foreground = id, protect: value => protectedFlow = value, expire() { const current = [...timers.values()]; timers.clear(); current.forEach(fn => fn()); } };
 }
-test('arrival previews preserve the original sleep origin across replacement', () => {
+test('arrival previews preserve the original sleep origin and layer across replacement', () => {
   const h = harness({ awake: false });
   h.controller.showExtensionSurface('ui.notifications', 'example/Service', 'first');
-  assert.equal(h.wakes(), 1); assert.equal(h.layer().opaque, true); assert.equal(h.layer().heightMode, 'medium');
+  const first = h.layer();
+  assert.equal(h.wakes(), 1); assert.equal(first.opaque, true); assert.equal(first.heightMode, 'medium');
   h.controller.showExtensionSurface('ui.notifications', 'example/Service', 'second');
-  assert.equal(h.wakes(), 1); assert.equal(h.timers.size, 2); // Preview deadline plus deferred replacement cleanup.
+  assert.equal(h.layer(), first); assert.equal(first.presentationId, 'second');
+  assert.equal(h.wakes(), 1); assert.equal(h.timers.size, 1);
   h.expire(); assert.equal(h.awake(), false); assert.equal(h.sleeps(), 1); assert.equal(h.layer(), undefined);
 });
 test('awake previews retain the backdrop and protected flows never wake or open', () => {
@@ -57,6 +60,16 @@ test('dismissing a preview restores sleep; explicitly opening inbox stays open',
   h.layer().input({ type: 'scroll-down' }); h.controller.closeExtensionSurface('ui.notifications'); assert.equal(h.awake(), false);
   const inbox = harness(); inbox.controller.showExtensionSurface('ui.notifications', 'example/Service', 'inbox');
   assert.equal(inbox.timers.size, 0); assert.equal(inbox.layer().opaque, true);
+});
+
+test('a stale notification cleanup cannot close a newer presentation', () => {
+ const h = harness({ awake: false });
+ h.controller.showExtensionSurface('ui.notifications', 'example/Service', 'first');
+ h.controller.showExtensionSurface('ui.notifications', 'example/Service', 'second');
+ assert.equal(h.controller.closeExtensionSurface('ui.notifications', true, 'first'), false);
+ assert.ok(h.layer());
+ assert.equal(h.controller.closeExtensionSurface('ui.notifications', true, 'second'), true);
+ assert.equal(h.layer(), undefined);
 });
 
 test('reply handoff stays awake during capture and successful completion restores its sleep origin',()=>{

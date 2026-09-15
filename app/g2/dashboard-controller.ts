@@ -315,7 +315,7 @@ class DashboardController {
   private unpairedDisconnectPending = false;
 
   private pendingNotificationWake: ExtensionLayer | null = null;
-  private extensionSurfaces = new Map<string, { component: string; layer: ExtensionLayer; timer?: ReturnType<typeof setTimeout>; wokeScreen: boolean; interacted: boolean }>();
+  private extensionSurfaces = new Map<string, { component: string; layer: ExtensionLayer; timer?: ReturnType<typeof setTimeout>; wokeScreen: boolean; interacted: boolean; presentationId?: string }>();
   private externalApps: ExternalAppPlatform;
 
   constructor() {
@@ -398,8 +398,8 @@ class DashboardController {
           shell.isScreenOn() && shell.getWindows().some(window => window.appId.startsWith("apk:") && shell.isWindowVisible(window.windowId)),
         ) }),
         showSurface: (feature, component, target) => this.showExtensionSurface(feature, component, target),
-        closeSurface: (feature, restoreSleep) => this.closeExtensionSurface(feature, restoreSleep),
-        notificationReplyReturn: () => this.notificationReplyReturn(),
+        closeSurface: (feature, restoreSleep, presentationId) => this.closeExtensionSurface(feature, restoreSleep, presentationId),
+        notificationReplyReturn: presentationId => this.notificationReplyReturn(presentationId),
         onFrame: (component, feature, _generation, width, height, pixels) => {
           if (feature === "ui.launcher") {
             if (shell.foregroundWindow()?.appId !== "launcher" || !this.display || this.glassesLocked) return;
@@ -2536,6 +2536,17 @@ class DashboardController {
     if (this.glassesLocked || this.phase === "charging") return false;
     const prior = this.extensionSurfaces.get(feature);
     if (prior && feature === "ui.notifications" && target !== "inbox" && prior.interacted) return false;
+    // Keep the existing layer while an un-interacted preview is replaced.
+    // The provider can reject an arrival (duplicate, summary, or its own APK
+    // completion) after this hook returns; closing here would leave a blank
+    // overlay. The provider updates the same layer when a valid frame exists.
+    if (prior && feature === "ui.notifications" && target !== "inbox" && prior.component === component) {
+      prior.presentationId = target;
+      prior.layer.setPresentationId?.(target);
+      if (prior.timer) clearTimeout(prior.timer);
+      prior.timer = setTimeout(() => this.closeExtensionSurface(feature, true, target), 5000);
+      return true;
+    }
     if (prior) { this.closeExtensionSurface(feature, false); }
     if (!shell.canShowExtensionOverlay()) return false;
     const wokeScreen = prior?.wokeScreen || !shell.isScreenOn();
@@ -2550,9 +2561,9 @@ class DashboardController {
     }, (width, height) => {
       this.externalApps.extensions.openSurface(feature, width, height);
       this.externalApps.extensions.setSurfaceVisibility(feature, true, shell.isScreenOn());
-    }, () => {
+    }, (removedPresentationId) => {
       const state = this.extensionSurfaces.get(feature);
-      if (!state || state.layer !== layer) return;
+      if (!state || state.layer !== layer || (removedPresentationId && state.presentationId && removedPresentationId !== state.presentationId)) return;
       if (state.timer) clearTimeout(state.timer);
       if (this.pendingNotificationWake === layer) {
         this.pendingNotificationWake = null;
@@ -2561,31 +2572,36 @@ class DashboardController {
       this.extensionSurfaces.delete(feature);
       this.externalApps.extensions.closeSurface(feature);
     }, feature === "ui.notifications" ? "medium" : "min", feature !== "ui.notifications" || target === "inbox" || wokeScreen, feature === "ui.notifications" && target !== "inbox");
-    const state = { component, layer, wokeScreen, interacted: target === "inbox", timer: undefined as ReturnType<typeof setTimeout> | undefined };
+    const presentationId = feature === "ui.notifications" && target !== "inbox" ? target : undefined;
+    const state = { component, layer, wokeScreen, interacted: target === "inbox", presentationId, timer: undefined as ReturnType<typeof setTimeout> | undefined };
+    layer.setPresentationId?.(presentationId);
     this.extensionSurfaces.set(feature, state);
     if (feature === "ui.notifications" && wokeScreen) this.pendingNotificationWake = layer;
     if (!shell.isScreenOn()) shell.wake("window");
     if (!shell.showExtensionOverlay(layer, feature !== "ui.app-menu")) { this.extensionSurfaces.delete(feature); if (this.pendingNotificationWake === layer) this.pendingNotificationWake = null; if (wokeScreen) shell.sleep(); return false; }
-    if (feature === "ui.notifications" && target !== "inbox") state.timer = setTimeout(() => this.closeExtensionSurface(feature), 5000);
+    if (feature === "ui.notifications" && target !== "inbox") state.timer = setTimeout(() => this.closeExtensionSurface(feature, true, state.presentationId), 5000);
     this.requestShellRender();
     return true;
   }
 
-  private notificationReplyReturn(): () => void {
+  private notificationReplyReturn(presentationId?: string): () => void {
     const wokeScreen = this.extensionSurfaces.get("ui.notifications")?.wokeScreen === true;
     const previousWindow = shell.foregroundWindow()?.windowId;
     return () => {
       // A delayed external send must not interrupt a newer app or overlay.
-      if (wokeScreen && !shell.hasOverlay() && shell.foregroundWindow()?.windowId === previousWindow) shell.sleepAtAppRoot();
+      const current = this.extensionSurfaces.get("ui.notifications");
+      if (wokeScreen && !shell.hasOverlay() && shell.foregroundWindow()?.windowId === previousWindow &&
+          (!presentationId || !current || current.presentationId === presentationId)) shell.sleepAtAppRoot();
     };
   }
 
-  private closeExtensionSurface(feature: string, restoreSleep = true): void {
-    if (feature === "ui.launcher") { setTimeout(() => shell.getWindows().find(window => window.appId === "launcher")?.requestRender(), 0); return; }
+  private closeExtensionSurface(feature: string, restoreSleep = true, presentationId?: string): boolean {
+    if (feature === "ui.launcher") { setTimeout(() => shell.getWindows().find(window => window.appId === "launcher")?.requestRender(), 0); return true; }
     const state = this.extensionSurfaces.get(feature);
-    if (!state) return;
+    if (!state || (feature === "ui.notifications" && presentationId !== undefined && state.presentationId !== presentationId)) return false;
     shell.closeExtensionOverlay(state.layer);
     if (restoreSleep && state.wokeScreen && !shell.hasOverlay()) shell.sleep();
+    return true;
   }
 
   private async handleAndroidNotificationPosted(notificationKey: string): Promise<void> {

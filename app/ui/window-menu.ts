@@ -31,7 +31,7 @@ let nextRemoteMenu = 0;
  * The window context menu, opened by tap-then-hold: an app's own menu,
  * holding its app-specific actions. The shell's system menu (long-press)
  * carries the entries every window shares — Focus app switcher, Voice input,
- * Close window — so an app with nothing of its own to offer has no menu of
+ * Close app — so an app with nothing of its own to offer has no menu of
  * its own: tap-then-hold then opens the system menu in its place, so both
  * gestures land on the same menu. The system menu is also the safety net:
  * shell-owned, so an unresponsive app can always be closed (a window that
@@ -54,22 +54,45 @@ export class WindowMenuLayer extends MenuLayer {
       ...WINDOW_MENU_LAYOUT,
       footer: navigationPolicy().tapHold === "switcher" ? undefined : WINDOW_MENU_LAYOUT.footer,
     });
+    // Display off may be the provider's requested leading row, but opening a
+    // menu must never arm power as the default action. A subsequent deliberate
+    // scroll/click can still choose it explicitly.
+    const safeIndex = items.findIndex(item => item.label !== "Display off" && !(typeof item.disabled === "function" ? item.disabled() : item.disabled));
+    if (safeIndex >= 0) this.selectItem(safeIndex);
   }
 }
 
-export function hasSharedAppActions(): boolean {
+export function hasSharedAppActions(closeable = false): boolean {
   const policy = appMenuPolicy();
-  return policy.displayOffFirst || policy.systemActionsLast;
+  return closeable || policy.displayOffFirst || policy.systemActionsLast;
 }
 
 /** Compose existing app actions using the active APK's menu policy. */
-export function appActionItems(items: MenuItem[], displayOff: () => void, systemActions: () => void): MenuItem[] {
+export function appActionItems(
+  items: MenuItem[],
+  displayOff: () => void,
+  systemActions: () => void,
+  closeApp?: () => void,
+): MenuItem[] {
   const policy = appMenuPolicy();
   const leading: MenuItem[] = policy.displayOffFirst
     ? [{ label: "Display off", onSelect: ctx => { ctx.stack.pop(); displayOff(); } }] : [];
+  // Closing is host-owned and scoped by each caller to the window for which
+  // this menu was created. Keep it beside the app actions, before the generic
+  // System actions row, so a provider cannot target an arbitrary window.
+  const closing: MenuItem[] = closeApp
+    ? [{ label: "Close app", onSelect: ctx => { ctx.stack.pop(); closeApp(); } }]
+    : [];
   const trailing: MenuItem[] = policy.systemActionsLast
     ? [{ label: policy.systemTitle, onSelect: ctx => { ctx.stack.pop(); systemActions(); } }] : [];
-  return [...leading, ...items, ...trailing];
+  // A provider may request Display off without contributing any other common
+  // or app action. Keep that menu safe to open: the explicit power row stays
+  // available, but it can never be the only/default row.
+  const hasEnabledAppAction = items.some(item => !(typeof item.disabled === "function" ? item.disabled() : item.disabled));
+  const safeFallback: MenuItem[] = leading.length && !hasEnabledAppAction && !closing.length && !trailing.length
+    ? [{ label: "Return to app", onSelect: ctx => { ctx.stack.pop(); } }]
+    : [];
+  return [...leading, ...items, ...closing, ...safeFallback, ...trailing];
 }
 
 export type WindowMenuOptions = {
@@ -125,7 +148,10 @@ export class WindowMenu {
 
   /** True when tap-then-hold currently opens this menu with something in it. */
   isAvailable(): boolean {
-    return hasSharedAppActions() || this.options.items().length > 0;
+    // Worker windows are closeable host targets. Include that common action in
+    // availability so an otherwise empty app menu still opens a useful,
+    // window-scoped Close app row when the provider is absent.
+    return hasSharedAppActions(true) || this.options.items().length > 0;
   }
 
   /**
@@ -137,7 +163,8 @@ export class WindowMenu {
     if (this.stack) return;
     items = appActionItems(items,
       () => this.options.post({ type: "sleep-display", windowId: this.options.windowId }),
-      () => this.options.post({ type: "open-system-menu", windowId: this.options.windowId }));
+      () => this.options.post({ type: "open-system-menu", windowId: this.options.windowId }),
+      () => this.options.post({ type: "close-window-request", windowId: this.options.windowId }));
     if (!items.length) {
       this.options.post({ type: "open-system-menu", windowId: this.options.windowId });
       return;

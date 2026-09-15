@@ -13,7 +13,7 @@ function harness(enabled = true) {
     paint() { return ['menu']; }
     handleInput() {}
   }
-  class Menu { constructor(title, items) { this.items = items; } }
+  class Menu { constructor(title, items) { this.items = items; this.selectedIndex = 0; } selectItem(index) { this.selectedIndex = index; return this; } }
   const modules = {
     '../graphics/image': {}, '../graphics/plane': { singlePlane: image => [image] },
     './gestures': { gestureHints: () => '' },
@@ -25,7 +25,7 @@ function harness(enabled = true) {
   vm.runInNewContext(ts.transpileModule(fs.readFileSync('app/ui/window-menu.ts', 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText, context);
   const sent = []; let chosen = 0;
   const menu = new context.exports.WindowMenu({ windowId: 'game', title: () => 'Game', post: msg => sent.push(msg), items: () => [{ label: 'Move', onSelect: ctx => { ctx.stack.pop(); chosen++; } }, { label: 'Disabled', disabled: true, onSelect: () => chosen++ }], paintBase: () => 'base', size: { width: 576, height: 260 }, isFocused: () => true });
-  return { menu, sent, chosen: () => chosen, api: context.exports, Stack };
+ return { menu, sent, chosen: () => chosen, api: context.exports, Stack, Menu };
 }
 test('worker menus retain pause state and consume only their current selection', async () => {
   const h = harness(); h.menu.open(); const request = h.sent.find(item => item.type === 'present-app-menu');
@@ -52,6 +52,41 @@ test('disabled items cannot run and no provider preserves host rendering', async
   assert.equal(h.chosen(), 0);
   const base = harness(false); base.menu.open(); assert.equal(base.sent.length, 0);
   assert.deepEqual(Array.from(base.menu.paint()), ['menu']);
+});
+
+test('shared app actions keep Display off available but choose a safe initial row and scope Close app', () => {
+ const h = harness();
+ const items = h.api.appActionItems(
+   [{ label: 'Compass action', onSelect() {} }],
+   () => {},
+   () => {},
+   () => {},
+ );
+ assert.equal(items.map(item => item.label).join('|'), 'Compass action|Close app');
+
+ const modules = {
+   '../graphics/image': {}, '../graphics/plane': { singlePlane: image => [image] },
+   './gestures': { gestureHints: () => '' }, './layers': { LayerStack: h.Stack, noopLayerActions: {} },
+   './menu': { MenuLayer: h.Menu },
+   './extension-settings': { effectiveExtension: () => ({}), appMenuPolicy: () => ({ displayOffFirst: true, systemActionsLast: true, systemTitle: 'System actions' }), navigationPolicy: () => ({ tapHold: 'app-menu' }) },
+ };
+ const module = { exports: {} };
+ vm.runInNewContext(ts.transpileModule(fs.readFileSync('app/ui/window-menu.ts', 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText, {
+   module, exports: module.exports, require: name => { assert.ok(name in modules, name); return modules[name]; },
+ });
+ const layer = new module.exports.WindowMenuLayer('Compass', [
+   { label: 'Display off', onSelect() {} },
+   { label: 'Calibrate', onSelect() {} },
+   { label: 'Close app', onSelect() {} },
+ ]);
+ assert.equal(layer.selectedIndex, 1);
+});
+
+test('worker Close app action targets the menu window', async () => {
+ const h = harness(); h.menu.open(); const request = h.sent.find(item => item.type === 'present-app-menu');
+ assert.ok(request);
+ await h.menu.handleInput({ type: 'app-menu-selection', menuId: request.menuId, index: 2 });
+ assert.equal(JSON.stringify(h.sent.at(-1)), JSON.stringify({ type: 'close-window-request', windowId: 'game' }));
 });
 
 test('async in-process selection keeps its backing menu until the callback settles', async () => {

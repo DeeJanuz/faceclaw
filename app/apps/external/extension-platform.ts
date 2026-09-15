@@ -18,8 +18,8 @@ export type ExtensionHooks = {
   uninstallApp?: (appId: string) => Promise<void> | void;
   hostState?: () => { weather?: unknown };
   showSurface?: (feature: string, component: string, target?: string) => boolean;
-  closeSurface?: (feature: string, restoreSleep?: boolean) => void;
-  notificationReplyReturn?: () => (() => void);
+  closeSurface?: (feature: string, restoreSleep?: boolean, presentationId?: string) => boolean | void;
+  notificationReplyReturn?: (presentationId?: string) => (() => void);
   onFrame?: (component: string, feature: string, generation: number, width: number, height: number, pixels: Uint8Array) => void;
 };
 type Pending = { component: string; feature: string; generation: number; own?: boolean; resolve: (data: any) => void; reject: (error: Error) => void; progress?: (data: any) => void };
@@ -41,6 +41,11 @@ export class ExtensionPlatform {
   private readonly toolNotifications = new NotificationLeases<AndroidNotification>(newId);
   private readonly calls = new ExtensionToolCalls();
   private notificationRevision = 0;
+  /** The host-owned presentation currently associated with the arrival alert.
+   * This is separate from the inbox snapshot: an unchanged source may be
+   * observed repeatedly without replacing the pixels the wearer is reading.
+   */
+  private notificationPresentation: { id: string; key: string; postTime: number } | null = null;
   private notificationAppsAt = 0;
   private notificationApps: { packageName: string; name: string }[] = [];
   private lastNotificationSnapshot = "";
@@ -107,7 +112,7 @@ export class ExtensionPlatform {
     }
     if (changed.has("ui.notifications")) {
       for (const review of this.reviews.values()) review.cancel(); this.reviews.clear();
-      this.uiNotifications.clear(); this.lastNotificationSnapshot = "";
+      this.uiNotifications.clear(); this.lastNotificationSnapshot = ""; this.notificationPresentation = null;
     }
     if (changed.has("device-tools")) { this.toolNotifications.clear(); this.messaging?.invalidate(); }
     if (changed.has("ui.app-menu")) this.closeMenu();
@@ -176,6 +181,7 @@ export class ExtensionPlatform {
   }
   closeSurface(feature: string): void {
     if (feature === "ui.app-menu") this.closeMenu();
+    if (feature === "ui.notifications") this.notificationPresentation = null;
     const selected = this.feature(feature); if (selected) this.native.closeExtensionSurface(selected.component, feature); this.lastGesture.delete(feature);
   }
   /** A foreground app can host its notification reader in its own window.
@@ -206,7 +212,7 @@ export class ExtensionPlatform {
     if (this.isLocked()) {
       for (const review of this.reviews.values()) review.cancel(); this.reviews.clear();
       for (const feature of ["ui.launcher", "ui.app-menu", "ui.notifications"]) { this.setSurfaceVisibility(feature, false, false); this.hooks.closeSurface?.(feature); }
-      this.lastGesture.clear(); this.uiNotifications.clear(); this.ownNotifications.clear(); this.lastNotificationSnapshot = "";
+      this.lastGesture.clear(); this.uiNotifications.clear(); this.ownNotifications.clear(); this.lastNotificationSnapshot = ""; this.notificationPresentation = null;
     }
     this.lastState = ""; this.publishState();
   }
@@ -274,10 +280,19 @@ export class ExtensionPlatform {
       if (delivered) this.lastNotificationSnapshot = serialized;
     }
     const item = arrival && leased.find(entry => entry.source.key === arrival);
-    if (item && !this.isProtected()) {
+    // Android emits group summaries alongside their children. T3 deliberately
+    // ignores summaries, so presenting one would replace a valid preview with
+    // an empty surface. A provider's own APK notification still needs a host
+    // surface when no preview exists; T3 already owns its local completion
+    // card, and the shared layer lets that card render without replacing an
+    // existing presentation.
+    const samePresentation = item && this.notificationPresentation?.key === item.source.key &&
+      this.notificationPresentation.postTime === item.source.postTime;
+    if (item && !item.source.isGroupSummary && !samePresentation && !this.isProtected()) {
       const wokeScreen = !shell.isScreenOn();
       if (this.hooks.showSurface?.("ui.notifications", selected.component, item.id) !== true) return;
-      this.event(selected.component, "ui.notifications", { event: "notification-arrived", key: item.id, postTime: item.source.postTime, wokeScreen });
+      this.notificationPresentation = { id: item.id, key: item.source.key, postTime: item.source.postTime };
+      this.event(selected.component, "ui.notifications", { event: "notification-arrived", key: item.id, postTime: item.source.postTime, presentationId: item.id, wokeScreen });
     }
   }
   clearOwnNotifications(component: string): void { this.ownNotifications.delete(component); }
@@ -344,7 +359,12 @@ export class ExtensionPlatform {
       const reviewKey = `${component}\n${callId}`, review = this.reviews.get(reviewKey);
       if (review) { this.reviews.delete(reviewKey); review.cancel(); } result(true); return;
     }
-    if (action === "close-surface") { this.hooks.closeSurface?.(feature); result(true); return; }
+    if (action === "close-surface") {
+      const hasPresentationId = feature === "ui.notifications" && Object.prototype.hasOwnProperty.call(data, "presentationId");
+      const presentationId = hasPresentationId ? (boundedToken(data.presentationId) ? data.presentationId : "") : undefined;
+      const closed = this.hooks.closeSurface?.(feature, undefined, presentationId);
+      result(closed !== false, closed === false ? "Presentation is stale" : undefined); return;
+    }
     // UI presentation is not blanket authority to perform background actions.
     const gesture = this.lastGesture.get(feature) ?? 0;
     if (Date.now() - gesture > 5000 || !shell.isScreenOn()) { result(false, "A fresh feature gesture is required"); return; }
@@ -368,7 +388,7 @@ export class ExtensionPlatform {
       if (action === "notification-dismiss") { result(dismissNotification(source.key, source.postTime)); this.notificationsChanged(); return; }
       if (action === "notification-open") {
         if (source.key.startsWith("apk:")) result(invokeExternalNotification(source.key, 0, source.postTime));
-        else { this.hooks.closeSurface?.(feature, false); shell.openNotificationModal(source.key, false); result(true); }
+        else { this.hooks.closeSurface?.(feature, false, boundedToken(data.presentationId) ? data.presentationId : undefined); shell.openNotificationModal(source.key, false); result(true); }
         return;
       }
       const index = data.actionIndex;
@@ -383,7 +403,7 @@ export class ExtensionPlatform {
         let sent = false, unavailable = false;
         const reviewKey = `${component}\n${callId}`;
         if (this.reviews.size) { result(false, "Another review is active"); return; }
-        const restoreVisit = this.hooks.notificationReplyReturn?.();
+        const restoreVisit = this.hooks.notificationReplyReturn?.(boundedToken(data.presentationId) ? data.presentationId : undefined);
         let completed = false;
         const complete = (status: string) => {
           if (completed) return; completed = true;

@@ -70,7 +70,7 @@ import {
  * Input flow: every event enters via receiveInput. The shell consumes
  * everything while the sidebar or a shell overlay has focus and forwards the
  * rest to the focused window. Long-press opens the shell-owned system menu
- * (Focus app switcher, Voice input, Close window, Debug) without reaching the
+ * (Focus app switcher, Voice input, Close app, Debug) without reaching the
  * app, so the shell keeps working when a window's handler hangs; a window
  * that claims long-press for a move of its own gets it forwarded instead, and
  * holding the press past the escape threshold still opens the system menu.
@@ -85,7 +85,7 @@ export type ShellWindow = {
   title: string;
   /** Compositor surface this window renders to; configured at connect / launch. */
   surfaceId: string;
-  /** Whether the system menu offers Close window (the launcher is pinned). */
+  /** Whether the system menu offers Close app (the launcher is pinned). */
   closeable: boolean;
   /**
    * True when tap-then-hold currently opens the window's own context menu
@@ -313,6 +313,11 @@ class Shell {
   private readonly assistantActivityListeners = new Set<(event: AssistantActivityEvent) => void>();
   private readonly alertListeners = new Set<(text: string) => void>();
   private escapeMenuTimer: ReturnType<typeof setTimeout> | null = null;
+  /** A hold can be accompanied by a firmware-generated click before release. */
+  private appMenuGestureActive = false;
+  /** Discrete tap-then-hold has no separate release event to clear its guard. */
+  private appMenuOpeningClickGuard = false;
+  private appMenuOpeningClickGuardTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly actions: LayerActions = { ...noopActions };
   private config: ShellConfig = {
     actions: noopActions,
@@ -720,6 +725,18 @@ class Shell {
       this.cancelEscapeMenuTimer();
     }
 
+    // Some firmware/input adapters emit a click while completing a hold. It
+    // is part of the opening gesture, not a menu selection. Keep the guard
+    // until the matching release; a click after release is deliberate input.
+    if (event.type === "click" && this.appMenuGestureActive) {
+      return { shell: true, window: false };
+    }
+    if (event.type === "click" && this.appMenuOpeningClickGuard) {
+      this.appMenuOpeningClickGuard = false;
+      if (this.appMenuOpeningClickGuardTimer !== null) { clearTimeout(this.appMenuOpeningClickGuardTimer); this.appMenuOpeningClickGuardTimer = null; }
+      return { shell: true, window: false };
+    }
+
     if (!this.screenOn) {
       if (event.type === "short-then-long-press" && navigationPolicy().tapHold === "switcher") {
         this.wake("sidebar");
@@ -756,6 +773,7 @@ class Shell {
         if (this.stack.topMatches(layer => layer instanceof ShellOverlayMenuLayer)) return { shell: true, window: false };
         const foreground = this.foregroundWindow();
         if (!foreground) return { shell: true, window: false };
+        this.appMenuGestureActive = true;
         // A normal hold opens App actions; keeping it held retains the
         // host-controlled escape even if the APK stops responding.
         this.startEscapeMenuTimer();
@@ -818,11 +836,30 @@ class Shell {
         this.focus = "window";
         window.onFocus?.(this.lastInput);
       }
+      // A discrete tap-then-hold is itself the opening gesture. Some input
+      // sources append a synthetic click; consume that one click before the
+      // app menu can interpret it as its first selection.
+      this.appMenuOpeningClickGuard = true;
+      if (this.appMenuOpeningClickGuardTimer !== null) clearTimeout(this.appMenuOpeningClickGuardTimer);
+      this.appMenuOpeningClickGuardTimer = setTimeout(() => {
+        this.appMenuOpeningClickGuard = false;
+        this.appMenuOpeningClickGuardTimer = null;
+      }, 250);
       // The window owns frameId from here (render or explicit finish).
       await window.handleInput(event, frameId);
       return { shell: true, window: true };
     }
     if (event.type === "long-press-release") {
+      // `hold: app-menu` is a complete host gesture. The release belongs to
+      // opening that menu and must not be forwarded to a foreground app or
+      // SDK adapter, where it can be interpreted as a click on the first row
+      // (historically Display off). A later click is the only selection input.
+      if (navigationPolicy().hold === "app-menu") {
+        this.appMenuGestureActive = false;
+        this.appMenuOpeningClickGuard = false;
+        if (this.appMenuOpeningClickGuardTimer !== null) { clearTimeout(this.appMenuOpeningClickGuardTimer); this.appMenuOpeningClickGuardTimer = null; }
+        return { shell: true, window: false };
+      }
       this.activeVoiceLayer?.endCapture();
       if (this.activeVoiceLayer || !this.stack.isAtBase() || this.focus !== "window") {
         return { shell: true, window: false };
@@ -1542,9 +1579,16 @@ class Shell {
       return true;
     }
     let layer: ShellOverlayMenuLayer;
-    const items = appActionItems([], () => this.sleepAtAppRoot(), () => this.openEscapeMenu());
+    const items = appActionItems(
+      [],
+      () => this.sleepAtAppRoot(),
+      () => this.openEscapeMenu(),
+      foreground.closeable ? () => this.closeWindow(foreground.windowId) : undefined,
+    );
     if (!items.length) { this.openEscapeMenu(); return false; }
     layer = new ShellOverlayMenuLayer(items, undefined, () => this.focusWindow(foreground.windowId), appMenuPolicy().title ?? foreground.title);
+    const safeIndex = items.findIndex(item => item.label !== "Display off" && !(typeof item.disabled === "function" ? item.disabled() : item.disabled));
+    if (safeIndex >= 0) layer.selectItem(safeIndex);
     layer.keepWindowFocus = true;
     const menuStack = new LayerStack({ paint: () => new GrayImage(1, 1, 0), handleInput: () => {} }, this.config.actions);
     menuStack.push(layer);
@@ -1556,7 +1600,7 @@ class Shell {
 
   /**
    * The system/escape menu: the entries every window shares (Focus app
-   * switcher, Voice input, Close window) plus Debug. Shell-owned and
+   * switcher, Voice input, Close app) plus Debug. Shell-owned and
    * shell-drawn (never the app's), so an unresponsive app can always be
    * closed. It opens for long-press (over the app's own menu too), after an
    * extended hold in a window that claims long-press, and on a window's
@@ -1574,7 +1618,7 @@ class Shell {
     const hasOverlay = !this.stack.isAtBase();
     if (foreground.closeable && !hasOverlay) {
       items.push({
-        label: "Close window",
+        label: "Close app",
         onSelect: (ctx) => {
           // Pop the menu first (its onRemoved returns focus to the sidebar),
           // then close the window the menu was opened over.
@@ -1583,7 +1627,7 @@ class Shell {
         },
       });
     }
-    // Close window sits first but the menu opens on Focus app switcher, so a
+    // Close app sits first but the menu opens on Focus app switcher, so a
     // reflexive tap never closes the window.
     const initialSelection = items.length;
     items.push(

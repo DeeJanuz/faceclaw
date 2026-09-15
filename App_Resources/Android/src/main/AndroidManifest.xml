@@ -56,6 +56,9 @@
 	     from battery optimization; this lets us show the system exemption dialog
 	     instead of sending users hunting through Settings. -->
 	<uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
+	<!-- Enables the user-consented Companion Device Manager flow. This does not
+	     grant notification access or create a Bluetooth connection by itself. -->
+	<uses-feature android:name="android.software.companion_device_setup" android:required="false"/>
 
 	<!-- usesCleartextTraffic: the g2mirror terminal-mirroring protocol runs
 	     plain ws:// over tailscale (transport security is the network's job),

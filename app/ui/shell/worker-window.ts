@@ -6,6 +6,7 @@ import { toolRegistry, type ToolResult, type ToolSpec } from "../../assistant/to
 import { appViewportSize, type WindowHeightMode } from "./geometry";
 import * as frameTimings from "../../native/frame-timings";
 import { shell, type ShellWindow } from "./shell";
+import { effectiveExtension } from "../extension-settings";
 
 /**
  * Messages between the shell (main thread) and an app worker. One worker
@@ -221,7 +222,20 @@ export class WorkerAppHost {
           const send = (event: unknown) => this.post({ type: "input", windowId: message.windowId, frameId: 0, focused: shell.isWindowFocused(message.windowId), event });
           const opened = shell.canShowExtensionOverlay() && extensionPlatform()?.openMenu(message.windowId, message.title, message.items.map((item, index) => ({
             ...item, onSelect: () => { selected = true; send({ type: "app-menu-selection", menuId: message.menuId, index, timestampMs: Date.now() }); },
-          })), () => { setTimeout(() => { if (!selected) send({ type: "app-menu-closed", menuId: message.menuId, timestampMs: Date.now() }); }, 0); });
+          })), () => {
+            setTimeout(() => {
+              if (selected) return;
+              // A provider revocation closes its surface through the same
+              // callback as an ordinary dismissal. Preserve the worker's
+              // local menu in that case so navigation still has a usable
+              // host fallback.
+              send({
+                type: effectiveExtension("ui.app-menu") ? "app-menu-closed" : "app-menu-fallback",
+                menuId: message.menuId,
+                timestampMs: Date.now(),
+              });
+            }, 0);
+          });
           if (!opened) send({ type: "app-menu-fallback", menuId: message.menuId, timestampMs: Date.now() });
           break;
         }

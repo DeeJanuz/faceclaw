@@ -14,6 +14,7 @@ import {
 } from "../g2/android-permissions";
 import { isIgnoringBatteryOptimizations, requestIgnoreBatteryOptimizations } from "../native/battery-optimization";
 import { isNotificationListenerEnabled, requestNotificationListenerAccess } from "../native/notification-access";
+import { hasCompanionTrust, isCompanionTrustSupported, removeCompanionTrust, requestCompanionTrust } from "../native/companion-trust";
 
 type PermissionDefinition = {
   id: string;
@@ -62,6 +63,14 @@ const PERMISSIONS: PermissionDefinition[] = [
     optional: true,
     isGranted: isNotificationListenerEnabled,
     request: requestNotificationListenerAccess,
+  },
+  {
+    id: "trusted-glasses",
+    title: "Trusted Glasses Association",
+    description: "Optional Android device association that may allow sensitive message text to reach Faceclaw. Android shows the device chooser and asks you to approve it.",
+    optional: true,
+    isGranted: () => isCompanionTrustSupported() && hasCompanionTrust(),
+    request: requestCompanionTrust,
   },
   {
     id: "microphone",
@@ -181,7 +190,20 @@ export class PermissionsViewModel extends Observable {
     const item = (args.object as View).bindingContext as PermissionCardItem | undefined;
     if (!item || this.requesting) return;
     const definition = PERMISSIONS.find((permission) => permission.id === item.id);
-    if (!definition || definition.isGranted()) return;
+    if (!definition) return;
+    if (definition.id === "trusted-glasses" && definition.isGranted()) {
+      void Dialogs.confirm({
+        title: "Remove trusted glasses?",
+        message: "This removes Faceclaw's Android companion association. It does not unpair or forget your glasses.",
+        okButtonText: "Remove",
+        cancelButtonText: "Keep",
+      }).then((remove) => {
+        if (remove) removeCompanionTrust();
+        this.refresh();
+      });
+      return;
+    }
+    if (definition.isGranted()) return;
     void this.requestPermission(definition);
   };
 

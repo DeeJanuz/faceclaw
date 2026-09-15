@@ -10,6 +10,7 @@ import { windowIcon } from "./chrome-layer";
 import { type IconName } from "../../graphics/icons";
 import { appViewportSize, type WindowHeightMode } from "./geometry";
 import { shell, type ShellWindow } from "./shell";
+import { effectiveExtension } from "../extension-settings";
 
 /**
  * A window whose app logic runs on the main thread (launcher, settings):
@@ -32,8 +33,9 @@ export type InProcessWindowOptions = {
   heightMode?: WindowHeightMode;
   /**
    * The window's tap-then-hold context menu: app-specific entries only (the
-   * shared Focus app switcher / Voice input / Close window entries live in
-   * the shell's system menu, on long-press). Called at open time, so the
+   * shared Focus app switcher / Voice input / Close app entries live in
+   * the shell's system menu, on long-press). Close app is host-owned and is
+   * added for closeable windows. Called at open time, so the
    * items can reflect current app state. Omitted or empty means the window
    * has no menu of its own, and tap-then-hold opens the system menu instead.
    */
@@ -107,7 +109,7 @@ export function createInProcessWindow(options: InProcessWindowOptions): InProces
 
   async function render(frameId: number): Promise<void> {
     if (closed) {
-      // The surface is gone (e.g. Close window picked from this window's own
+      // The surface is gone (e.g. Close app picked from this window's own
       // menu); dropping the frame beats submitting to a removed surface.
       frameTimings.finishFrame(frameId, "discarded: window closed");
       return;
@@ -136,14 +138,32 @@ export function createInProcessWindow(options: InProcessWindowOptions): InProces
   // system menu when it has none (so both gestures land on the same menu).
   const openWindowMenu = () => {
     if (stack.topMatches((layer) => layer instanceof WindowMenuLayer)) return;
-    const items = appActionItems(appMenuItems(), () => shell.sleepAtAppRoot(), () => shell.openSystemMenu(options.windowId));
+    const items = appActionItems(
+      appMenuItems(),
+      () => shell.sleepAtAppRoot(),
+      () => shell.openSystemMenu(options.windowId),
+      options.closeable ? () => shell.closeWindow(options.windowId) : undefined,
+    );
     if (!items.length) {
       shell.openSystemMenu(options.windowId);
       return;
     }
     const menu = new WindowMenuLayer(options.title, items);
     stack.push(menu);
-    presentAppMenu(options.windowId, options.title, items, menu, { stack, actions: { ...options.actions, requestRender } }, () => stack.removeLayer(menu));
+    presentAppMenu(options.windowId, options.title, items, menu, { stack, actions: { ...options.actions, requestRender } }, () => {
+      // Provider refresh publishes its new effective snapshot after it closes
+      // the old surface. Check on the microtask boundary so revocation keeps
+      // the host menu as a usable fallback instead of removing it as if the
+      // user dismissed it normally.
+      void Promise.resolve().then(() => {
+        if (!effectiveExtension("ui.app-menu")) {
+          requestRender();
+          return;
+        }
+        stack.removeLayer(menu);
+        requestRender();
+      });
+    });
   };
 
   const window: ShellWindow = {
@@ -156,7 +176,7 @@ export function createInProcessWindow(options: InProcessWindowOptions): InProces
     // directional or falls back to click / double-click.
     acceptsDirectional: true,
     heightMode,
-    hasAppMenu: () => hasSharedAppActions() || appMenuItems().length > 0,
+    hasAppMenu: () => hasSharedAppActions(options.closeable) || appMenuItems().length > 0,
     close: () => {
       closed = true;
       // Fire onRemoved for any pushed layers so they release resources (e.g. a

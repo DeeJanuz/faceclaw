@@ -13,11 +13,16 @@ export class ExtensionLayer implements Layer {
   constructor(
     private readonly input: (event: InputEvent) => void,
     private readonly resized: (width: number, height: number) => void,
-    private readonly closed: () => void,
+    private readonly closed: (presentationId?: string) => void,
     private readonly heightMode: WindowHeightMode = "min",
     opaque = true,
     public alignTop = false,
   ) { this.opaque = opaque; }
+  private presentationId: string | undefined;
+  /** Bind lifecycle cleanup to the logical presentation using this layer. */
+  setPresentationId(presentationId: string | undefined): void {
+    this.presentationId = presentationId && /^[A-Za-z0-9_.:-]{1,128}$/.test(presentationId) ? presentationId : undefined;
+  }
   private size = "";
   setFrame(pixels: Uint8Array, width: number, height: number): void {
     const frame = new GrayImage(width, height, 0);
@@ -37,5 +42,5 @@ export class ExtensionLayer implements Layer {
     return image;
   }
   handleInput(event: InputEvent): void { this.input(event); }
-  onRemoved(): void { this.frame = undefined; this.closed(); }
+  onRemoved(): void { const presentationId = this.presentationId; this.frame = undefined; this.closed(presentationId); }
 }

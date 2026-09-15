@@ -38,6 +38,10 @@ public abstract class FaceclawAppService extends Service {
    boolean changed=!open||generation!=next;
    open=true;generation=next;
    if(changed)resetSentState();
+   // A newly observed window is the first lifecycle point at which the host
+   // accepts these legacy controls. Reconcile here so snapshot and control
+   // paths converge even when the caller does not make a second replay call.
+   replay();
   }
 
   synchronized void observeClose(){

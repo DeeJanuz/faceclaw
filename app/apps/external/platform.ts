@@ -23,7 +23,8 @@ export function prioritizeExtension(feature: string, component: string): boolean
 
 
 type Raster = { width: number; height: number; pixels: Uint8Array };
-type WindowState = { window: ShellWindow; ready: boolean; serial: number; visible: boolean; frame: Raster | null; rendering: boolean; target: string; lastInput: number; cancelReview?: () => void; reviewId?: string; reviewPurpose?: "message" | "search" | "capture"; protected?: boolean; menuAvailable?: boolean; finishCapture?: () => void; completedCapture?: { text: string; at: number }; refinement?: { id: string; cancel: () => void } };
+type LocalWindowPolicy = { preferredHeightMode: WindowHeightMode; preferredWidthMode: "display"; chrome: "host" | "compact"; menuAvailable: boolean; back: "app-then-host" | "host-only"; gestureClaims: string[] };
+type WindowState = { contractCapture?: { id: string; expires: number; timer?: ReturnType<typeof setTimeout> }; policy?: LocalWindowPolicy; claimsActive?: boolean; backPending?: { expires: number; timer: ReturnType<typeof setTimeout> }; window: ShellWindow; ready: boolean; serial: number; visible: boolean; frame: Raster | null; rendering: boolean; target: string; lastInput: number; cancelReview?: () => void; reviewId?: string; reviewPurpose?: "message" | "search" | "capture"; protected?: boolean; menuAvailable?: boolean; finishCapture?: () => void; completedCapture?: { text: string; at: number }; refinement?: { id: string; cancel: () => void } };
 export type ExternalPlatformOptions = {
   extensions?: ExtensionHooks;
   configureSurface: (id: string, visible: boolean, mode: WindowHeightMode) => Promise<void>;
@@ -39,11 +40,12 @@ export class ExternalAppPlatform {
   private readonly windows = new Map<string, WindowState>();
   private readonly listener: any;
   readonly extensions: ExtensionPlatform;
+  private readonly captureHistory = new Map<string, Map<string, { body: string; at: number; result?: any }>>();
   private readonly hostStateSnapshots = new Map<string, string>();
   constructor(private readonly options: ExternalPlatformOptions) {
     this.extensions = new ExtensionPlatform(this.native, { ...options.extensions, openAssistant: async (component, current) => {
       if (!current()) return false;
-      await this.open(component);
+      await this.open(component, "", current);
       const state = this.windows.get(component);
       if (!current() || !state?.ready || !state.visible) return false;
       state.lastInput = Date.now();
@@ -78,7 +80,19 @@ export class ExternalAppPlatform {
       if (!this.options.isLocked()) for (const app of installedExternalApps()) if (app.connected) this.publishHostState(app.component);
     }, 1000);
   }
-  private send(component: string, type: string, data: unknown = {}): void { this.native?.send(component, type, JSON.stringify(data)); }
+  private send(component: string, type: string, data: any = {}): void {
+    const state = this.windows.get(component), capture = state?.contractCapture;
+    if (capture && data.requestId === capture.id && type.startsWith("capture-dictation-")) {
+      const next: any = { ...data, captureId: capture.id }; delete next.requestId;
+      if (type === "capture-dictation-closed") {
+        next.status = data.reason === "complete" ? "complete" : data.reason === "capture-unavailable" ? "rejected" : "cancelled";
+        type = "capture-status"; clearTimeout(capture.timer); state!.contractCapture = undefined;
+      } else type = type === "capture-dictation-transcript" ? "capture-transcript" : "capture-status";
+      const history = this.captureHistory.get(component)?.get(capture.id); if (history && type === "capture-status") history.result = next;
+      this.native?.send(component, type, JSON.stringify(next)); return;
+    }
+    this.native?.send(component, type, JSON.stringify(data));
+  }
   private publishHostState(component: string): void {
     const data = this.extensions.ownHostState(component), serialized = JSON.stringify(data);
     if (serialized === this.hostStateSnapshots.get(component)) return;
@@ -87,10 +101,12 @@ export class ExternalAppPlatform {
   }
   private granted(component: string, capability: string): boolean { return Boolean(this.native?.allows(component, capability)); }
   private heightMode(component: string): WindowHeightMode {
+    const local = this.windows.get(component)?.policy; if (local) return local.preferredHeightMode;
     const layout = this.extensions.feature("ui.window-layout");
     return layout?.component === component && ["min", "medium", "max"].includes(String(layout.configuration.ownHeightMode)) ? layout.configuration.ownHeightMode as WindowHeightMode : "min";
   }
-  async open(component: string, target = ""): Promise<void> {
+  async open(component: string, target = "", current: () => boolean = () => true): Promise<void> {
+    if (!current()) return;
     const app = installedExternalApps().find((item) => item.component === component);
     if (!app?.connected) { showExternalAppSettings(); return; }
     const previous = this.windows.get(component);
@@ -105,8 +121,16 @@ export class ExternalAppPlatform {
       appId: id, windowId: id, title: app.name, surfaceId, closeable: true, heightMode, drawIcon: windowIcon("package", app.name.slice(0, 1)),
       close: () => { state.ready = false; state.frame = null; this.cancelOwnedWork(state); this.hostStateSnapshots.delete(component); this.send(component, "close"); this.windows.delete(component); this.options.removeSurface(surfaceId); },
       hasAppMenu: () => state.menuAvailable === true,
+      claimsLongPress: () => state.claimsActive === true && state.policy?.gestureClaims.includes("long-press") === true,
       handleInput: (event, frameId) => {
         if (state.visible) this.extensions.windowInput(component, event);
+        if (state.policy && event.type === "double-click") {
+          if (state.backPending) { frameTimings.finishFrame(frameId, "back pending"); return; }
+          if (state.policy.back === "host-only") { shell.returnFromAppRoot(); frameTimings.finishFrame(frameId, "host root back"); return; }
+          const pending = { expires: Date.now() + 500, timer: null! as ReturnType<typeof setTimeout> };
+          state.backPending = pending;
+          pending.timer = setTimeout(() => { if (state.backPending !== pending) return; state.backPending = undefined; if (state.ready && state.visible && !this.options.isLocked() && shell.isScreenOn() && !state.protected && !state.reviewId && !state.refinement) shell.returnFromAppRoot(); }, 500);
+        }
         if (event.type === "short-then-long-press") {
           if (!state.menuAvailable) {
             shell.openSystemMenu(id);
@@ -129,6 +153,7 @@ export class ExternalAppPlatform {
     state.window = window; this.windows.set(component, state); shell.registerWindow(window);
     await this.options.configureSurface(surfaceId, false, heightMode);
     if (this.windows.get(component) !== state) return;
+    if (!current()) { shell.closeWindow(id); return; }
     state.ready = true; this.send(component, "open", { ...appViewportSize(heightMode), target }); shell.focusWindow(id); this.options.requestRender();
   }
   lockChanged(): void {
@@ -156,7 +181,24 @@ export class ExternalAppPlatform {
       return;
     }
     const state = this.windows.get(component);
+    if (type === "contract-invalidated") { if (state) { this.cancelOwnedWork(state); state.policy = undefined; state.window.compactChrome = false; } return; }
+    if (type === "capture-start") {
+      const id = data.captureId, body = JSON.stringify(data);
+      let history = this.captureHistory.get(component); if (!history) { history = new Map(); this.captureHistory.set(component, history); }
+      for (const [key, value] of history) if (Date.now() - value.at >= 300000 && state?.contractCapture?.id !== key) history.delete(key);
+      const old = history.get(id);
+      if (old) { if (old.body === body && old.result) this.send(component, "capture-status", old.result); return; }
+      if (!state || state.contractCapture || history.size >= 64) { this.send(component, "capture-status", { captureId: id, status: "rejected", reason: "busy" }); return; }
+      history.set(id, { body, at: Date.now() });
+      const capture = { id, expires: Number(data.expiresAtElapsedMs), timer: undefined as ReturnType<typeof setTimeout> | undefined }; state.contractCapture = capture;
+      this.startCapture(component, { requestId: id, label: data.label }, state);
+      if (state.contractCapture === capture) capture.timer = setTimeout(() => { if (state.contractCapture === capture) state.cancelReview?.(); }, Math.max(0, Math.min(300000, capture.expires - Number(android.os.SystemClock.elapsedRealtime()))));
+      return;
+    }
+    if (type === "capture-finish" || type === "capture-cancel") { if (state?.contractCapture?.id === data.captureId) { if (type === "capture-finish") state.finishCapture?.(); else state.cancelReview?.(); } return; }
+    if (type === "contract-control") { void this.applyContractControl(component, data); return; }
     if (type === "recovering") {
+      this.captureHistory.delete(component);
       if (state) { state.ready = false; state.frame = null; this.cancelOwnedWork(state); }
       this.options.requestRender(); return;
     }
@@ -166,7 +208,7 @@ export class ExternalAppPlatform {
       this.send(component, "open", { ...size, target: state.target });
       this.send(component, "visibility", { visible: state.visible, screenOn: shell.isScreenOn() && !this.options.isLocked() });
     }
-    if (type === "disconnected") { if (state) this.cancelOwnedWork(state); if (state) shell.closeWindow(state.window.windowId); clearExternalNotifications(component); }
+    if (type === "disconnected") { this.captureHistory.delete(component); if (state) this.cancelOwnedWork(state); if (state) shell.closeWindow(state.window.windowId); clearExternalNotifications(component); }
     if (["connected", "disconnected", "changed", "grants-changed"].includes(type)) {
       if (type === "grants-changed") { if (state) this.cancelOwnedWork(state); clearExternalNotifications(component); }
       setSuppressedNotificationPackages(JSON.parse(String(this.native.suppressedPackagesJson())));
@@ -225,8 +267,68 @@ export class ExternalAppPlatform {
       sent = true; this.send(component, "dictation-result", { requestId, target, text, confirmed: true });
     }, () => { if (state.reviewId === requestId && state.reviewPurpose === "message") { state.cancelReview = undefined; state.reviewId = undefined; state.reviewPurpose = undefined; } });
   }
+  private async applyContractControl(component: string, request: any): Promise<void> {
+    const current = () => Boolean(this.native?.isContractRequestCurrent(component, request.session, request.requestId));
+    const finish = (state: string, reason = "") => this.native?.completeContractControl(component, request.session, request.requestId, state, reason);
+    const state = this.windows.get(component), op = request.operation, payload = request.payload;
+    const visible = () => !!state?.ready && this.windows.get(component) === state && state.visible && shell.foregroundWindow()?.windowId === state.window.windowId && !this.options.isLocked() && shell.isScreenOn();
+    const protectedFlow = () => [...this.windows.values()].some(item => item.visible && (item.protected || item.reviewId || item.refinement));
+    if (!current()) return;
+    if (this.options.isLocked()) { finish("rejected", "locked"); return; }
+    if (op === "window.open") {
+      const allowed = () => current() && !this.options.isLocked() && shell.isScreenOn() && shell.canShowExtensionOverlay() && !protectedFlow();
+      if (!allowed()) { finish("rejected", "protected_flow"); return; }
+      try { await this.open(component, payload.target, allowed); finish(allowed() && this.windows.get(component)?.ready ? "applied" : "unknown", allowed() ? "" : "invalid_state"); }
+      catch { finish("unknown", "internal_error"); }
+      return;
+    }
+    if (op === "capture.cancel") {
+      if (state?.contractCapture?.id !== payload.captureId) { finish("rejected", "invalid_state"); return; }
+      state.cancelReview?.(); finish("applied"); return;
+    }
+    if (!visible()) { finish("rejected", "not_visible"); return; }
+    if (op === "window.menu") { state!.menuAvailable = payload.available; finish("applied"); return; }
+    if (op === "window.protection") { state!.protected = payload.protected; finish("applied"); return; }
+    if (op === "window.policy") {
+      if (state!.reviewId || state!.refinement || state!.protected) { finish("rejected", "protected_flow"); return; }
+      const prior = state!.policy; state!.policy = payload;
+      try {
+        if (state!.window.heightMode !== payload.preferredHeightMode) {
+          await this.options.configureSurface(state!.window.surfaceId, true, payload.preferredHeightMode);
+          if (!current() || !visible()) { state!.policy = prior; finish("unknown", "invalid_state"); return; }
+          state!.window.heightMode = payload.preferredHeightMode;
+          this.send(component, "resize", appViewportSize(payload.preferredHeightMode));
+        }
+        state!.menuAvailable = payload.menuAvailable; state!.window.compactChrome = payload.chrome === "compact";
+        state!.claimsActive = true; state!.window.acceptsDirectional = payload.gestureClaims.includes("directional");
+        this.options.requestRender(); finish("applied");
+      } catch { state!.policy = prior; finish("unknown", "internal_error"); }
+      return;
+    }
+    if (op === "window.back") {
+      const pending = state!.backPending;
+      if (!pending || Date.now() > pending.expires) { finish("rejected", "expired"); return; }
+      clearTimeout(pending.timer); state!.backPending = undefined;
+      if (payload.response === "at-root") {
+        if (protectedFlow()) { finish("rejected", "protected_flow"); return; }
+        shell.returnFromAppRoot();
+      }
+      finish("applied"); return;
+    }
+    if (op === "window.sleep" || op === "window.system-menu") {
+      const age = Date.now() - state!.lastInput;
+      if (protectedFlow() || !shell.canShowExtensionOverlay()) { finish("rejected", "protected_flow"); return; }
+      if (state!.lastInput <= 0 || age < 0 || age > 5000) { finish("rejected", "not_granted"); return; }
+      state!.lastInput = 0;
+      if (op === "window.sleep") shell.sleepAtAppRoot(); else shell.openSystemMenu(state!.window.windowId);
+      finish("applied"); return;
+    }
+    finish("rejected", "unsupported");
+  }
   private cancelOwnedWork(state: WindowState): void {
-    for (const [component, current] of this.windows) if (current === state) this.extensions.clearOwnNotifications(component);
+    for (const [component, current] of this.windows) if (current === state) { this.extensions.clearOwnNotifications(component); if (state.claimsActive) this.send(component, "input-cancel", { reason: "lifecycle" }); }
+    state.claimsActive = false; state.window.acceptsDirectional = false; state.protected = false;
+    if (state.backPending) clearTimeout(state.backPending.timer); state.backPending = undefined;
     state.completedCapture = undefined; state.lastInput = 0;
     state.cancelReview?.(); state.refinement?.cancel();
   }
@@ -263,12 +365,13 @@ export class ExternalAppPlatform {
     if (data.ownTranscription === true && !this.native.isExtensionGranted(component, "transcription")) { reject("transcription-permission-required"); return; }
     state.completedCapture = undefined;
     state.lastInput = 0; state.reviewId = requestId; state.reviewPurpose = "capture";
-    let finalText: string | undefined;
-    const available = () => this.windows.get(component) === state && state.ready && state.visible && !this.options.isLocked() && shell.isScreenOn() && this.granted(component, "dictation") && state.reviewId === requestId && (data.ownTranscription !== true || this.native.isExtensionGranted(component, "transcription"));
+    let finalText: string | undefined; const contractCapture = state.contractCapture;
+    const available = () => (!contractCapture || state.contractCapture === contractCapture) && this.windows.get(component) === state && state.ready && state.visible && !this.options.isLocked() && shell.isScreenOn() && this.granted(component, "dictation") && state.reviewId === requestId && (data.ownTranscription !== true || this.native.isExtensionGranted(component, "transcription"));
     const capture = shell.startExternalAppCapture(state.window.windowId,
       event => { if (available()) { if (event.isFinal && typeof event.text === "string" && event.text.length <= 8000) finalText = event.text; this.send(component, "capture-dictation-transcript", { requestId, ...event, purpose: "capture" }); } },
       status => { if (available()) this.send(component, "capture-dictation-status", { requestId, status }); },
       reason => {
+        if (contractCapture && state.contractCapture !== contractCapture) return;
         if (reason === "complete" && finalText !== undefined && available()) state.completedCapture = { text: finalText, at: Date.now() };
         if (state.reviewId === requestId && state.reviewPurpose === "capture") { state.cancelReview = undefined; state.finishCapture = undefined; state.reviewId = undefined; state.reviewPurpose = undefined; }
         reject(reason);

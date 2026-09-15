@@ -14,15 +14,31 @@
           "contractVersion": 1,
           "epoch": 7,
           "features": [
-            { "id": "window.policy", "version": 1, "limits": { "maxPolicyBytes": 4096 } },
-            { "id": "future.feature", "version": 3, "limits": {} }
+            {
+              "id": "window.policy",
+              "version": 1,
+              "limits": {
+                "maxPolicyBytes": 4096
+              }
+            },
+            {
+              "id": "future.feature",
+              "version": 3,
+              "limits": {}
+            }
           ]
         }
       },
       "state": "VALID",
       "supports": [
-        { "id": "window.policy", "minimumVersion": 1 },
-        { "id": "future.feature", "minimumVersion": 3 }
+        {
+          "id": "window.policy",
+          "minimumVersion": 1
+        },
+        {
+          "id": "future.feature",
+          "minimumVersion": 3
+        }
       ]
     },
     {
@@ -32,8 +48,16 @@
           "contractVersion": 1,
           "epoch": 8,
           "features": [
-            { "id": "window.policy", "version": 1, "limits": {} },
-            { "id": "window.policy", "version": 1, "limits": {} }
+            {
+              "id": "window.policy",
+              "version": 1,
+              "limits": {}
+            },
+            {
+              "id": "window.policy",
+              "version": 1,
+              "limits": {}
+            }
           ]
         }
       },
@@ -54,9 +78,93 @@
     }
   ],
   "requestCases": [
-    { "name": "same-id-same-body", "requestId": "r_1", "body": "same", "expected": "idempotent" },
-    { "name": "same-id-different-body", "requestId": "r_1", "body": "different", "expected": "conflict" },
-    { "name": "stale-window", "requestId": "r_2", "windowGeneration": 4, "currentWindowGeneration": 5, "expected": "stale_window" },
-    { "name": "expired", "requestId": "r_3", "expiresAtElapsedMs": 10, "nowElapsedMs": 11, "expected": "expired" }
+    {
+      "name": "same-id-same-body",
+      "requestId": "r_1",
+      "body": "same",
+      "expected": "idempotent",
+      "request": {
+        "requestId": "r_1",
+        "operation": "window.menu",
+        "windowGeneration": 5,
+        "revision": 1,
+        "expiresAtElapsedMs": 1000,
+        "payload": {
+          "available": true
+        }
+      },
+      "nowElapsedMs": 100,
+      "currentWindowGeneration": 5,
+      "seedDuplicate": true
+    },
+    {
+      "name": "same-id-different-body",
+      "requestId": "r_1",
+      "body": "different",
+      "expected": "conflict",
+      "request": {
+        "requestId": "r_1",
+        "operation": "window.menu",
+        "windowGeneration": 5,
+        "revision": 1,
+        "expiresAtElapsedMs": 1000,
+        "payload": {
+          "available": false
+        }
+      },
+      "nowElapsedMs": 100,
+      "currentWindowGeneration": 5,
+      "seedDuplicate": true
+    },
+    {
+      "name": "stale-window",
+      "requestId": "r_2",
+      "windowGeneration": 4,
+      "currentWindowGeneration": 5,
+      "expected": "stale_window",
+      "request": {
+        "requestId": "r_2",
+        "operation": "window.menu",
+        "windowGeneration": 4,
+        "revision": 1,
+        "expiresAtElapsedMs": 1000,
+        "payload": {
+          "available": true
+        }
+      },
+      "nowElapsedMs": 100,
+      "seedDuplicate": false
+    },
+    {
+      "name": "expired",
+      "requestId": "r_3",
+      "expiresAtElapsedMs": 10,
+      "nowElapsedMs": 11,
+      "expected": "expired",
+      "request": {
+        "requestId": "r_3",
+        "operation": "window.menu",
+        "windowGeneration": 5,
+        "revision": 1,
+        "expiresAtElapsedMs": 10,
+        "payload": {
+          "available": true
+        }
+      },
+      "currentWindowGeneration": 5,
+      "seedDuplicate": false
+    }
+  ],
+  "boundaryCases": [
+    {
+      "text": "é🙂",
+      "maxBytes": 17,
+      "valid": true
+    },
+    {
+      "text": "é🙂",
+      "maxBytes": 16,
+      "valid": false
+    }
   ]
 }

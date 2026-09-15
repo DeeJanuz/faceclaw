@@ -1,0 +1,7 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+ <queries><package android:name="com.faceclaw.app"/></queries>
+ <application android:theme="@android:style/Theme.Material.Light.NoActionBar" android:label="Independent counter" android:allowBackup="false">
+  <activity android:name=".CounterActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity>
+  <service android:name=".CounterService" android:exported="true"><intent-filter><action android:name="com.faceclaw.action.APP_SERVICE"/></intent-filter><meta-data android:name="com.faceclaw.PROTOCOL_MAJOR" android:value="2"/></service>
+ </application>
+</manifest>

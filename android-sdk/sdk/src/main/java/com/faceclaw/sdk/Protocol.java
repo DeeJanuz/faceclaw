@@ -4,7 +4,7 @@ import org.json.JSONObject;
 /** Stable SDK 1.0 wire contract. Protocol 2 intentionally rejects prerelease V1 builds. */
 public final class Protocol {
  public static final String ACTION="com.faceclaw.action.APP_SERVICE";
- public static final String SDK_VERSION="1.0.0";
+ public static final String SDK_VERSION="1.1.0-rc.1";
  public static final int VERSION=2;
  public static final int MAX_WIDTH=640, MAX_HEIGHT=480, MAX_JSON=65536;
  public static final int MAX_DAMAGE_RECTS=8, BUFFER_SLOTS=3, FRAME_HEADER_BYTES=64;

@@ -4,3 +4,5 @@ rootProject.name = "faceclaw-android-sdk"
 include(":sdk")
 include(":fixture", ":host-tests")
 include(":priority-demo")
+
+include(":standalone-example")

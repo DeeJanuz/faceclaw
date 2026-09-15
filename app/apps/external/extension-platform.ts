@@ -78,9 +78,10 @@ export class ExtensionPlatform {
   }
   private assistantOpening = false;
   /** A wakeword is a user gesture; only the selected provider may own its UI. */
-  openAssistant(): boolean {
+  openAssistant(entryPoint: "wakeword" | "text-entry" | "app-button" = "wakeword"): boolean {
     const provider = this.feature("assistant");
     if (provider?.configuration.invocation !== "app" || !this.hooks.openAssistant) return false;
+    if (entryPoint !== "wakeword" && !this.native.supportsContract?.(provider.component, "invocation.lifecycle")) return false;
     if (this.assistantOpening || this.isLocked() || this.isProtected()) return true;
     for (const feature of ["ui.launcher", "ui.app-menu", "ui.notifications"]) this.hooks.closeSurface?.(feature, false);
     if (!shell.canShowExtensionOverlay()) return true;
@@ -88,7 +89,10 @@ export class ExtensionPlatform {
       shell.canShowExtensionOverlay() && this.controls(provider.component, "assistant", provider.generation);
     this.assistantOpening = true;
     void this.hooks.openAssistant(provider.component, current).then(opened => {
-      if (opened && current()) this.event(provider.component, "assistant", { event: "invoke" });
+      if (opened && current()) {
+        if (this.native.supportsContract?.(provider.component, "invocation.lifecycle")) this.native.deliverInvocation(provider.component, entryPoint, provider.generation);
+        else if (entryPoint === "wakeword") this.event(provider.component, "assistant", { event: "invoke" });
+      }
     }).catch(() => {}).finally(() => { this.assistantOpening = false; });
     return true;
   }

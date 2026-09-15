@@ -53,6 +53,8 @@ public abstract class FaceclawAppService extends Service {
 
   synchronized void observeDisconnect(){observeClose();}
 
+  synchronized void clearProtection(){desiredProtection=null;sentProtection=null;sentProtectionWhileClosed=null;}
+
   synchronized boolean setMenuAvailable(boolean available){
    desiredMenu=available;
    if(!open){
@@ -138,6 +140,10 @@ public abstract class FaceclawAppService extends Service {
  public final ConnectionState connectionState(){return connectionState;}
  public final JSONObject sharedStyle() { try { return new JSONObject(sharedStyle.toString()); } catch(Exception ignored) { return new JSONObject(); } }
  public final JSONObject extensions() { try { return new JSONObject(extensionSnapshot.toString()); } catch(Exception ignored) { return new JSONObject(); } }
+ /** Explicit compatibility fallback: legacy hosts retain host-owned assistant invocation. */
+ public final boolean publishCompatibleExtensions(JSONArray declarations){
+  try{JSONArray copy=new JSONArray(declarations.toString());if(controls()==null||!controls().supports("invocation.lifecycle"))for(int i=0;i<copy.length();i++){JSONObject d=copy.getJSONObject(i);if(d.optString("feature").equals("assistant")&&d.optJSONObject("configuration")!=null)d.getJSONObject("configuration").remove("invocation");}return publishExtensions(copy);}catch(Exception invalid){return false;}
+ }
  public final boolean publishExtensions(org.json.JSONArray declarations) {
   try { return send("publish-extensions",Protocol.object("declarations",ExtensionContract.declarations(declarations))); } catch(Exception ignored) { return false; }
  }
@@ -203,6 +209,7 @@ public abstract class FaceclawAppService extends Service {
  /** Content-free local SDK failures; application logs must not add pixels or user text. */
  protected void onSdkDiagnostic(SdkDiagnostic diagnostic) {}
  public final FaceclawSession session(){return faceclawSession;}
+ public final AppControls controls(){return faceclawSession==null?null:faceclawSession.controls();}
  private void applyHostSnapshotState(HostSnapshot snapshot){
   HostSnapshotState state=HostSnapshotState.from(snapshot);sharedStyle=state.sharedStyle;extensionSnapshot=state.extensions;messagingAllowed=state.messagingAllowed;notificationReplyAllowed=state.notificationReplyAllowed;
   if(!messagingAllowed)messagingRequests.clear();if(!notificationReplyAllowed)notificationReplies.clear();
@@ -241,8 +248,10 @@ public abstract class FaceclawAppService extends Service {
  private void handleControl(ControlEvent event){
   String type=event.type;JSONObject data=event.data;
   try{
+   if(type.equals("invocation-event")&&(controls()==null||!controls().acceptInvocation(data)))return;
    if(type.equals("open")||type.equals("resize"))windowState.observeOpen(data.optLong("generation"));
    else if(type.equals("close"))windowState.observeClose();
+   else if(type.equals("visibility")&&(!data.optBoolean("visible")||!data.optBoolean("screenOn")))windowState.clearProtection();
    if(type.equals("shared-style")){sharedStyle=ExtensionContract.configuration("ui.typography",data);Ui.applySharedStyle(this,sharedStyle);}
    if(type.equals("extensions"))extensionSnapshot=new JSONObject(data.toString());
    if(type.equals("capabilities")){messagingAllowed=Boolean.TRUE.equals(data.opt("messaging"));if(!messagingAllowed)messagingRequests.clear();notificationReplyAllowed=Boolean.TRUE.equals(data.opt("notifications"))&&Boolean.TRUE.equals(data.opt("dictation"))&&Boolean.TRUE.equals(data.opt("notificationReplies"));if(!notificationReplyAllowed)notificationReplies.clear();}
@@ -269,7 +278,7 @@ public abstract class FaceclawAppService extends Service {
  }
  private void connect(IFaceclawHostSession remote,String identity,String newSession,int uid) throws RemoteException {
   disconnect(new DisconnectInfo(DisconnectInfo.Reason.HOST_STOPPED,true,"Host replaced"),false);host=remote;hostIdentity=identity;wireSession=newSession;hostUid=uid;
-  if(faceclawSession==null)faceclawSession=new FaceclawSession(remote,new FaceclawSession.Callback(){public void onSnapshot(HostSnapshot snapshot){applyHostSnapshotState(snapshot);windowState.observeSnapshot(snapshot!=null&&snapshot.windowOpen,snapshot==null?0:snapshot.windowGeneration);onHostSnapshot(snapshot);windowState.replay();}public void onControl(ControlEvent event){handleControl(event);}public void onInput(RenderSurface surface,FaceclawInputEvent event){FaceclawAppService.this.onInput(surface,event);}public void onCreditWithoutRenderer(RenderSurface surface,RenderCredit credit){long targetMs=System.currentTimeMillis()+Math.max(0,(credit.targetPresentationTimeNanos-SystemClock.elapsedRealtimeNanos())/1_000_000L);onControlEvent(new ControlEvent("render",Protocol.object("surfaceId",surface.id(),"targetPresentationTimeNanos",credit.targetPresentationTimeNanos,"targetPresentationTimeMs",targetMs,"traceId",credit.traceId)));}public void onOutcome(FrameOutcome outcome){onFrameOutcome(outcome);}public void onDiagnostic(SdkDiagnostic diagnostic){onSdkDiagnostic(diagnostic);}});else faceclawSession.attach(remote);
+  if(faceclawSession==null)faceclawSession=new FaceclawSession(remote,new FaceclawSession.Callback(){public void onSnapshot(HostSnapshot snapshot){applyHostSnapshotState(snapshot);windowState.observeSnapshot(snapshot!=null&&snapshot.windowOpen,snapshot==null?0:snapshot.windowGeneration);onHostSnapshot(snapshot);windowState.replay();}public void onControl(ControlEvent event){handleControl(event);}public void onInput(RenderSurface surface,FaceclawInputEvent event){FaceclawAppService.this.onInput(surface,event);}public void onCreditWithoutRenderer(RenderSurface surface,RenderCredit credit){long targetMs=System.currentTimeMillis()+Math.max(0,(credit.targetPresentationTimeNanos-SystemClock.elapsedRealtimeNanos())/1_000_000L);onControlEvent(new ControlEvent("render",Protocol.object("surfaceId",surface.id(),"targetPresentationTimeNanos",credit.targetPresentationTimeNanos,"targetPresentationTimeMs",targetMs,"traceId",credit.traceId)));}public void onOutcome(FrameOutcome outcome){onFrameOutcome(outcome);}public void onDiagnostic(SdkDiagnostic diagnostic){onSdkDiagnostic(diagnostic);}public void onTransportLost(IFaceclawHostSession failedHost){if(host==failedHost)disconnect(new DisconnectInfo(DisconnectInfo.Reason.BINDER_DIED,true,"Host transport failed"),false);}});else faceclawSession.attach(remote);
   final String connectedSession=wireSession;death=()->handler.post(()->{if(wireSession.equals(connectedSession))disconnect(new DisconnectInfo(DisconnectInfo.Reason.BINDER_DIED,true,"Host binder died"),false);});remote.asBinder().linkToDeath(death,0);
   remote.onReady(new SessionHello(Protocol.VERSION,Protocol.SDK_VERSION,wireSession),appSession(connectedSession,faceclawSession));connectionState=ConnectionState.READY;onSessionReady(faceclawSession);
  }

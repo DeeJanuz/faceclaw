@@ -8,8 +8,8 @@ final class HostSnapshotState {
  final boolean messagingAllowed,notificationReplyAllowed;
  private HostSnapshotState(JSONObject grants,JSONObject sharedStyle,JSONObject extensions,JSONObject capabilities){
   this.grants=copy(grants);this.sharedStyle=copy(sharedStyle);this.extensions=copy(extensions);this.capabilities=copy(capabilities);
-  messagingAllowed=this.grants.optBoolean("messaging",false);
-  notificationReplyAllowed=this.grants.optBoolean("notifications",false)&&this.grants.optBoolean("dictation",false)&&this.capabilities.optBoolean("notificationReplies",false);
+  messagingAllowed=Boolean.TRUE.equals(this.grants.opt("messaging"));
+  notificationReplyAllowed=Boolean.TRUE.equals(this.grants.opt("notifications"))&&Boolean.TRUE.equals(this.grants.opt("dictation"))&&Boolean.TRUE.equals(this.capabilities.opt("notificationReplies"));
  }
  static HostSnapshotState from(HostSnapshot snapshot){return snapshot==null?from(new JSONObject(),new JSONObject(),new JSONObject(),new JSONObject()):from(snapshot.grants,snapshot.sharedStyle,snapshot.extensions,snapshot.capabilities);}
  static HostSnapshotState from(JSONObject grants,JSONObject sharedStyle,JSONObject extensions,JSONObject capabilities){return new HostSnapshotState(grants,sharedStyle,extensions,capabilities);}

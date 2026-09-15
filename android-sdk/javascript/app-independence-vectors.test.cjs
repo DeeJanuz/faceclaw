@@ -19,3 +19,7 @@ test('shared app-independence vectors have bounded catalog and request cases', (
     assert.ok(['idempotent', 'conflict', 'stale_window', 'expired'].includes(request.expected));
   }
 });
+
+test('shared UTF-8 exact and over-limit fixtures measure encoded bytes', () => {
+  for (const vector of vectors.boundaryCases) assert.equal(Buffer.byteLength(JSON.stringify({text:vector.text}), 'utf8') <= vector.maxBytes, vector.valid);
+});

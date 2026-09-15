@@ -18,6 +18,7 @@ public final class RenderSurface implements AutoCloseable {
  private int width,height;
  private long generation,nextSequence=1,writeEpoch=2;
  private boolean visible,screenOn=true,closed,poolDeferred,sceneReplayPending;
+ private final RenderFailureGate renderGate=new RenderFailureGate();
  private Executor executor;
  private RasterRenderer rasterRenderer;
  private CanvasRenderer canvasRenderer;
@@ -54,11 +55,15 @@ public final class RenderSurface implements AutoCloseable {
   synchronized(this){executor=Objects.requireNonNull(nextExecutor);canvasRenderer=Objects.requireNonNull(renderer);rasterRenderer=null;}
   dispatchIfReady();
  }
+ synchronized boolean hasWriters(){for(Slot slot:slots)if(slot.busy)return true;return !retiredSlots.isEmpty();}
  synchronized boolean hasRenderer(){return rasterRenderer!=null||canvasRenderer!=null;}
 
+ /** Explicit recovery after a renderer/executor failure. */
+ public void recoverRenderer(){renderGate.recover();invalidate(InvalidateReason.RECOVERY);}
+ public boolean rendererSuspended(){return renderGate.suspended();}
  public void invalidate(InvalidateReason reason){
   InvalidateReason next;
-  synchronized(this){if(closed)return;pendingReason=reason==null?InvalidateReason.STATE:reason;next=pendingReason;}
+  synchronized(this){if(closed||renderGate.suspended())return;pendingReason=reason==null?InvalidateReason.STATE:reason;next=pendingReason;}
   session.requestRender(this,next);
  }
  public void resetContent(ContentMode mode){
@@ -115,12 +120,12 @@ public final class RenderSurface implements AutoCloseable {
   final FrameLease lease;
   final RenderRequest request;
   synchronized(this){
-   if(credit==null||executor==null||(rasterRenderer==null&&canvasRenderer==null)||!visible())return;
+   if(renderGate.suspended()||credit==null||executor==null||(rasterRenderer==null&&canvasRenderer==null)||!visible())return;
    lease=leaseLocked();if(lease==null)return;
    target=executor;raster=rasterRenderer;canvas=canvasRenderer;request=new RenderRequest(this,lease.credit,pendingReason);
   }
-  try{target.execute(()->{try{if(raster!=null)raster.render(lease,request);else renderCanvas(canvas,lease,request);}catch(Exception ignored){lease.close();session.reportDiagnostic(SdkDiagnostic.Category.RENDERER_FAILURE,"render",this,lease.generation,true);invalidate(InvalidateReason.STATE);}});}
-  catch(Exception rejected){lease.close();session.reportDiagnostic(SdkDiagnostic.Category.EXECUTOR_REJECTED,"render",this,lease.generation,true);invalidate(InvalidateReason.STATE);}
+  renderGate.dispatch(target,()->{if(raster!=null)raster.render(lease,request);else renderCanvas(canvas,lease,request);},lease::close,
+   rejected->session.reportDiagnostic(rejected?SdkDiagnostic.Category.EXECUTOR_REJECTED:SdkDiagnostic.Category.RENDERER_FAILURE,"render",this,lease.generation,true));
  }
  private void renderCanvas(CanvasRenderer renderer,FrameLease lease,RenderRequest request)throws Exception{
   synchronized(canvasLock){

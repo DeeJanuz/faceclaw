@@ -111,6 +111,7 @@ public final class FaceclawExternalApps {
   Connection c=connections.get(component); if(c==null||!c.ready||!approved(c.service)) return;
   try {
    JSONObject data=new JSONObject(json);
+   if(type.equals("host-state")){c.hostState=new JSONObject(data.toString());c.hostState.put("available",true);}
    String inputTrace="";if(type.equals("input")){inputTrace=data.optString("traceId");if(inputTrace.isEmpty()){inputTrace=UUID.randomUUID().toString();data.put("traceId",inputTrace);}}
    if(type.equals("messaging-request")&&!allows(component,"messaging")) return;
    if(type.equals("capability-request")) {
@@ -129,11 +130,13 @@ public final class FaceclawExternalApps {
    }
    if(type.equals("close")) { c.open=false; c.visible=false; c.generation++; c.windowSurface().setState(false,false,c.generation);c.restorationToken=null;restorationTokens.remove(component); }
    if(type.equals("visibility")) { c.visible=data.optBoolean("visible"); c.screenOn=data.optBoolean("screenOn"); c.windowSurface().setState(c.visible,c.screenOn,c.generation); }
+   if(type.equals("close")||type.equals("resize"))c.enqueueRender(128,()->sweepResources(c));
    if(type.equals("input"))c.sendInput("window",new FaceclawInputEvent(data));else c.sendControl(type,data);
    if(type.equals("render")||type.equals("input")||type.equals("open")||type.equals("resize")||(type.equals("visibility")&&c.visible&&c.screenOn))scheduleCredit(c,c.windowSurface(),type.equals("input")?DisplayScheduler.Priority.DIRECT_INPUT:DisplayScheduler.Priority.FOCUSED_ANIMATION,inputTrace);
   } catch(Exception e) { disconnect(component,true); }
  }
  private void publishCapabilities(String component) {
+  Connection current=connections.get(component);if(current!=null)invalidateContract(current);
   send(component,"capabilities",Protocol.object("notifications",allows(component,"notifications"),"dictation",allows(component,"dictation"),"previews",allows(component,"previews"),"maxWidth",Protocol.MAX_WIDTH,"maxHeight",Protocol.MAX_HEIGHT,"maxText",8000,"maxNotificationText",4096,"notificationReplies",true,"searchDictation",true,"extensions",ExtensionContract.VERSION,"windowMenus",true,"messaging",allows(component,"messaging")).toString());
  }
  private void disconnect(String component,boolean retry) {
@@ -229,8 +232,12 @@ public final class FaceclawExternalApps {
   complete(c,surface.id,clientFrameId,contentVersion,FrameOutcome.Status.HIDDEN,trace,"No display transport",metadataDropped);
  }
  private static final class TranslatedDraws{final byte[] bytes;final boolean dropped;TranslatedDraws(byte[] bytes,boolean dropped){this.bytes=bytes;this.dropped=dropped;}}
- private TranslatedDraws translateDraws(Connection c,byte[] wire){if(wire==null||wire.length==0)return new TranslatedDraws(null,false);if(wire.length>Protocol.MAX_COMMAND_BYTES||wire.length%DrawBatch.RECORD_BYTES!=0)return new TranslatedDraws(null,true);ByteBuffer in=ByteBuffer.wrap(wire).order(java.nio.ByteOrder.LITTLE_ENDIAN),out=ByteBuffer.allocate((wire.length/DrawBatch.RECORD_BYTES)*12).order(java.nio.ByteOrder.LITTLE_ENDIAN);boolean dropped=false;while(in.remaining()>=DrawBatch.RECORD_BYTES){int kind=in.get()&255,id=in.getInt(),x=in.getShort(),y=in.getShort(),brightness=in.get()&255,reserved=in.getInt();HostResource resource=c.resources.get(id);if(resource==null||kind!=("GLYPH".equals(resource.type)?1:0)||reserved!=0){dropped=true;continue;}if("GLYPH".equals(resource.type))out.put((byte)0).putShort((short)resource.atlasId).putInt(resource.encoding).putShort((short)x).putShort((short)y).put((byte)brightness);else if(brightness==255)out.put((byte)1).putInt(resource.atlasId).putShort((short)x).putShort((short)y);else dropped=true;}return new TranslatedDraws(out.position()==0?null:Arrays.copyOf(out.array(),out.position()),dropped);}
- private void receiveResource(Connection c,ResourceRegistration resource){try{if(resource==null)return;int id=resource.id,width=resource.width,height=resource.height;String type=resource.type,hash=resource.sha256;byte[] pixels=resource.pixels;if(id<=0||id>Protocol.MAX_RESOURCES||!(type.equals("IMAGE")||type.equals("GLYPH"))||pixels==null||pixels.length!=Protocol.frameSize(width,height)||width>255||height>255||!hash.equals(resourceHash(type,width,height,pixels)))return;HostResource existing=c.resources.get(id);if(existing!=null){if(existing.type.equals(type)&&existing.sha256.equals(hash))return;else return;}int total=c.resources.values().stream().mapToInt(value->value.pixels.length).sum();if(c.resources.size()>=Protocol.MAX_RESOURCES||total+pixels.length>Protocol.MAX_RESOURCE_BYTES)return;int encoding=0,atlasId=type.equals("GLYPH")?GlyphAtlas.ensureGray(c.component+":"+hash,encoding,width,height,ByteBuffer.wrap(pixels)):ImageAtlas.ensure(c.component+":"+hash,width,height,ByteBuffer.wrap(pixels));c.resources.put(id,new HostResource(id,type,width,height,hash,pixels.clone(),atlasId,encoding));}catch(Exception ignored){}}
+ private TranslatedDraws translateDraws(Connection c,byte[] wire){if(wire==null||wire.length==0)return new TranslatedDraws(null,false);if(wire.length>Protocol.MAX_COMMAND_BYTES||wire.length%DrawBatch.RECORD_BYTES!=0)return new TranslatedDraws(null,true);ByteBuffer in=ByteBuffer.wrap(wire).order(java.nio.ByteOrder.LITTLE_ENDIAN),out=ByteBuffer.allocate((wire.length/DrawBatch.RECORD_BYTES)*12).order(java.nio.ByteOrder.LITTLE_ENDIAN);boolean dropped=false;while(in.remaining()>=DrawBatch.RECORD_BYTES){int kind=in.get()&255,id=in.getInt(),x=in.getShort(),y=in.getShort(),brightness=in.get()&255,reserved=in.getInt();HostResource resource=c.resources.get(id);if(resource==null||resource.atlasId<0||kind!=("GLYPH".equals(resource.type)?1:0)||reserved!=0){dropped=true;continue;}if("GLYPH".equals(resource.type))out.put((byte)0).putShort((short)resource.atlasId).putInt(resource.encoding).putShort((short)x).putShort((short)y).put((byte)brightness);else if(brightness==255)out.put((byte)1).putInt(resource.atlasId).putShort((short)x).putShort((short)y);else dropped=true;}return new TranslatedDraws(out.position()==0?null:Arrays.copyOf(out.array(),out.position()),dropped);}
+ private void receiveResource(Connection c,ResourceRegistration resource){try{if(resource==null)return;int id=resource.id,width=resource.width,height=resource.height;String type=resource.type,hash=resource.sha256;byte[] pixels=resource.pixels;if(id<=0||(id>Protocol.MAX_RESOURCES&&!c.resourceReleaseEver)||!(type.equals("IMAGE")||type.equals("GLYPH"))||pixels==null||pixels.length!=Protocol.frameSize(width,height)||width>255||height>255||!hash.equals(resourceHash(type,width,height,pixels)))return;HostResource existing=c.resources.get(id);if(existing!=null){if(existing.type.equals(type)&&existing.sha256.equals(hash))return;else return;}if(id<=c.highestResourceId)return;int total=c.resources.values().stream().mapToInt(value->value.pixels.length).sum();if(c.resources.size()>=Protocol.MAX_RESOURCES||total+pixels.length>Protocol.MAX_RESOURCE_BYTES)return;int encoding=0,atlasId=c.resourceReleaseEver?-1:type.equals("GLYPH")?GlyphAtlas.ensureGray(c.component+":"+hash,encoding,width,height,ByteBuffer.wrap(pixels)):ImageAtlas.ensure(c.component+":"+hash,width,height,ByteBuffer.wrap(pixels));c.highestResourceId=id;c.resources.put(id,new HostResource(id,type,width,height,hash,pixels.clone(),atlasId,encoding));}catch(Exception ignored){}}
+ private void sweepResources(Connection c){
+  Set<Integer> retained=new HashSet<>();for(Surface surface:c.surfaces.values())synchronized(surface){for(Bundle node:surface.nodes.values())if(node.containsKey("resourceId"))retained.add(node.getInt("resourceId"));}
+  for(int id:new ArrayList<>(c.releasedResources))if(!retained.contains(id)){c.releasedResources.remove(id);c.resources.remove(id);try{c.sendControl("resource-result",Protocol.object("resourceId",id,"status","released","residentBytes",c.resources.values().stream().mapToInt(value->value.pixels.length).sum(),"residentCount",c.resources.size()));}catch(RemoteException ignored){}}
+ }
  private String resourceHash(String type,int width,int height,byte[] pixels)throws Exception{java.security.MessageDigest digest=java.security.MessageDigest.getInstance("SHA-256");digest.update((byte)("GLYPH".equals(type)?1:0));digest.update((byte)(width>>8));digest.update((byte)width);digest.update((byte)(height>>8));digest.update((byte)height);byte[] value=digest.digest(pixels);StringBuilder out=new StringBuilder();for(byte item:value)out.append(String.format(Locale.US,"%02x",item));return out.toString();}
  private void receiveScene(Connection c,SceneSubmission transaction){
   if(transaction==null)return;Surface surface=surface(c,transaction.surfaceId);
@@ -257,7 +264,7 @@ public final class FaceclawExternalApps {
     }
    }
    if(deliveredPixels!=null)deliverSceneFrame(c,surface,deliveredGeneration,deliveredWidth,deliveredHeight,ByteBuffer.wrap(deliveredPixels),deliveredDamage,"scene-"+deliveredVersion);
-   c.sendControl("scene-result",Protocol.object("surfaceId",deliveredId,"generation",deliveredGeneration,"sceneVersion",deliveredVersion,"accepted",true));
+   c.sendControl("scene-result",Protocol.object("surfaceId",deliveredId,"generation",deliveredGeneration,"sceneVersion",deliveredVersion,"accepted",true));sweepResources(c);
   }catch(Exception rejected){if(consumedCredit&&surface!=null)synchronized(surface){surface.clearCreditLocked();}try{c.sendControl("scene-result",Protocol.object("surfaceId",transaction.surfaceId,"generation",transaction.generation,"sceneVersion",transaction.sceneVersion,"accepted",false));}catch(RemoteException disconnected){/* Binder recovery owns session loss. */}}
  }
  private void validateSceneNode(Connection c,Bundle node,long id){String kind=node.getString("kind","");if(id==0||node.getLong("parentId")==id||!Arrays.asList("group","rect","rounded-rect","line","glyph","image","raster-patch").contains(kind))throw new IllegalArgumentException("Invalid scene node");int brightness=node.getInt("brightness",255),opacity=node.getInt("opacity",255);if(brightness<0||brightness>255||opacity<0||opacity>255)throw new IllegalArgumentException("Invalid scene color");if(Arrays.asList("glyph","image").contains(kind)&&!c.resources.containsKey(node.getInt("resourceId")))throw new IllegalArgumentException("Unknown scene resource");if("raster-patch".equals(kind)){byte[] pixels=node.getByteArray("pixels");if(pixels==null){if(!c.resources.containsKey(node.getInt("resourceId")))throw new IllegalArgumentException("Unknown scene resource");}else if(pixels.length!=Protocol.frameSize(node.getInt("width"),node.getInt("height")))throw new IllegalArgumentException("Invalid inline raster patch");}}
@@ -275,8 +282,11 @@ public final class FaceclawExternalApps {
   final ServiceInfo service; final String component,session=UUID.randomUUID().toString();
   java.lang.ref.WeakReference<Activity> selectionActivity; long selectionUntil;
   final Map<String,Surface> surfaces=new ConcurrentHashMap<>(); final Map<String,String> extensionRequests=new HashMap<>(),capabilityRequests=new HashMap<>(); final Set<String> actionIds=new HashSet<>();
+  final Set<Integer> releasedResources=ConcurrentHashMap.newKeySet();int highestResourceId;volatile boolean resourceReleaseEver;
   final Map<Integer,HostResource> resources=new ConcurrentHashMap<>();final Map<String,PendingFrame> pendingFrames=new ConcurrentHashMap<>();final ThreadPoolExecutor renderExecutor;final java.util.concurrent.atomic.AtomicLong renderQueueBytes=new java.util.concurrent.atomic.AtomicLong();
-  JSONArray capabilities=new JSONArray(); long capabilityGeneration;
+  final Map<String,Long> invocations=new HashMap<>();
+  final Set<String> negotiated=ConcurrentHashMap.newKeySet(); long catalogEpoch=1,declarationEpoch; ControlLedger controls=new ControlLedger(1);
+  JSONArray capabilities=new JSONArray(); long capabilityGeneration,stateRevision; JSONObject hostState=Protocol.object("available",false);
   IFaceclawAppEndpoint endpoint;volatile IFaceclawAppSession remote; PendingIntent consent; volatile boolean ready;boolean open,visible,screenOn=true; int width,height; long generation,lastControlRefill=SystemClock.elapsedRealtime(),lastOpenRequest; double controlTokens=120; int invalidFrames;long invalidWindowStart; String lastExtensionSnapshot="";byte[] restorationToken;
   final IFaceclawHostSession.Stub hostSession=new IFaceclawHostSession.Stub(){
    private boolean authorized(){return Binder.getCallingUid()==service.applicationInfo.uid;}
@@ -314,15 +324,42 @@ public final class FaceclawExternalApps {
    PendingIntent pi=value==null?null:value.consent;
    if(pi!=null&&pi.getCreatorUid()==uid&&service.packageName.equals(pi.getCreatorPackage())&&(Build.VERSION.SDK_INT<31||pi.isActivity())){consent=pi;emit(component,"consent",new JSONObject());launchRequestedConsent(this,pi);}
   }
-  HostSnapshot snapshot(){Bundle b=new Bundle();b.putInt("protocolMajor",Protocol.VERSION);b.putInt("maxWidth",Protocol.MAX_WIDTH);b.putInt("maxHeight",Protocol.MAX_HEIGHT);b.putInt("maxDamageRects",Protocol.MAX_DAMAGE_RECTS);b.putInt("bufferSlots",Protocol.BUFFER_SLOTS);b.putBoolean("screenOn",screenOn);b.putBoolean("windowOpen",open);b.putBoolean("windowVisible",visible);b.putLong("windowGeneration",generation);b.putInt("windowWidth",width);b.putInt("windowHeight",height);b.putString("grants",Protocol.object("notifications",allows(component,"notifications"),"dictation",allows(component,"dictation"),"previews",allows(component,"previews"),"messaging",allows(component,"messaging")).toString());b.putString("sharedStyle",sharedStyle.toString());b.putString("extensions",extensionsJson());b.putString("hostState","{}");FaceclawBleCommunicator display=FaceclawBleCommunicator.getActive();b.putString("capabilities",Protocol.object("gray8",true,"sharedMemory",true,"damage",true,"resources",true,"retainedScenes",true,"firmwareFingerprint",display==null?"":display.getFirmwareFingerprint()).toString());ArrayList<Bundle> openSurfaces=new ArrayList<>();for(Surface surface:surfaces.values()){Bundle item=new Bundle();item.putString("id",surface.id);item.putInt("width",surface.width);item.putInt("height",surface.height);item.putLong("generation",surface.generation);item.putBoolean("visible",surface.visible);item.putBoolean("screenOn",surface.screenOn);openSurfaces.add(item);}b.putParcelableArrayList("surfaces",openSurfaces);if(restorationToken!=null)b.putByteArray("restorationToken",restorationToken.clone());return new HostSnapshot(b);}
+  Set<String> supported(){return listener==null?Collections.emptySet():new HashSet<>(Arrays.asList("control.result","window.policy","capture.session","invocation.lifecycle","resource.release"));}
+  JSONObject catalog(){JSONArray features=new JSONArray();for(String id:supported())features.put(Protocol.object("id",id,"version",1,"limits",Protocol.object("maxPendingControls",32,"maxPolicyBytes",4096)));return Protocol.object("contractVersion",1,"epoch",catalogEpoch,"features",features);}
+  void negotiate(JSONObject data)throws RemoteException{
+   JSONObject result;
+   try{result=IndependenceProtocol.negotiate(data,supported(),catalogEpoch,declarationEpoch);if(result.optString("state").equals("applied")){Set<String> next=new HashSet<>();JSONArray features=result.optJSONArray("features");for(int i=0;i<features.length();i++){JSONObject f=features.optJSONObject(i);if(f.optString("state").equals("accepted"))next.add(f.optString("id"));}negotiated.clear();negotiated.addAll(next);resourceReleaseEver|=next.contains("resource.release");declarationEpoch=data.optLong("epoch");}}
+   catch(IllegalArgumentException invalid){result=Protocol.object("epoch",data.optLong("epoch"),"catalogEpoch",catalogEpoch,"state","rejected","reason",invalid.getMessage(),"features",new JSONArray());}
+   sendControl("contract-result",result);
+  }
+  void control(JSONObject data,long now)throws RemoteException{
+   ControlLedger.Admission admission=controls.admit(data,now,generation,negotiated);sendControl("control-result",admission.result);
+   if(!admission.execute)return;
+   JSONObject request=IndependenceProtocol.copy(data);try{request.put("session",session);}catch(JSONException impossible){return;}
+   main.postDelayed(()->{if(connections.get(component)!=this)return;for(JSONObject result:controls.expire(SystemClock.elapsedRealtime()))try{sendControl("control-result",result);}catch(RemoteException error){disconnect(component,true);}},Math.max(1,data.optLong("expiresAtElapsedMs")-now));
+   emit(component,"contract-control",request);
+  }
+  synchronized HostSnapshot snapshot(){Bundle b=new Bundle();b.putLong("stateRevision",++stateRevision);b.putInt("protocolMajor",Protocol.VERSION);b.putInt("maxWidth",Protocol.MAX_WIDTH);b.putInt("maxHeight",Protocol.MAX_HEIGHT);b.putInt("maxDamageRects",Protocol.MAX_DAMAGE_RECTS);b.putInt("bufferSlots",Protocol.BUFFER_SLOTS);b.putBoolean("screenOn",screenOn);b.putBoolean("windowOpen",open);b.putBoolean("windowVisible",visible);b.putLong("windowGeneration",generation);b.putInt("windowWidth",width);b.putInt("windowHeight",height);b.putString("grants",Protocol.object("notifications",allows(component,"notifications"),"dictation",allows(component,"dictation"),"previews",allows(component,"previews"),"messaging",allows(component,"messaging")).toString());b.putString("sharedStyle",sharedStyle.toString());b.putString("extensions",extensionsJson());b.putString("hostState",hostState.toString());FaceclawBleCommunicator display=FaceclawBleCommunicator.getActive();b.putString("capabilities",Protocol.object("appIndependence",catalog(),"notificationReplies",true,"searchDictation",true,"windowMenus",true,"gray8",true,"sharedMemory",true,"damage",true,"resources",true,"retainedScenes",true,"firmwareFingerprint",display==null?"":display.getFirmwareFingerprint()).toString());ArrayList<Bundle> openSurfaces=new ArrayList<>();for(Surface surface:surfaces.values()){Bundle item=new Bundle();item.putString("id",surface.id);item.putInt("width",surface.width);item.putInt("height",surface.height);item.putLong("generation",surface.generation);item.putBoolean("visible",surface.visible);item.putBoolean("screenOn",surface.screenOn);openSurfaces.add(item);}b.putParcelableArrayList("surfaces",openSurfaces);if(restorationToken!=null)b.putByteArray("restorationToken",restorationToken.clone());return new HostSnapshot(b);}
   Surface windowSurface(){synchronized(this){return surfaces.computeIfAbsent("window",ignored->new Surface("window",width,height,generation));}}
-  void sendControl(String type,JSONObject data)throws RemoteException{if(remote==null)throw new RemoteException("App session unavailable");remote.sendControl(new ControlEvent(type,data));}
+  synchronized void sendControl(String type,JSONObject data)throws RemoteException{if(remote==null)throw new RemoteException("App session unavailable");try{JSONObject copy=new JSONObject(data.toString());copy.put("stateRevision",++stateRevision);remote.sendControl(new ControlEvent(type,copy));}catch(org.json.JSONException error){throw new RemoteException("Invalid host state");}}
   void sendInput(String surfaceId,FaceclawInputEvent event)throws RemoteException{if(remote==null)throw new RemoteException("App session unavailable");remote.onInput(surfaceId,event);}
   void receiveControl(ControlEvent event) {
    try {
     if(connections.get(component)!=this||!approved(service)||!ready)return;
     long now=SystemClock.elapsedRealtime();controlTokens=Math.min(120,controlTokens+(now-lastControlRefill)*0.06);lastControlRefill=now;if(controlTokens<1)return;controlTokens-=1;
     if(event==null)return;String type=event.type; JSONObject data=event.data;
+    if(type.equals("resource-release")){
+     if(!negotiated.contains("resource.release"))return;IndependenceProtocol.keys(data,"resourceId");int id=(int)IndependenceProtocol.integer(data,"resourceId",1,Integer.MAX_VALUE);
+     enqueueRender(128,()->{if(connections.get(component)!=this||!ready)return;if(resources.containsKey(id)){releasedResources.add(id);sweepResources(this);}try{sendControl("resource-result",Protocol.object("resourceId",id,"status",resources.containsKey(id)?"deferred":"released","residentBytes",resources.values().stream().mapToInt(value->value.pixels.length).sum(),"residentCount",resources.size()));}catch(RemoteException ignored){}});return;
+    }
+    if(type.equals("capture-start")){
+     try{IndependenceProtocol.bytes(data,8192);IndependenceProtocol.keys(data,"captureId","purpose","label","providerGeneration","windowGeneration","expiresAtElapsedMs");IndependenceProtocol.token(data,"captureId");IndependenceProtocol.text(data,"label",100);long provider=IndependenceProtocol.integer(data,"providerGeneration",0,Long.MAX_VALUE);if(provider>0&&(!extensions.controls(component,"assistant")||extensions.generation("assistant")!=provider))throw new IllegalArgumentException("not_selected");if(!Arrays.asList("generic","message","search").contains(IndependenceProtocol.text(data,"purpose",16)))throw new IllegalArgumentException("malformed");long expiry=IndependenceProtocol.integer(data,"expiresAtElapsedMs",1,Long.MAX_VALUE);if(expiry<=now||expiry-now>300000)throw new IllegalArgumentException("expired");if(IndependenceProtocol.integer(data,"windowGeneration",1,Long.MAX_VALUE)!=generation)throw new IllegalArgumentException("stale_window");if(!negotiated.contains("capture.session")||!allows(component,"dictation")||!open||!visible||!screenOn)throw new IllegalArgumentException("not_granted");emit(component,type,data);}
+     catch(IllegalArgumentException invalid){String id=data.optString("captureId");if(id.matches("[A-Za-z0-9_-]{1,128}"))sendControl("capture-status",Protocol.object("captureId",id,"status","rejected","reason",invalid.getMessage()));}return;
+    }
+    if(type.equals("capture-finish")||type.equals("capture-cancel")){if(negotiated.contains("capture.session")){IndependenceProtocol.keys(data,"captureId");IndependenceProtocol.token(data,"captureId");emit(component,type,data);}return;}
+    if(type.equals("invocation-result")){String id=data.optString("invocationId");String result=data.optString("state");if(invocations.containsKey(id)&&Arrays.asList("accepted","rejected","completed","cancelled","unknown").contains(result)){if(!result.equals("accepted"))invocations.remove(id);emit(component,type,Protocol.object("invocationId",id,"state",result));}return;}
+    if(type.equals("publish-contract")){negotiate(data);return;}
+    if(type.equals("control-request")){control(data,now);return;}
     if(type.equals("restoration-token")){byte[] value=event.opaquePayload;if(value!=null&&value.length<=4096){restorationToken=value.clone();restorationTokens.put(component,restorationToken.clone());}return;}
     if(type.equals("surface-reset")){Surface target=surface(this,data.optString("surfaceId"));if(target!=null&&target.generation==data.optLong("generation")){synchronized(target){if(target.pixels!=null)Arrays.fill(target.pixels,(byte)0);target.draws=null;target.nodes.clear();target.sceneOrder.clear();target.sceneVersion=0;}}return;}
     if(type.equals("host-switched")) { revokeApproval(component); return; }
@@ -367,6 +404,23 @@ public final class FaceclawExternalApps {
     emit(component,type,data);
    } catch(Exception ignored) { disconnect(component,false); }
   }
+ }
+ /** Called only by the trusted shell after its focus/lock/protected-flow checks. */
+ public boolean deliverInvocation(String component,String entryPoint,long providerGeneration){
+  Connection c=connections.get(component);if(c==null||!c.ready||!approved(c.service)||!c.open||!c.visible||!c.screenOn||!c.negotiated.contains("invocation.lifecycle")||!extensions.controls(component,"assistant")||extensions.generation("assistant")!=providerGeneration||!Arrays.asList("wakeword","text-entry","app-button").contains(entryPoint))return false;
+  long now=SystemClock.elapsedRealtime();c.invocations.entrySet().removeIf(e->e.getValue()<=now);if(c.invocations.size()>=32)return false;String id=UUID.randomUUID().toString();c.invocations.put(id,now+30000);
+  try{c.sendControl("invocation-event",Protocol.object("invocationId",id,"entryPoint",entryPoint,"providerGeneration",providerGeneration,"windowGeneration",c.generation,"expiresAtElapsedMs",now+30000,"target",""));return true;}catch(RemoteException error){disconnect(component,true);return false;}
+ }
+ public boolean supportsContract(String component,String feature){Connection c=connections.get(component);return c!=null&&c.ready&&c.negotiated.contains(feature);}
+ private void invalidateContract(Connection c){
+  if(!c.ready)return;
+  try{for(JSONObject result:c.controls.cancelAll())c.sendControl("control-result",result);c.negotiated.clear();c.invocations.clear();c.controls.catalogEpoch(++c.catalogEpoch);emit(c.component,"contract-invalidated",new JSONObject());c.remote.applyHostSnapshot(c.snapshot());}catch(RemoteException error){disconnect(c.component,true);}
+ }
+ /** Trusted in-process shell completion. External apps cannot call this through AIDL. */
+ public boolean isContractRequestCurrent(String component,String session,String id){Connection c=connections.get(component);return c!=null&&c.ready&&approved(c.service)&&c.session.equals(session)&&c.controls.current(id,SystemClock.elapsedRealtime());}
+ public void completeContractControl(String component,String session,String id,String state,String reason){
+  Connection c=connections.get(component);if(c==null||!c.ready||!c.session.equals(session))return;
+  JSONObject result=c.controls.complete(id,state,reason);if(result!=null)try{c.sendControl("control-result",result);}catch(RemoteException error){disconnect(component,true);}
  }
  public boolean isSourceSuppressed(String packageName) {
   if(packageName==null || !packageName.matches("[a-zA-Z][a-zA-Z0-9_]*(\\.[a-zA-Z0-9_]+)+")) return false;
@@ -606,7 +660,7 @@ public final class FaceclawExternalApps {
   }
   String snapshot=extensionsJson();
   for(Connection c:connections.values()) if(c.ready&&!snapshot.equals(c.lastExtensionSnapshot)) {
-   c.lastExtensionSnapshot=snapshot;send(c.component,"extensions",snapshot);
+   c.lastExtensionSnapshot=snapshot;invalidateContract(c);send(c.component,"extensions",snapshot);
    // A failed send can synchronously disconnect and publish a newer snapshot.
    if(!snapshot.equals(extensionsJson()))return;
   }

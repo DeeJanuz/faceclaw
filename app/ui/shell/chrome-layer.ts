@@ -103,6 +103,7 @@ export type ShellChromeWindow = {
 };
 
 export type ShellChromeState = {
+  compactChrome?: boolean;
   windows: ShellChromeWindow[];
   selectedIndex: number;
   focus: "sidebar" | "window";
@@ -325,7 +326,7 @@ export class ShellChromeLayer implements Layer {
     image.drawLine(barLeft, barTop + TOP_BAR_HEIGHT - 1, G2_LENS_WIDTH - 1, barTop + TOP_BAR_HEIGHT - 1, BORDER_VALUE);
 
     const now = new Date();
-    const clock = `${WEEKDAYS[now.getDay()]} ${now.getDate()} ${MONTHS[now.getMonth()]} ` +
+    const clock = (state.compactChrome && state.focus === "window" ? "" : `${WEEKDAYS[now.getDay()]} ${now.getDate()} ${MONTHS[now.getMonth()]} `) +
       formatClockTime(now);
     const clockX = barLeft + 10;
     const textY = barTop + Math.max(0, ((TOP_BAR_HEIGHT - font.lineHeight) / 2) | 0);

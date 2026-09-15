@@ -80,6 +80,7 @@ import {
  */
 
 export type ShellWindow = {
+  compactChrome?: boolean;
   appId: string;
   windowId: string;
   title: string;
@@ -1295,6 +1296,7 @@ class Shell {
     if (this.activeKeyboardLayer) return this.activeKeyboardLayer;
     if (this.activeVoiceLayer) return null;
     if (!this.screenOn) this.wake("sidebar");
+    if (extensionPlatform()?.openAssistant("text-entry")) return null;
     const assistantLayer = this.assistantLayer;
     const assistantSession = this.assistantSession;
     let targets: VoiceSendTarget[];
@@ -1708,6 +1710,7 @@ class Shell {
       focus: this.focus,
       foregroundHeightMode: this.foregroundWindow()?.heightMode ?? "min",
       foregroundAppId: this.foregroundWindow()?.appId,
+      compactChrome: this.foregroundWindow()?.compactChrome,
       battery: this.battery,
       trayIcons: Array.from(this.trayIcons.keys())
         .sort()

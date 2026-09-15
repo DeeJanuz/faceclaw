@@ -37,3 +37,5 @@ class FrameRequest {
   cancel() { this.epoch++; if (this.pending !== null) this.unschedule(this.pending); this.pending = null; }
 }
 module.exports = { DURATION_MS, BODY_REVEAL_PROGRESS, interpolateRect, WindowMotion, FrameRequest };
+
+Object.assign(module.exports, require("./controls"));

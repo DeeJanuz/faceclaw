@@ -15,3 +15,5 @@ export class FrameRequest {
   request(): void;
   cancel(): void;
 }
+
+export * from "./controls";

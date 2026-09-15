@@ -49,6 +49,8 @@ public final class SceneController {
   if(!accepted)surface.invalidate(InvalidateReason.STATE);
  }
 
+ synchronized Set<Integer> resourceIds(){Set<Integer> ids=new HashSet<>();addResources(ids,nodes);if(pendingNodes!=null)addResources(ids,pendingNodes);return ids;}
+ private static void addResources(Set<Integer> ids,Map<Long,SceneNode> nodes){for(SceneNode node:nodes.values()){if(node instanceof SceneNode.Resource)ids.add(((SceneNode.Resource)node).resource.id);if(node instanceof SceneNode.RasterPatch&&((SceneNode.RasterPatch)node).resource!=null)ids.add(((SceneNode.RasterPatch)node).resource.id);}}
  public synchronized long acceptedVersion(){return acceptedVersion;}
  public synchronized long pendingVersion(){return pendingVersion;}
 

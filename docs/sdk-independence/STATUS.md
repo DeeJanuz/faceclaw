@@ -10,7 +10,7 @@ This ledger records implementation commits against the contract in
 | --- | --- | --- | --- | --- |
 | P00 baseline/toolchain | accepted with correction | `1f2b5fd`, corrected `8ab8147` | `evidence/baseline.md` | Local JDK 21 and Android SDK work when selected explicitly; no device/emulator. |
 | P01 contract | accepted | `bffa22f` | `CONTRACT.md` | Contract v1 freezes catalog, results, window policy, invocation, capture and resource rules. |
-| P02 vectors/seams | not started | — | — | Needed before host-side protocol implementation. |
+| P02 vectors/seams | accepted | `2ac57d0` | Shared Java/JavaScript vectors; full SDK unit suite | Catalog, duplicate/conflict, stale-window and expiry fixtures are shared; runtime dispatch is still absent. |
 | P03 window cache | accepted | `0d2b404`, replay correction `e296311` | SDK unit tests | Desired menu state is generation-scoped; protection is transient. |
 | P04 snapshot reducer | not started | — | — | P07 only adds catalog parsing; it does not replace state reduction. |
 | P05 host snapshot/deltas | not started | — | — | No host routing or catalog advertisement has landed. |
@@ -32,7 +32,7 @@ PATH=/home/deej/.local/jdk-21/bin:/home/deej/.local/android-sdk/platform-tools:$
 ./gradlew :sdk:testDebugUnitTest
 ```
 
-Result: **PASS**, 40 SDK unit tests.
+Result: **PASS**, 42 SDK unit tests.
 
 Host TypeScript checks with the JDK on `PATH` report **418/421 passing**. The
 remaining three failures are the pre-existing touch-input assertions in
@@ -46,8 +46,6 @@ The bridge repository remains clean at commit `626700f`; its required
 
 ## Next bounded handoff
 
-P02 should consume `bffa22f` and `b6af6c6`, add shared vectors without editing
-runtime dispatch, and pass the same SDK unit command. After P02 review, P08 and
-P09 can implement catalog advertisement and negotiation. Do not advertise
+P08 and P09 can now implement catalog advertisement and negotiation. Do not advertise
 `appIndependence` from the host until the host-side feature is complete and
 P08's rejection/atomicity tests pass.

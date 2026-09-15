@@ -14,7 +14,7 @@ This ledger records implementation commits against the contract in
 | P03 window cache | accepted | `0d2b404`, replay correction `e296311` | SDK unit tests | Desired menu state is generation-scoped; protection is transient. |
 | P04 snapshot reducer | not started | — | — | P07 only adds catalog parsing; it does not replace state reduction. |
 | P05 host snapshot/deltas | not started | — | — | No host routing or catalog advertisement has landed. |
-| P06 diagnostics/disconnect | not started | — | — | Renderer and Binder diagnostics remain a later task. |
+| P06 diagnostics/disconnect | ready for review | `81914b5` | `SdkDiagnosticTest`, full SDK unit suite | Adds bounded content-free diagnostics, main-looper delivery, local-validation vs transport categories, and renderer/executor reporting. Host/instrumentation failure injection remains for G1. |
 | P07 catalog value types | accepted | `b6af6c6` | `AppIndependenceCatalogTest`, full SDK unit suite | SDK parses optional `capabilities.appIndependence`; host does not advertise it yet. |
 | P08-P20 | not started | — | — | Negotiation, acknowledged controls, window policy and invocation/capture remain pending. |
 | P21 resource lifetime model | accepted | `28a60b8` | `ResourceLifetimeModelTest`, `RESOURCE-LIFETIME-MODEL.md` | Pure test reference model only; no host resource wiring. |

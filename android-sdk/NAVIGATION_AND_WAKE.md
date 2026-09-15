@@ -28,12 +28,22 @@ The host owns display power and protected gestures before forwarding app input.
 4. Watch swipe-left remains directional back. It is not physical double-tap power behavior.
 5. A semantic root-back follows `rootBack`. This is distinct from an explicit switcher command and from explicit display-off.
 
-When `hold: app-menu` is selected, the host consumes the hold and its release as
+When `hold: app-menu` is selected, the host normally consumes the hold and its release as
 one opening gesture. The resulting App actions menu starts on a safe app action
 when `Display off` is present; power is reached only by a later deliberate
 selection. The common menu may include the host-owned `Close app` action for a
 closeable foreground window. That action is bound to the window that opened the
 menu and cannot be redirected after focus changes.
+
+The host allowlists three built-in app IDs for gameplay holds: `blocks`
+(hard-drop), `minesweeper` (flag), and `pinball` (nudge). While one of these games
+actively claims long-press, its gameplay action takes precedence over
+`hold: app-menu`. Paused games without an active claim use the normal App actions
+binding. Other apps and APK gesture claims receive no exception. Text capture
+and shell overlays still block gameplay input. Keeping the hold pressed for an
+additional four seconds opens the host system menu; releasing early cancels that
+timer. With `hold: app-menu`, the host still consumes the release. `tapHold`
+continues to follow the selected navigation policy.
 
 `wakeFocus: window` focuses the retained foreground window when one exists. This is also the host fallback, so a revoked or missing provider does not turn a wake gesture into an app-switcher gesture. If there is no foreground window, the host wakes without inventing an app launch; the fallback is a host state that must be covered by device acceptance. `wakeFocus: sidebar` selects the app switcher only when the effective provider explicitly requests it.
 

@@ -201,6 +201,9 @@ const noopActions: LayerActions = noopLayerActions;
  */
 const LONG_PRESS_ESCAPE_MENU_MS = 4000;
 
+/** Only these built-in games may keep an active gameplay hold over hold: app-menu. */
+const GAMEPLAY_HOLD_ALLOWLIST = new Set(["blocks", "minesweeper", "pinball"]);
+
 /** Shell-surface overlay menu (the system menu); closing it returns focus to the sidebar. */
 class ShellOverlayMenuLayer extends MenuLayer {
   /**
@@ -769,22 +772,21 @@ class Shell {
     // its own: it gets the press forwarded, with the escape timer running
     // so that holding the press long enough still opens the system menu.
     if (event.type === "long-press") {
-      if (navigationPolicy().hold === "app-menu") {
-        if (this.activeVoiceLayer || this.activeKeyboardLayer) return { shell: true, window: false };
+      if (this.activeVoiceLayer || this.activeKeyboardLayer) return { shell: true, window: false };
+      const window = this.foregroundWindow();
+      if (!window) return { shell: true, window: false };
+      // Match host-owned built-in IDs, not APK names or arbitrary gesture
+      // claims. Paused games release the claim and use the normal app menu.
+      const gameplayHold = GAMEPLAY_HOLD_ALLOWLIST.has(window.appId) && window.claimsLongPress?.();
+      if (navigationPolicy().hold === "app-menu" && !gameplayHold) {
         if (this.stack.topMatches(layer => layer instanceof ShellOverlayMenuLayer)) return { shell: true, window: false };
-        const foreground = this.foregroundWindow();
-        if (!foreground) return { shell: true, window: false };
         this.appMenuGestureActive = true;
         // A normal hold opens App actions; keeping it held retains the
         // host-controlled escape even if the APK stops responding.
         this.startEscapeMenuTimer();
         return { shell: true, window: await this.openAppActions(frameId) };
       }
-      if (this.activeVoiceLayer || !this.stack.isAtBase()) {
-        return { shell: true, window: false };
-      }
-      const window = this.foregroundWindow();
-      if (!window) {
+      if (!this.stack.isAtBase()) {
         return { shell: true, window: false };
       }
       if (!window.claimsLongPress?.()) {
@@ -851,8 +853,8 @@ class Shell {
       return { shell: true, window: true };
     }
     if (event.type === "long-press-release") {
-      // `hold: app-menu` is a complete host gesture. The release belongs to
-      // opening that menu and must not be forwarded to a foreground app or
+      // Under `hold: app-menu`, releases stay host-owned, including for the
+      // built-in gameplay holds. A release must not reach a foreground app or
       // SDK adapter, where it can be interpreted as a click on the first row
       // (historically Display off). A later click is the only selection input.
       if (navigationPolicy().hold === "app-menu") {

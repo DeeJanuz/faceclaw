@@ -20,6 +20,7 @@ function harness(options = {}) {
  const imports = importMap('app/ui/shell/shell.ts');
  class Stack {
   constructor() { this.layers = []; }
+  push(layer) { this.layers.push(layer); }
   clearToBase() { this.layers = []; }
   isAtBase() { return this.layers.length === 0; }
   topMatches(predicate) { return this.layers.length > 0 && predicate(this.layers.at(-1)); }
@@ -28,15 +29,16 @@ function harness(options = {}) {
  }
  imports['../layers'] = { LayerStack: Stack };
  imports['./chrome-layer'] = { ShellChromeLayer: class {} };
- imports['../menu'] = { MenuLayer: class { selectItem() { return this; } } };
+ imports['../menu'] = { MenuLayer: class { constructor(title, items) { this.items = items; } selectItem() { return this; } } };
  imports['../gestures'] = load('app/ui/gestures.ts', {});
- imports['../extension-settings'] = { navigationPolicy: policy, windowLayoutPolicy: () => ({ switcherHeight: enabled ? 'display' : 'minimum' }) };
+ imports['../extension-settings'] = { navigationPolicy: policy, appMenuPolicy: () => ({}), windowLayoutPolicy: () => ({ switcherHeight: enabled ? 'display' : 'minimum' }) };
  imports['../dashboard-settings'] = { wakeWordActionSetting: { get: () => options.wakeWordAction ?? 'voice-input' } };
  imports['../../apps/external/extension-platform'] = { extensionPlatform: () => options.extensionPlatform ?? null };
  imports['../../graphics/image'] = { G2_LENS_WIDTH: 640, G2_LENS_HEIGHT: 480 };
+ imports['./geometry'] = { appViewportRect: () => ({ x: 0, width: 640 }), minWindowTop: () => 0, TOP_BAR_HEIGHT: 0 };
  const { shell } = load('app/ui/shell/shell.ts', imports);
  const delivered = [], power = [], visibility = [];
- const window = { windowId: 'own', appId: 'apk:fixture/Service', title: 'Test', hasAppMenu: () => true, claimsLongPress: () => true,
+ const window = { windowId: 'own', appId: options.appId ?? 'apk:fixture/Service', title: 'Test', closeable: true, hasAppMenu: () => true, claimsLongPress: () => options.claimsLongPress ?? true,
   handleInput: async event => delivered.push(event), requestRender() {}, setScreenOn: value => visibility.push(value), onFocus() {} };
  shell.windows = [window]; shell.focus = 'window';
  shell.config = { requestShellRender() {}, onScreenStateChanged: value => power.push(value) };
@@ -144,6 +146,78 @@ test('single hold requests App actions even when an app claims hold; text captur
  for (const field of ['activeVoiceLayer', 'activeKeyboardLayer']) {
   const protectedInput = harness(); protectedInput.shell[field] = {};
   await protectedInput.send('long-press'); assert.equal(protectedInput.delivered.length, 0);
+ }
+});
+
+test('T3 hold reaches only allowlisted games while their gameplay claim is active', async () => {
+ for (const appId of ['blocks', 'minesweeper', 'pinball']) {
+  for (const source of ['ring', 'watch', 'left-arm', 'right-arm']) {
+   const h = harness({ appId, doubleTap: 'back' });
+   try {
+    await h.send('long-press', source);
+    assert.deepEqual(h.delivered.map(event => event.type), ['long-press'], `${appId}: ${source}`);
+    assert.equal(h.delivered[0].source, source);
+    assert.notEqual(h.shell.escapeMenuTimer, null);
+    await h.send('long-press-release', source);
+    assert.equal(h.shell.escapeMenuTimer, null);
+    assert.equal(h.delivered.length, 1, 'release must not select a menu action');
+    await h.send('short-then-long-press', source);
+    assert.equal(h.shell.getFocus(), 'sidebar', 'T3 tap-then-hold still opens the switcher');
+   } finally { h.shell.cancelEscapeMenuTimer(); }
+  }
+  const inactive = harness({ appId, claimsLongPress: false });
+  try {
+   await inactive.send('long-press');
+   assert.deepEqual(inactive.delivered.map(event => event.type), ['short-then-long-press'], `${appId}: inactive`);
+   await inactive.send('click');
+   await inactive.send('long-press-release');
+   assert.equal(inactive.delivered.length, 1, 'menu opening click and release stay consumed');
+  } finally { inactive.shell.cancelEscapeMenuTimer(); }
+ }
+ for (const appId of ['freecell', 'compass', 'apk:blocks', 'apk:minesweeper', 'apk:pinball']) {
+  const h = harness({ appId });
+  try {
+   await h.send('long-press');
+   assert.deepEqual(h.delivered.map(event => event.type), ['short-then-long-press'], appId);
+   await h.send('long-press-release');
+  } finally { h.shell.cancelEscapeMenuTimer(); }
+ }
+});
+
+test('allowlisted game holds cannot bypass text capture or a shell overlay', async () => {
+ for (const appId of ['blocks', 'minesweeper', 'pinball']) {
+  for (const protection of ['activeVoiceLayer', 'activeKeyboardLayer', 'overlay']) {
+   const h = harness({ appId });
+   if (protection === 'overlay') h.shell.stack.push({ handleInput() {} });
+   else h.shell[protection] = {};
+   try {
+    await h.send('long-press');
+    assert.equal(h.delivered.length, 0, `${appId}: ${protection}`);
+    assert.equal(h.shell.escapeMenuTimer, null);
+   } finally { h.shell.cancelEscapeMenuTimer(); }
+  }
+ }
+});
+
+test('allowlisted gameplay hold keeps the four-second system escape and release cancels it', async t => {
+ t.mock.timers.enable({ apis: ['setTimeout'] });
+ for (const appId of ['blocks', 'minesweeper', 'pinball']) {
+  const released = harness({ appId });
+  await released.send('long-press');
+  await released.send('long-press-release');
+  t.mock.timers.tick(4000);
+  assert.equal(released.shell.stack.isAtBase(), true);
+
+  const held = harness({ appId });
+  await held.send('long-press');
+  t.mock.timers.tick(3999);
+  assert.equal(held.shell.stack.isAtBase(), true);
+  t.mock.timers.tick(1);
+  assert.equal(held.shell.stack.isAtBase(), false, appId);
+  assert.ok(held.shell.stack.layers[0].items.some(item => item.label === 'Close app'));
+  assert.deepEqual(held.delivered.map(event => event.type), ['long-press', 'system-menu-opened']);
+  await held.send('long-press-release');
+  assert.equal(held.delivered.length, 2);
  }
 });
 

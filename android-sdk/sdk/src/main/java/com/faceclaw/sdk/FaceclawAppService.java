@@ -10,6 +10,96 @@ import java.util.UUID;
 
 /** Stable SDK 1.0 app endpoint. Application callbacks run on the main looper. */
 public abstract class FaceclawAppService extends Service {
+ /**
+  * Legacy window policy state. A successful Binder send only proves transport
+  * delivery, so sent values are scoped to the host window generation and are
+  * replayed when that generation changes. Protection is transient and is
+  * discarded when the window/session ends.
+  */
+ static final class WindowStateCache {
+  static final long UNKNOWN_GENERATION=Long.MIN_VALUE;
+  interface Sender { boolean send(String type,JSONObject data); }
+  private final Sender sender;
+  private boolean open;
+  private long generation=UNKNOWN_GENERATION,nextLocalGeneration;
+  private Boolean desiredMenu,desiredProtection;
+  private Boolean sentMenu,sentProtection;
+  private long sentMenuGeneration=UNKNOWN_GENERATION,sentProtectionGeneration=UNKNOWN_GENERATION;
+  private Boolean sentMenuWhileClosed,sentProtectionWhileClosed;
+
+  WindowStateCache(Sender sender){this.sender=sender;}
+
+  void observeSnapshot(boolean windowOpen,long hostGeneration){
+   if(windowOpen)observeOpen(hostGeneration);else observeClose();
+  }
+
+  void observeOpen(long hostGeneration){
+   long next=hostGeneration>0?hostGeneration:(open?generation:++nextLocalGeneration);
+   boolean changed=!open||generation!=next;
+   open=true;generation=next;
+   if(changed)resetSentState();
+  }
+
+  void observeClose(){
+   open=false;generation=UNKNOWN_GENERATION;resetSentState();
+   // Protection is a claim over one visible flow, never a persistent app
+   // preference. An app must assert it again for a later window.
+   desiredProtection=null;
+  }
+
+  void observeDisconnect(){observeClose();}
+
+  boolean setMenuAvailable(boolean available){
+   desiredMenu=available;
+   if(!open){
+    if(Boolean.valueOf(available).equals(sentMenuWhileClosed))return true;
+    boolean sent=send("window-menu-state",Protocol.object("available",available));
+    if(sent)sentMenuWhileClosed=available;
+    return sent;
+   }
+   return replayMenu();
+  }
+
+  boolean setProtected(boolean protectedState){
+   desiredProtection=protectedState;
+   if(!open){
+    if(Boolean.valueOf(protectedState).equals(sentProtectionWhileClosed))return true;
+    boolean sent=send("window-protection",Protocol.object("protected",protectedState));
+    if(sent)sentProtectionWhileClosed=protectedState;
+    return sent;
+   }
+   return replayProtection();
+  }
+
+  void replay(){
+   if(!open)return;
+   replayMenu();replayProtection();
+  }
+
+  private boolean replayMenu(){
+   if(desiredMenu==null)return true;
+   if(sentMenuGeneration==generation&&desiredMenu.equals(sentMenu))return true;
+   boolean sent=send("window-menu-state",Protocol.object("available",desiredMenu));
+   if(sent){sentMenu=desiredMenu;sentMenuGeneration=generation;}
+   return sent;
+  }
+
+  private boolean replayProtection(){
+   if(desiredProtection==null)return true;
+   if(sentProtectionGeneration==generation&&desiredProtection.equals(sentProtection))return true;
+   boolean sent=send("window-protection",Protocol.object("protected",desiredProtection));
+   if(sent){sentProtection=desiredProtection;sentProtectionGeneration=generation;}
+   return sent;
+  }
+
+  private boolean send(String type,JSONObject data){return sender!=null&&sender.send(type,data);}
+
+  private void resetSentState(){
+   sentMenu=null;sentProtection=null;
+   sentMenuGeneration=UNKNOWN_GENERATION;sentProtectionGeneration=UNKNOWN_GENERATION;
+   sentMenuWhileClosed=null;sentProtectionWhileClosed=null;
+  }
+ }
  static FaceclawAppService active;
  private final Handler handler=new Handler(Looper.getMainLooper());
  private IFaceclawHostSession host,pendingHost;
@@ -24,7 +114,7 @@ public abstract class FaceclawAppService extends Service {
  private JSONObject extensionSnapshot=new JSONObject(),sharedStyle=new JSONObject();
  private JSONArray toolCapabilities=new JSONArray();
  private final java.util.Map<String,Long> capabilityRequests=new java.util.concurrent.ConcurrentHashMap<>();
- private Boolean lastMenuAvailable,lastProtected;
+ private final WindowStateCache windowState=new WindowStateCache((type,data)->send(type,data));
  private volatile ConnectionState connectionState=ConnectionState.DISCOVERED;
  private final IFaceclawAppEndpoint.Stub endpoint=new IFaceclawAppEndpoint.Stub(){
   @Override public void connect(SessionHello hello,IFaceclawHostSession remote){int uid=Binder.getCallingUid();handler.post(()->receiveHello(uid,hello,remote));}
@@ -140,6 +230,8 @@ public abstract class FaceclawAppService extends Service {
  private void handleControl(ControlEvent event){
   String type=event.type;JSONObject data=event.data;
   try{
+   if(type.equals("open")||type.equals("resize"))windowState.observeOpen(data.optLong("generation"));
+   else if(type.equals("close"))windowState.observeClose();
    if(type.equals("shared-style")){sharedStyle=ExtensionContract.configuration("ui.typography",data);Ui.applySharedStyle(this,sharedStyle);}
    if(type.equals("extensions"))extensionSnapshot=new JSONObject(data.toString());
    if(type.equals("capabilities")){messagingAllowed=Boolean.TRUE.equals(data.opt("messaging"));if(!messagingAllowed)messagingRequests.clear();notificationReplyAllowed=Boolean.TRUE.equals(data.opt("notifications"))&&Boolean.TRUE.equals(data.opt("dictation"))&&Boolean.TRUE.equals(data.opt("notificationReplies"));if(!notificationReplyAllowed)notificationReplies.clear();}
@@ -149,6 +241,7 @@ public abstract class FaceclawAppService extends Service {
    if(type.equals("capability-request")){long now=System.currentTimeMillis(),expiry=data.optLong("expiresAt");capabilityRequests.entrySet().removeIf(entry->entry.getValue()<=now);String requestId=data.optString("requestId"),capabilityId=data.optString("capabilityId");int version=data.optInt("capabilityVersion");JSONObject published=null;for(int i=0;i<toolCapabilities.length();i++){JSONObject capability=toolCapabilities.optJSONObject(i);if(capability!=null&&capabilityId.equals(capability.optString("id"))&&version==capability.optInt("version")){published=capability;break;}}if(published==null||!ExtensionContract.token(requestId)||capabilityRequests.containsKey(requestId)||capabilityRequests.size()>=32||expiry<=now||expiry>now+30000||data.optJSONObject("arguments")==null||data.optJSONObject("caller")==null||data.toString().length()>Protocol.MAX_JSON/2)return;try{data.put("arguments",CapabilityContract.arguments(published.getJSONObject("inputSchema"),data.getJSONObject("arguments")));}catch(Exception invalid){return;}capabilityRequests.put(requestId,expiry);}
    if(type.equals("messaging-request")){long now=System.currentTimeMillis();messagingRequests.entrySet().removeIf(entry->entry.getValue()<=now);String requestId=data.optString("requestId"),method=data.optString("method");long expiry=data.optLong("expiresAt");if(!messagingAllowed||!ExtensionContract.token(requestId)||messagingRequests.containsKey(requestId)||messagingRequests.size()>=32||expiry<=now||expiry>now+30000||!java.util.Arrays.asList("status","search","resolve","history","send","operation").contains(method)||data.optJSONObject("params")==null)return;messagingRequests.put(requestId,expiry);}
    onControlEvent(event);
+   if(type.equals("open")||type.equals("resize"))windowState.replay();
   }catch(Exception ignored){}
  }
  String pendingIdentity(String token) {
@@ -164,12 +257,13 @@ public abstract class FaceclawAppService extends Service {
   } catch(Exception ignored) {}
  }
  private void connect(IFaceclawHostSession remote,String identity,String newSession,int uid) throws RemoteException {
-  disconnect(new DisconnectInfo(DisconnectInfo.Reason.HOST_STOPPED,true,"Host replaced"),false);host=remote;hostIdentity=identity;wireSession=newSession;hostUid=uid;lastMenuAvailable=null;lastProtected=null;
-  if(faceclawSession==null)faceclawSession=new FaceclawSession(remote,new FaceclawSession.Callback(){public void onSnapshot(HostSnapshot snapshot){onHostSnapshot(snapshot);}public void onControl(ControlEvent event){handleControl(event);}public void onInput(RenderSurface surface,FaceclawInputEvent event){FaceclawAppService.this.onInput(surface,event);}public void onCreditWithoutRenderer(RenderSurface surface,RenderCredit credit){long targetMs=System.currentTimeMillis()+Math.max(0,(credit.targetPresentationTimeNanos-SystemClock.elapsedRealtimeNanos())/1_000_000L);onControlEvent(new ControlEvent("render",Protocol.object("surfaceId",surface.id(),"targetPresentationTimeNanos",credit.targetPresentationTimeNanos,"targetPresentationTimeMs",targetMs,"traceId",credit.traceId)));}public void onOutcome(FrameOutcome outcome){onFrameOutcome(outcome);}});else faceclawSession.attach(remote);
+  disconnect(new DisconnectInfo(DisconnectInfo.Reason.HOST_STOPPED,true,"Host replaced"),false);host=remote;hostIdentity=identity;wireSession=newSession;hostUid=uid;
+  if(faceclawSession==null)faceclawSession=new FaceclawSession(remote,new FaceclawSession.Callback(){public void onSnapshot(HostSnapshot snapshot){windowState.observeSnapshot(snapshot!=null&&snapshot.windowOpen,snapshot==null?0:snapshot.windowGeneration);onHostSnapshot(snapshot);windowState.replay();}public void onControl(ControlEvent event){handleControl(event);}public void onInput(RenderSurface surface,FaceclawInputEvent event){FaceclawAppService.this.onInput(surface,event);}public void onCreditWithoutRenderer(RenderSurface surface,RenderCredit credit){long targetMs=System.currentTimeMillis()+Math.max(0,(credit.targetPresentationTimeNanos-SystemClock.elapsedRealtimeNanos())/1_000_000L);onControlEvent(new ControlEvent("render",Protocol.object("surfaceId",surface.id(),"targetPresentationTimeNanos",credit.targetPresentationTimeNanos,"targetPresentationTimeMs",targetMs,"traceId",credit.traceId)));}public void onOutcome(FrameOutcome outcome){onFrameOutcome(outcome);}});else faceclawSession.attach(remote);
   final String connectedSession=wireSession;death=()->handler.post(()->{if(wireSession.equals(connectedSession))disconnect(new DisconnectInfo(DisconnectInfo.Reason.BINDER_DIED,true,"Host binder died"),false);});remote.asBinder().linkToDeath(death,0);
   remote.onReady(new SessionHello(Protocol.VERSION,Protocol.SDK_VERSION,wireSession),appSession(connectedSession,faceclawSession));connectionState=ConnectionState.READY;onSessionReady(faceclawSession);
  }
  private void disconnect(DisconnectInfo info,boolean notifyHost) {
+  windowState.observeDisconnect();
   messagingAllowed=false; messagingRequests.clear(); capabilityRequests.clear();
   extensionSnapshot=new JSONObject(); sharedStyle=new JSONObject(); Ui.resetSharedStyle();
   notificationReplyAllowed=false; notificationReplies.clear();
@@ -226,8 +320,8 @@ public abstract class FaceclawAppService extends Service {
   return send("host-refinement",Protocol.object("requestId",requestId,"original",original,"followup",followup));
  }
  public final void cancelHostRefinement(String requestId) { if(ExtensionContract.token(requestId)) send("cancel-host-refinement",Protocol.object("requestId",requestId)); }
- public final boolean setWindowMenuAvailable(boolean available) { if(lastMenuAvailable!=null&&lastMenuAvailable==available)return true;boolean sent=send("window-menu-state",Protocol.object("available",available));if(sent)lastMenuAvailable=available;return sent; }
- public final boolean setWindowProtected(boolean protectedState) { if(lastProtected!=null&&lastProtected==protectedState)return true;boolean sent=send("window-protection",Protocol.object("protected",protectedState));if(sent)lastProtected=protectedState;return sent; }
+ public final boolean setWindowMenuAvailable(boolean available) { return windowState.setMenuAvailable(available); }
+ public final boolean setWindowProtected(boolean protectedState) { return windowState.setProtected(protectedState); }
  /** Focus this approved app's own host window while the unlocked display is already active. */
  public final boolean requestOwnNotifications() { return send("own-notifications",new JSONObject()); }
  public final boolean invokeOwnNotification(String action,String key,long postTime,String callId) {

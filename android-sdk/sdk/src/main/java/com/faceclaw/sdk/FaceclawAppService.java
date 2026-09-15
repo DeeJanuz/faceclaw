@@ -29,27 +29,27 @@ public abstract class FaceclawAppService extends Service {
 
   WindowStateCache(Sender sender){this.sender=sender;}
 
-  void observeSnapshot(boolean windowOpen,long hostGeneration){
+  synchronized void observeSnapshot(boolean windowOpen,long hostGeneration){
    if(windowOpen)observeOpen(hostGeneration);else observeClose();
   }
 
-  void observeOpen(long hostGeneration){
+  synchronized void observeOpen(long hostGeneration){
    long next=hostGeneration>0?hostGeneration:(open?generation:++nextLocalGeneration);
    boolean changed=!open||generation!=next;
    open=true;generation=next;
    if(changed)resetSentState();
   }
 
-  void observeClose(){
+  synchronized void observeClose(){
    open=false;generation=UNKNOWN_GENERATION;resetSentState();
    // Protection is a claim over one visible flow, never a persistent app
    // preference. An app must assert it again for a later window.
    desiredProtection=null;
   }
 
-  void observeDisconnect(){observeClose();}
+  synchronized void observeDisconnect(){observeClose();}
 
-  boolean setMenuAvailable(boolean available){
+  synchronized boolean setMenuAvailable(boolean available){
    desiredMenu=available;
    if(!open){
     if(Boolean.valueOf(available).equals(sentMenuWhileClosed))return true;
@@ -60,7 +60,7 @@ public abstract class FaceclawAppService extends Service {
    return replayMenu();
   }
 
-  boolean setProtected(boolean protectedState){
+  synchronized boolean setProtected(boolean protectedState){
    desiredProtection=protectedState;
    if(!open){
     if(Boolean.valueOf(protectedState).equals(sentProtectionWhileClosed))return true;
@@ -71,7 +71,7 @@ public abstract class FaceclawAppService extends Service {
    return replayProtection();
   }
 
-  void replay(){
+  synchronized void replay(){
    if(!open)return;
    replayMenu();replayProtection();
   }

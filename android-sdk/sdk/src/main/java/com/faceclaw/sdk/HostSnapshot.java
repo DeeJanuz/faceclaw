@@ -14,6 +14,7 @@ public final class HostSnapshot implements Parcelable {
  public final int windowWidth,windowHeight;
  public final byte[] restorationToken;
  public final JSONObject grants,sharedStyle,extensions,hostState,capabilities;
+ public final AppIndependenceCatalog appIndependence;
  public final java.util.List<SurfaceSnapshot> surfaces;
  public HostSnapshot(Bundle b) {
   protocolMajor=b.getInt("protocolMajor",Protocol.VERSION);maxWidth=b.getInt("maxWidth",Protocol.MAX_WIDTH);
@@ -22,7 +23,7 @@ public final class HostSnapshot implements Parcelable {
   windowOpen=b.getBoolean("windowOpen");windowVisible=b.getBoolean("windowVisible");windowGeneration=b.getLong("windowGeneration");
   windowWidth=b.getInt("windowWidth");windowHeight=b.getInt("windowHeight");
   byte[] restored=b.getByteArray("restorationToken");restorationToken=restored==null?null:restored.clone();
-  grants=json(b,"grants");sharedStyle=json(b,"sharedStyle");extensions=json(b,"extensions");hostState=json(b,"hostState");capabilities=json(b,"capabilities");ArrayList<SurfaceSnapshot> current=new ArrayList<>();ArrayList<Bundle> values=b.getParcelableArrayList("surfaces");if(values!=null)for(Bundle value:values)current.add(new SurfaceSnapshot(value));surfaces=Collections.unmodifiableList(current);
+  grants=json(b,"grants");sharedStyle=json(b,"sharedStyle");extensions=json(b,"extensions");hostState=json(b,"hostState");capabilities=json(b,"capabilities");appIndependence=AppIndependenceCatalog.fromCapabilities(capabilities);ArrayList<SurfaceSnapshot> current=new ArrayList<>();ArrayList<Bundle> values=b.getParcelableArrayList("surfaces");if(values!=null)for(Bundle value:values)current.add(new SurfaceSnapshot(value));surfaces=Collections.unmodifiableList(current);
  }
  public Bundle toBundle(){Bundle b=new Bundle();b.putInt("protocolMajor",protocolMajor);b.putInt("maxWidth",maxWidth);b.putInt("maxHeight",maxHeight);b.putInt("maxDamageRects",maxDamageRects);b.putInt("bufferSlots",bufferSlots);b.putBoolean("screenOn",screenOn);b.putBoolean("windowOpen",windowOpen);b.putBoolean("windowVisible",windowVisible);b.putLong("windowGeneration",windowGeneration);b.putInt("windowWidth",windowWidth);b.putInt("windowHeight",windowHeight);b.putByteArray("restorationToken",restorationToken==null?null:restorationToken.clone());b.putString("grants",grants.toString());b.putString("sharedStyle",sharedStyle.toString());b.putString("extensions",extensions.toString());b.putString("hostState",hostState.toString());b.putString("capabilities",capabilities.toString());ArrayList<Bundle> values=new ArrayList<>();for(SurfaceSnapshot surface:surfaces){Bundle value=new Bundle();value.putString("id",surface.id);value.putInt("width",surface.width);value.putInt("height",surface.height);value.putLong("generation",surface.generation);value.putBoolean("visible",surface.visible);value.putBoolean("screenOn",surface.screenOn);values.add(value);}b.putParcelableArrayList("surfaces",values);return b;}
  private static JSONObject json(Bundle b,String key) { try{return new JSONObject(b.getString(key,"{}"));}catch(Exception ignored){return new JSONObject();} }

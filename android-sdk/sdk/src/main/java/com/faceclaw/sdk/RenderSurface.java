@@ -78,6 +78,12 @@ public final class RenderSurface implements AutoCloseable {
   ArrayList<SharedMemory> memories=null;
   synchronized(this){
    if(closed)return;
+   // A host snapshot can describe a declared surface before its window has
+   // opened. Keep that surface disconnected until an open/resize supplies
+   // real bounds; never ask Protocol.frameSize to allocate a zero-sized pool.
+   if(nextWidth<1||nextHeight<1||nextWidth>Protocol.MAX_WIDTH||nextHeight>Protocol.MAX_HEIGHT){
+    width=0;height=0;generation=nextGeneration;visible=false;screenOn=nextScreenOn;credit=null;retirePoolLocked();poolDeferred=false;return;
+   }
    boolean replace=width!=nextWidth||height!=nextHeight||generation!=nextGeneration||slots.length==0;
    width=nextWidth;height=nextHeight;generation=nextGeneration;visible=nextVisible;screenOn=nextScreenOn;credit=null;
    if(replace){retirePoolLocked();if(retiredSlots.size()<MAX_RETIRED_WRITER_SLOTS)memories=openPoolLocked();else poolDeferred=true;}

@@ -109,6 +109,17 @@ public final class SurfaceCompositor {
 
     private static final ScreenDraw[] NO_DRAWS = new ScreenDraw[0];
 
+    /** One verified screen-space retained-pixel move proposed by a surface. */
+    public static final class ScreenCopy {
+        public final int sourceX,sourceY,width,height,destinationX,destinationY;
+        ScreenCopy(int sourceX,int sourceY,int width,int height,int destinationX,int destinationY) {
+            this.sourceX=sourceX;this.sourceY=sourceY;this.width=width;this.height=height;
+            this.destinationX=destinationX;this.destinationY=destinationY;
+        }
+    }
+
+    private static final ScreenCopy[] NO_COPIES = new ScreenCopy[0];
+
     /** One composited full-screen frame plus the metadata the pipeline needs. */
     public static final class Composite {
         /**
@@ -133,16 +144,23 @@ public final class SurfaceCompositor {
          * pixels are already baked into gray.
          */
         public final ScreenDraw[] draws;
+        /** Per-frame copy hints. These are never retained as surface content. */
+        public final ScreenCopy[] copies;
         /** Bounding screen-space damage produced by this composition. */
         public final int[] damage;
 
         Composite(byte[] gray, int width, int height, String fingerprint, long seq, ScreenDraw[] draws, int[] damage) {
+            this(gray,width,height,fingerprint,seq,draws,damage,NO_COPIES);
+        }
+
+        Composite(byte[] gray, int width, int height, String fingerprint, long seq, ScreenDraw[] draws, int[] damage, ScreenCopy[] copies) {
             this.gray = gray;
             this.width = width;
             this.height = height;
             this.fingerprint = fingerprint;
             this.seq = seq;
             this.draws = draws == null ? NO_DRAWS : draws;
+            this.copies = copies == null ? NO_COPIES : copies;
             this.damage = damage == null ? new int[0] : damage;
         }
     }
@@ -349,29 +367,36 @@ public final class SurfaceCompositor {
             String contentFingerprint,ByteBuffer draws) {
         ScreenDraw[] parsed=parseDraws(draws);
         synchronized(lock){
-            return applyDamageAndCompositeLocked(surfaceId,fullPixels,damage,contentFingerprint,parsed,true);
+            return applyDamageAndCompositeLocked(surfaceId,fullPixels,damage,contentFingerprint,parsed,null,true);
         }
     }
 
     /** External broker intake: compose and patch caller-owned packed storage without a Gray8 snapshot allocation. */
     public PackedComposite applyDamageAndCompositePacked(String surfaceId,ByteBuffer fullPixels,int[] damage,
             String contentFingerprint,ByteBuffer draws,byte[] packedTarget) {
+        return applyDamageAndCompositePacked(surfaceId,fullPixels,damage,contentFingerprint,draws,null,packedTarget);
+    }
+
+    /** External broker intake with surface-local retained-pixel copy hints. */
+    public PackedComposite applyDamageAndCompositePacked(String surfaceId,ByteBuffer fullPixels,int[] damage,
+            String contentFingerprint,ByteBuffer draws,int[] retainedCopies,byte[] packedTarget) {
         ScreenDraw[] parsed=parseDraws(draws);
         synchronized(lock){
             requireScreenConfiguredLocked();
             int size=((screenWidth+1)>>1)*screenHeight;
             if(packedTarget==null||packedTarget.length!=size)throw new IllegalArgumentException("Invalid packed target");
-            Composite composite=applyDamageAndCompositeLocked(surfaceId,fullPixels,damage,contentFingerprint,parsed,false);
+            Composite composite=applyDamageAndCompositeLocked(surfaceId,fullPixels,damage,contentFingerprint,parsed,retainedCopies,false);
             System.arraycopy(retainedPacked,0,packedTarget,0,size);
             return new PackedComposite(composite,packedTarget);
         }
     }
 
     private Composite applyDamageAndCompositeLocked(String surfaceId,ByteBuffer fullPixels,int[] damage,
-            String contentFingerprint,ScreenDraw[] parsed,boolean snapshotGray) {
+            String contentFingerprint,ScreenDraw[] parsed,int[] retainedCopies,boolean snapshotGray) {
             requireScreenConfiguredLocked();Surface surface=surfaces.get(surfaceId);
             if(surface==null)throw new IllegalArgumentException("unknown surface "+surfaceId);
             if(fullPixels==null||fullPixels.remaining()!=surface.width*surface.height)throw new IllegalArgumentException("invalid full surface buffer");
+            ScreenCopy[] copies=translateCopiesLocked(surface,retainedCopies);
             int[] rects=damage==null||damage.length==0?new int[]{0,0,surface.width,surface.height}:damage;
             if(rects.length%4!=0||rects.length>32)throw new IllegalArgumentException("invalid damage list");
             int base=fullPixels.position();
@@ -391,7 +416,23 @@ public final class SurfaceCompositor {
                     }
                 }
             }
-            surface.fingerprint=contentFingerprint==null?"":contentFingerprint;surface.draws=parsed;return compositeLocked(snapshotGray);
+            surface.fingerprint=contentFingerprint==null?"":contentFingerprint;surface.draws=parsed;return compositeLocked(snapshotGray,copies);
+    }
+
+    private ScreenCopy[] translateCopiesLocked(Surface surface,int[] values) {
+        if(values==null||values.length==0||values.length%6!=0||values.length>48||!surface.visible||blanked)return NO_COPIES;
+        List<ScreenCopy> out=new ArrayList<>();
+        for(int i=0;i<values.length;i+=6){
+            int sx=values[i],sy=values[i+1],width=values[i+2],height=values[i+3],dx=values[i+4],dy=values[i+5];
+            if(width<=0||height<=0||sx<0||sy<0||dx<0||dy<0||sx>surface.width-width||sy>surface.height-height||dx>surface.width-width||dy>surface.height-height)continue;
+            int screenSx=surface.x+sx,screenSy=surface.y+sy,deltaX=dx-sx,deltaY=dy-sy;
+            int left=Math.max(screenSx,Math.max(0,-deltaX));
+            int top=Math.max(screenSy,Math.max(0,-deltaY));
+            int right=Math.min(screenSx+width,Math.min(screenWidth,screenWidth-deltaX));
+            int bottom=Math.min(screenSy+height,Math.min(screenHeight,screenHeight-deltaY));
+            if(right>left&&bottom>top)out.add(new ScreenCopy(left,top,right-left,bottom-top,left+deltaX,top+deltaY));
+        }
+        return out.isEmpty()?NO_COPIES:out.toArray(new ScreenCopy[0]);
     }
 
     /**
@@ -533,8 +574,9 @@ public final class SurfaceCompositor {
         return gray;
     }
 
-    private Composite compositeLocked() { return compositeLocked(true); }
-    private Composite compositeLocked(boolean snapshotGray) {
+    private Composite compositeLocked() { return compositeLocked(true,NO_COPIES); }
+    private Composite compositeLocked(boolean snapshotGray) { return compositeLocked(snapshotGray,NO_COPIES); }
+    private Composite compositeLocked(boolean snapshotGray,ScreenCopy[] copies) {
         int[] damage=recomposeDirtyLocked();
         if(!retainedPackedValid){BmpUtil.patch4bppFromGray8(retainedGray,screenWidth,screenHeight,null,retainedPacked);retainedPackedValid=true;}
         else if(damage.length>0)BmpUtil.patch4bppFromGray8(retainedGray,screenWidth,screenHeight,damage,retainedPacked);
@@ -570,7 +612,7 @@ public final class SurfaceCompositor {
             }
         }
         return new Composite(snapshotGray?retainedGray.clone():null, screenWidth, screenHeight, fingerprint.toString(), nextCompositeSeq++,
-                draws.toArray(new ScreenDraw[0]), damage);
+                draws.toArray(new ScreenDraw[0]), damage, copies);
     }
 
     private int[] recomposeDirtyLocked() {

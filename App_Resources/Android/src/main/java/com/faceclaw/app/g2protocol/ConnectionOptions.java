@@ -59,6 +59,9 @@ public class ConnectionOptions {
     // with mode-8 multi-rect support; needs INCREMENTAL_FRAMES (same seeded shadow).
     // Falls back to the single bounding box whenever multi-rect isn't smaller.
     final boolean MULTI_RECT_FRAMES = true;
+    // Move retained pixels with CFW mode 9, then repair the authoritative target
+    // with mode-3 rectangles in the same mode-8 presentation batch.
+    final boolean RETAINED_COPY_FRAMES = true;
     // Cap on rects per batch. Each rect consumes a distinct CFW frame id, and the
     // firmware's duplicate-fid ring holds 16, so keep several batches of history
     // within it. Above this the split is abandoned for a single bounding box.

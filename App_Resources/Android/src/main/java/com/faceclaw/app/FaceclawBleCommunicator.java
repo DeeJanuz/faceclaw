@@ -212,6 +212,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     // into desiredPacked; the texture-cache planner may replay them as
     // on-glasses cached draws.
     private SurfaceCompositor.ScreenDraw[] desiredDraws = new SurfaceCompositor.ScreenDraw[0];
+    private SurfaceCompositor.ScreenCopy[] desiredCopies = new SurfaceCompositor.ScreenCopy[0];
     /** Three immutable-ownership slots: last enqueued, newest desired, and the broker's next write. */
     private final Object brokerIngressLock = new Object();
     private byte[][] brokerPackedPool = new byte[0][];
@@ -236,6 +237,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     private boolean textureCacheSupported;
     private boolean textureImagesSupported;
     private boolean fwTextSupported;
+    private boolean retainedCopySupported;
 
     private final ArrayDeque<OutboundMessage> pendingMessages = new ArrayDeque<>();
     private final ArrayDeque<OutboundMessage> inFlightMessages = new ArrayDeque<>();
@@ -1071,6 +1073,21 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             ExternalFrameOutcomeListener outcome,
             String traceId
     ) {
+        submitExternalSurfaceFrame(pixels8bpp,surfaceId,width,height,damage,contentFingerprint,draws,null,outcome,traceId);
+    }
+
+    public void submitExternalSurfaceFrame(
+            java.nio.ByteBuffer pixels8bpp,
+            String surfaceId,
+            int width,
+            int height,
+            int[] damage,
+            String contentFingerprint,
+            java.nio.ByteBuffer draws,
+            int[] retainedCopies,
+            ExternalFrameOutcomeListener outcome,
+            String traceId
+    ) {
         String safeTrace=traceId!=null&&traceId.matches("[A-Za-z0-9_.:-]{1,128}")?traceId:"";
         int frameId = FrameTimings.getInstance().startFrame("render:" + surfaceId+(safeTrace.isEmpty()?"":" trace="+safeTrace));
         if (outcome != null) externalFrameOutcomes.put(frameId, outcome);
@@ -1081,7 +1098,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 int damageArea=0;if(damage!=null)for(int i=0;i+3<damage.length;i+=4)damageArea+=Math.max(0,damage[i+2])*Math.max(0,damage[i+3]);
                 FrameTimings.getInstance().log(frameId,"broker damageArea="+damageArea+" packedBytes="+packedSize+" retainedPool=true");
                 FrameTimings.getInstance().spanStart(frameId,"broker-intake-copy-compose-pack");
-                SurfaceCompositor.PackedComposite result=compositor.applyDamageAndCompositePacked(surfaceId,pixels8bpp,damage,contentFingerprint,draws,target);
+                SurfaceCompositor.PackedComposite result=compositor.applyDamageAndCompositePacked(surfaceId,pixels8bpp,damage,contentFingerprint,draws,retainedCopies,target);
                 FrameTimings.getInstance().spanEnd(frameId,"broker-intake-copy-compose-pack");
                 if(result.composite.damage.length==0){finishFrame(frameId,"discarded: no change");return;}
                 submitComposedFrame(result.composite,result.packed,0,frameId);
@@ -1121,6 +1138,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 desiredPaintMs = paintMs;
                 desiredFrameId = frameId;
                 desiredDraws = composite.draws;
+                desiredCopies = composite.copies;
             }
         }
         if (stale) {
@@ -2646,6 +2664,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         int paintMs;
         int frameId;
         SurfaceCompositor.ScreenDraw[] draws;
+        SurfaceCompositor.ScreenCopy[] copies;
         synchronized (desiredTilesLock) {
             packed = desiredPacked;
             width = desiredWidth;
@@ -2653,6 +2672,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             paintMs = desiredPaintMs;
             frameId = desiredFrameId;
             draws = desiredDraws;
+            copies = desiredCopies;
             desiredFrameId = 0;
         }
         if (packed == null) {
@@ -2705,6 +2725,36 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 return;
             }
             FrameTimings.getInstance().spanEnd(frameId, "texture-plan");
+        }
+
+        // Retained-copy path: mode 9 moves pixels already present in the CFW
+        // shadow, and mode 3 repairs make the full submitted raster authoritative.
+        // Compare against both the ordinary keyframe and raster delta before use.
+        if(retainedCopySupported&&connectionOptions.RETAINED_COPY_FRAMES&&connectionOptions.INCREMENTAL_FRAMES
+                &&copies!=null&&copies.length>0&&lastEnqueuedPacked.length>0
+                &&lastEnqueuedWidth==width&&lastEnqueuedHeight==height){
+            int baseFid=nextImageFrameId;
+            FrameTimings.getInstance().spanStart(frameId,"retained-copy-plan");
+            BleImageOptimizer.CopyPlan copy=BleImageOptimizer.buildRetainedCopyPayload(
+                    lastEnqueuedPacked,packed,width,height,copies,baseFid,ConnectionOptions.MULTI_RECT_MAX_RECTS);
+            if(copy!=null){
+                BleImageOptimizer.TileImagePlan keyframe=new BleImageOptimizer.TileImagePlan(0,DASHBOARD_TILE,packed,width,height,0);
+                int ordinaryBytes=keyframe.payload.length;
+                BleImageOptimizer.IncrementalPlan single=BleImageOptimizer.buildIncrementalImagePayload(lastEnqueuedPacked,packed,width,height,baseFid);
+                if(single!=null){
+                    ordinaryBytes=Math.min(ordinaryBytes,single.payload.length);
+                    if(connectionOptions.MULTI_RECT_FRAMES){BleImageOptimizer.MultiRectPlan multi=BleImageOptimizer.buildMultiRectImagePayload(lastEnqueuedPacked,packed,width,height,baseFid,ConnectionOptions.MULTI_RECT_MAX_RECTS);if(multi!=null)ordinaryBytes=Math.min(ordinaryBytes,multi.payload.length);}
+                }
+                if(copy.payload.length<ordinaryBytes){
+                    nextImageFrameId=copy.nextFid;
+                    BleImageOptimizer.TileImagePlan plan=new BleImageOptimizer.TileImagePlan(0,DASHBOARD_TILE,packed,width,height,nextMapSessionId(),copy.payload);
+                    plan.fragments=BleImageOptimizer.planImageFragments(plan.payload,ConnectionOptions.IMAGE_FRAGMENT_SIZE);
+                    FrameTimings.getInstance().spanEnd(frameId,"retained-copy-plan");
+                    FrameTimings.getInstance().log(frameId,"retained-copy update copies="+copy.copyCount+" repairs="+copy.repairRectCount+" repaired="+copy.repairedBytes+"B payload="+copy.payload.length+"B (vs raster "+ordinaryBytes+"B)");
+                    finishEnqueueDesiredImageLocked(plan,fingerprint,paintMs,frameId);return;
+                }
+            }
+            FrameTimings.getInstance().spanEnd(frameId,"retained-copy-plan");
         }
 
         FrameTimings.getInstance().spanStart(frameId, "compress-and-plan");
@@ -2905,6 +2955,11 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                         && hasCapability(firmwareInfo.capabilities, "texstr14");
                 textureImagesSupported = hasCapability(firmwareInfo.capabilities, "teximg13");
                 fwTextSupported = hasCapability(firmwareInfo.capabilities, "font15");
+                // Mode 9 predates the texture-cache modes. Requiring both its
+                // direct-framebuffer base and texcache12 identifies CFW builds
+                // at least as new as the bundled EVENCFW/18 implementation.
+                retainedCopySupported = hasCapability(firmwareInfo.capabilities,"directfb")
+                        && hasCapability(firmwareInfo.capabilities,"texcache12");
                 emitFirmwareInfo(firmwareInfo);
             }
         };

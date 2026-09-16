@@ -85,6 +85,8 @@ Use `windowSurface()` or `extensionSurface(feature)`. Call `invalidate(reason)` 
 
 Animations sample `request.credit.targetPresentationTimeNanos`. They must not run an independent frame-rate timer. Delayed work skips obsolete samples, while the final state remains eligible for display. See [WINDOW_MOTION.md](WINDOW_MOTION.md).
 
+For translation-heavy frames, `FrameMetadata.Builder.retainedCopy(...)` can mark a surface-local rectangle from the previous submitted frame that moved to a new location. Continue to submit the complete authoritative Gray8 target. A compatible host translates the hint to screen coordinates, applies the on-glasses retained copy, compares that prediction with the target, and sends every remaining difference as repair rectangles in the same presentation batch. It uses the plan only when it is smaller than the ordinary raster plan. Older hosts ignore the metadata record, and stale or superseded hints affect efficiency rather than final pixels. Copy sources and destinations must both fit inside the surface; at most eight hints may accompany one frame.
+
 The host copies only declared damage once into private retained Gray8, recomposes dirty 32×16 tiles, patches its retained packed framebuffer, and keeps the newest desired state. Geometry, visibility, lost delta state, and BLE reconnect trigger a keyframe. BLE loss never asks an application to repaint.
 
 ## Outcomes
@@ -129,6 +131,7 @@ The complete application-owned capability contract is in [CAPABILITY-PROTOCOL.md
 - `bash scripts/check-animation-examples.sh` verifies the documented animation
   starters, including compilation of the Java example against the SDK.
 - `priority-demo` contains independent installable provider applications.
+- `text-density-demo` is an installable swipe benchmark with eight increasing text-density levels and a retained-copy/raster A/B toggle.
 
 Run local checks with:
 

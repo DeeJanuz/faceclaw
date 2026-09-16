@@ -23,4 +23,5 @@ final class RenderBroker {
     SurfaceCompositor.Composite applyAndComposite(String id,ByteBuffer pixels,int x,int y,int width,int height,String fingerprint,ByteBuffer draws){return compositor.applyAndComposite(id,pixels,x,y,width,height,fingerprint,draws);}
     SurfaceCompositor.Composite applyDamageAndComposite(String id,ByteBuffer pixels,int[] damage,String fingerprint,ByteBuffer draws){return compositor.applyDamageAndComposite(id,pixels,damage,fingerprint,draws);}
     SurfaceCompositor.PackedComposite applyDamageAndCompositePacked(String id,ByteBuffer pixels,int[] damage,String fingerprint,ByteBuffer draws,byte[] target){return compositor.applyDamageAndCompositePacked(id,pixels,damage,fingerprint,draws,target);}
+    SurfaceCompositor.PackedComposite applyDamageAndCompositePacked(String id,ByteBuffer pixels,int[] damage,String fingerprint,ByteBuffer draws,int[] retainedCopies,byte[] target){return compositor.applyDamageAndCompositePacked(id,pixels,damage,fingerprint,draws,retainedCopies,target);}
 }

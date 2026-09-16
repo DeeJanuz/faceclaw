@@ -309,6 +309,93 @@ public final class BleImageOptimizer {
         }
     }
 
+    /** A mode-8 batch containing mode-9 retained copies and mode-3 repairs. */
+    public static final class CopyPlan {
+        public final byte[] payload;
+        public final int copyCount;
+        public final int repairRectCount;
+        public final int repairedBytes;
+        public final int nextFid;
+
+        CopyPlan(byte[] payload,int copyCount,int repairRectCount,int repairedBytes,int nextFid) {
+            this.payload=payload;this.copyCount=copyCount;this.repairRectCount=repairRectCount;
+            this.repairedBytes=repairedBytes;this.nextFid=nextFid;
+        }
+    }
+
+    /**
+     * Apply verified copy hints to the known firmware shadow, then encode every
+     * remaining difference from the authoritative target as mode-3 repairs.
+     * Returns null when the hint is invalid or cannot be repaired without a
+     * full-frame operation (mode-8 does not allow nested/full-frame messages).
+     */
+    public static CopyPlan buildRetainedCopyPayload(byte[] previous,byte[] next,int width,int height,
+            SurfaceCompositor.ScreenCopy[] copies,int fidStart,int maxRects) {
+        int stride=(width+1)>>1;
+        if(width<=0||height<=0||previous==null||next==null||previous.length!=stride*height
+                ||next.length!=stride*height||copies==null||copies.length==0)return null;
+        byte[] predicted=previous.clone();List<byte[]> copySubs=new ArrayList<>();
+        for(SurfaceCompositor.ScreenCopy copy:copies){
+            if(copy==null||copy.width<=0||copy.height<=0||copy.sourceX<0||copy.sourceY<0
+                    ||copy.destinationX<0||copy.destinationY<0||copy.sourceX>width-copy.width
+                    ||copy.destinationX>width-copy.width||copy.sourceY>height-copy.height
+                    ||copy.destinationY>height-copy.height)continue;
+            if(copy.sourceX==copy.destinationX&&copy.sourceY==copy.destinationY)continue;
+            applyRetainedCopy(predicted,width,copy);
+            copySubs.add(encodeMode9Copy(copy));
+        }
+        if(copySubs.isEmpty())return null;
+
+        List<byte[]> repairSubs=new ArrayList<>();int repairedBytes=0,nextFid=fidStart;
+        if(!Arrays.equals(predicted,next)){
+            IncrementalPlan single=buildIncrementalImagePayload(predicted,next,width,height,fidStart);
+            if(single==null)return null;
+            repairSubs.add(single.payload);repairedBytes=single.boxBytes;nextFid=advanceFid(fidStart);
+            if(maxRects>1){
+                List<int[]> rects=computeChangedRects(predicted,next,width,height,maxRects);
+                if(rects!=null){
+                    List<byte[]> split=new ArrayList<>(rects.size());int splitBytes=0,splitWire=0,fid=fidStart;boolean valid=true;
+                    for(int[] rect:rects){byte[] sub=encodeMode3Rect(next,stride,rect[0],rect[1],rect[2],rect[3],fid);if(sub.length>0xffff){valid=false;break;}split.add(sub);splitWire+=2+sub.length;splitBytes+=(rect[2]>>1)*rect[3];fid=advanceFid(fid);}
+                    if(valid&&splitWire<2+single.payload.length){repairSubs=split;repairedBytes=splitBytes;nextFid=fid;}
+                }
+            }
+        }
+        if(copySubs.size()+repairSubs.size()>255)return null;
+        List<byte[]> all=new ArrayList<>(copySubs.size()+repairSubs.size());all.addAll(copySubs);all.addAll(repairSubs);
+        byte[] payload=encodeMode8(all);if(payload==null)return null;
+        return new CopyPlan(payload,copySubs.size(),repairSubs.size(),repairedBytes,nextFid);
+    }
+
+    /** Mirrors the CFW overlap-safe 4bpp copy, including odd-pixel rectangles. */
+    static void applyRetainedCopy(byte[] packed,int width,SurfaceCompositor.ScreenCopy copy) {
+        int stride=(width+1)>>1;
+        boolean reverseY=copy.destinationY>copy.sourceY,reverseX=copy.destinationX>copy.sourceX;
+        for(int row=0;row<copy.height;row++){
+            int y=reverseY?copy.height-1-row:row;
+            for(int column=0;column<copy.width;column++){
+                int x=reverseX?copy.width-1-column:column;
+                int source=(copy.sourceY+y)*stride+((copy.sourceX+x)>>1);
+                int destination=(copy.destinationY+y)*stride+((copy.destinationX+x)>>1);
+                int value=((copy.sourceX+x)&1)==0?(packed[source]>>>4)&15:packed[source]&15;
+                if(((copy.destinationX+x)&1)==0)packed[destination]=(byte)((packed[destination]&15)|(value<<4));
+                else packed[destination]=(byte)((packed[destination]&0xf0)|value);
+            }
+        }
+    }
+
+    private static byte[] encodeMode9Copy(SurfaceCompositor.ScreenCopy copy) {
+        byte[] out=new byte[17];out[0]=9;int[] values={copy.sourceX,copy.sourceY,copy.width,copy.height,copy.destinationX,copy.destinationY,copy.width,copy.height};
+        for(int i=0;i<values.length;i++){out[1+i*2]=(byte)(values[i]&255);out[2+i*2]=(byte)((values[i]>>>8)&255);}return out;
+    }
+
+    private static byte[] encodeMode8(List<byte[]> subs) {
+        int total=2;for(byte[] sub:subs){if(sub==null||sub.length==0||sub.length>0xffff)return null;total+=2+sub.length;}
+        byte[] out=new byte[total];out[0]=8;out[1]=(byte)subs.size();int at=2;
+        for(byte[] sub:subs){out[at++]=(byte)(sub.length&255);out[at++]=(byte)((sub.length>>>8)&255);System.arraycopy(sub,0,out,at,sub.length);at+=sub.length;}return out;
+    }
+
+    private static int advanceFid(int fid){return fid>=0xfffe?1:fid+1;}
+
     // Break-even tuning for the rect splitter. Splitting adds ~15 fixed bytes per
     // rect (seglen + mode-3 header + fid + zlib framing) and loses cross-rect
     // dictionary sharing, so only split across gaps big enough to pay for that.

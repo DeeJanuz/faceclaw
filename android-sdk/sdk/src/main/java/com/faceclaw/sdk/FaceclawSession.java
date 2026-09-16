@@ -118,7 +118,7 @@ public final class FaceclawSession {
   try{
    List<DamageRect> damage=metadata.damage.isEmpty()?Collections.singletonList(new DamageRect(0,0,lease.width,lease.height)):metadata.damage;
    int[] rects=new int[damage.size()*4];for(int i=0;i<damage.size();i++){DamageRect r=damage.get(i);rects[i*4]=r.x;rects[i*4+1]=r.y;rects[i*4+2]=r.width;rects[i*4+3]=r.height;}
-   current.submitFrame(new FrameSubmission(surface.id(),lease.generation,lease.slotId,lease.sequence,lease.credit.creditId,metadata.clientFrameId,metadata.contentVersion,metadata.requestNextFrame,metadata.traceId,rects,metadata.draws==null?null:metadata.draws.encode()));
+   current.submitFrame(new FrameSubmission(surface.id(),lease.generation,lease.slotId,lease.sequence,lease.credit.creditId,metadata.clientFrameId,metadata.contentVersion,metadata.requestNextFrame,metadata.traceId,rects,DrawBatch.encodeMetadata(metadata.draws,metadata.retainedCopies)));
   }catch(RemoteException error){surface.release(lease.generation,lease.slotId,lease.sequence);reportDiagnostic(SdkDiagnostic.Category.TRANSPORT_FAILURE,"submit-frame",surface,lease.generation,true);transportLost(current);}
   catch(RuntimeException error){surface.release(lease.generation,lease.slotId,lease.sequence);reportDiagnostic(SdkDiagnostic.Category.LOCAL_VALIDATION,"submit-frame",surface,lease.generation,false);}
  }

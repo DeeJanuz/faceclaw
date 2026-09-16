@@ -21,7 +21,9 @@ export class ExtensionLayer implements Layer {
   private presentationId: string | undefined;
   /** Bind lifecycle cleanup to the logical presentation using this layer. */
   setPresentationId(presentationId: string | undefined): void {
-    this.presentationId = presentationId && /^[A-Za-z0-9_.:-]{1,128}$/.test(presentationId) ? presentationId : undefined;
+    const next = presentationId && /^[A-Za-z0-9_.:-]{1,128}$/.test(presentationId) ? presentationId : undefined;
+    if (this.presentationId !== next) this.frame = undefined;
+    this.presentationId = next;
   }
   private size = "";
   setFrame(pixels: Uint8Array, width: number, height: number): void {

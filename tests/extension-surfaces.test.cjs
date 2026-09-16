@@ -18,7 +18,7 @@ function harness({ awake = true, protectedFlow = false } = {}) {
     sleepAtAppRoot: () => { awake = false; sleeps++; },
     foregroundWindow: () => ({windowId: foreground}),
     hasOverlay: () => !!layer || protectedFlow,
-    showExtensionOverlay: next => { layer = next; return true; },
+    showExtensionOverlay: next => { if (!awake) return false; layer = next; return true; },
     closeExtensionOverlay: target => { if (target === layer) layer = undefined; target.closed(); },
     getWindows: () => [],
   };
@@ -26,7 +26,7 @@ function harness({ awake = true, protectedFlow = false } = {}) {
     constructor(input, resized, closed, heightMode, opaque, alignTop) { Object.assign(this, { input, resized, closed, heightMode, opaque, alignTop, presentationId: undefined }); }
     setPresentationId(id) { this.presentationId = id; }
   }
-  const context = { shell, ExtensionLayer: Surface, setTimeout: fn => { timers.set(++timerId, fn); return timerId; }, clearTimeout: id => timers.delete(id) };
+  const context = { shell, ExtensionLayer: Surface, NOTIFICATION_FIRST_FRAME_TIMEOUT_MS: 2000, setTimeout: fn => { timers.set(++timerId, fn); return timerId; }, clearTimeout: id => timers.delete(id) };
   vm.createContext(context);
   vm.runInContext(ts.transpileModule(`class Harness { ${methods.join('\n')} }; globalThis.Harness = Harness;`, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText, context);
   const controller = new context.Harness(); Object.assign(controller, { extensionSurfaces: new Map(), glassesLocked: false, phase: 'connected', ensureEvenHubSessionActive() {}, requestShellRender() {}, externalApps: { extensions: { surfaceInput() {}, openSurface() {}, setSurfaceVisibility() {}, closeSurface() {} } } });
@@ -40,7 +40,17 @@ test('arrival previews preserve the original sleep origin and layer across repla
   h.controller.showExtensionSurface('ui.notifications', 'example/Service', 'second');
   assert.equal(h.layer(), first); assert.equal(first.presentationId, 'second');
   assert.equal(h.wakes(), 1); assert.equal(h.timers.size, 1);
-  h.expire(); assert.equal(h.awake(), false); assert.equal(h.sleeps(), 1); assert.equal(h.layer(), undefined);
+  h.expire(); assert.equal(h.awake(), false); assert.equal(h.sleeps(), 1); assert.equal(h.layer(), undefined); assert.equal(h.controller.pendingNotificationWake, null);
+});
+test('replacement waits for its own frame even after the previous preview was revealed', () => {
+  const h = harness();
+  h.controller.showExtensionSurface('ui.notifications', 'example/Service', 'first');
+  const state = h.controller.extensionSurfaces.get('ui.notifications');
+  state.revealed = true;
+  h.timers.clear();
+  h.controller.showExtensionSurface('ui.notifications', 'example/Service', 'second');
+  assert.equal(state.revealed, false);
+  assert.equal(h.timers.size, 1);
 });
 test('awake previews retain the backdrop and protected flows never wake or open', () => {
   const awake = harness(); awake.controller.showExtensionSurface('ui.notifications', 'example/Service', 'key');

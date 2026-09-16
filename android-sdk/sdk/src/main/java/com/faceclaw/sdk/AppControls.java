@@ -23,7 +23,7 @@ public final class AppControls {
   windowGeneration=generation;
   if(catalog.epoch==next.epoch&&catalog.state==next.state)return;
   disconnect();catalog=next;windowGeneration=generation;if(!next.isSupported())return;
-  JSONArray features=new JSONArray();for(String id:Arrays.asList("control.result","window.policy","capture.session","invocation.lifecycle","resource.release"))if(next.supports(id,1))features.put(Protocol.object("id",id,"minVersion",1,"required",false,"fallback","none"));
+  JSONArray features=new JSONArray();for(String id:Arrays.asList("control.result","window.policy","capture.session","invocation.lifecycle","resource.release",ExtensionContract.NOTIFICATION_PREVIEW_TIMING))if(next.supports(id,1))features.put(Protocol.object("id",id,"minVersion",1,"required",false,"fallback","none"));
   transport.send("publish-contract",Protocol.object("contractVersion",1,"epoch",++declarationEpoch,"features",features));
  }
  public synchronized void window(long generation){windowGeneration=generation;}

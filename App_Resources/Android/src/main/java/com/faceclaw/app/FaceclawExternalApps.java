@@ -24,7 +24,7 @@ public final class FaceclawExternalApps {
  private final Map<String,Integer> retryAttempts=new ConcurrentHashMap<>();
  private final Map<String,byte[]> restorationTokens=new ConcurrentHashMap<>();
  private final Map<String,RecoveryContext> recoveryContexts=new ConcurrentHashMap<>();
- private FaceclawExternalAppListener listener;
+ private volatile FaceclawExternalAppListener listener;
  private final SharedPreferences prefs;
  private final FaceclawExtensions extensions;
  private final Map<String,Long> publishedFeatureGenerations=new HashMap<>();
@@ -223,9 +223,46 @@ public final class FaceclawExternalApps {
  }
  private boolean complete(Connection c,String id,long clientFrameId,long contentVersion,FrameOutcome.Status status,String trace,String diagnostic,boolean metadataDropped){if(c.pendingFrames.remove(id+":"+clientFrameId)==null)return false;outcome(c,id,clientFrameId,contentVersion,status,trace,diagnostic,metadataDropped);return true;}
  private void invalidFrame(Connection c){long now=SystemClock.elapsedRealtime();synchronized(c){if(now-c.invalidWindowStart>10000){c.invalidWindowStart=now;c.invalidFrames=0;}if(++c.invalidFrames>32)main.post(()->disconnect(c.component,false));}}
+ /**
+  * Extension surfaces are consumed by the shell's ExtensionLayer.  Keep this
+  * route separate from the window compositor: extension surface ids are
+  * private logical surfaces and are not registered compositor ids.  The
+  * frame is copied before the SDK buffer is released, then revalidated on the
+  * main thread immediately before invoking the shell callback.
+  */
+ private void deliverExtensionFrame(Connection c,Surface surface,long generation,int width,int height,ByteBuffer pixels,
+                                    long clientFrameId,long contentVersion,String trace,boolean metadataDropped,boolean terminalOutcome){
+  final String feature=surface.id.startsWith("extension:")?surface.id.substring(10):"";
+  if(feature.isEmpty())return;
+  final byte[] snapshot=new byte[width*height];
+  ByteBuffer copy=pixels.duplicate(); copy.position(0); copy.get(snapshot);
+  final FaceclawExternalAppListener callback=listener;
+  if(callback==null){if(terminalOutcome)complete(c,surface.id,clientFrameId,contentVersion,FrameOutcome.Status.HIDDEN,trace,"Extension callback unavailable",metadataDropped);return;}
+  main.post(()->{
+   synchronized(surface){
+    if(connections.get(c.component)!=c||!c.ready||!approved(c.service)||c.surfaces.get(feature)!=surface||
+       !extensions.controls(c.component,feature)||surface.generation!=generation||surface.width!=width||surface.height!=height||
+       !surface.visible||!surface.screenOn||(terminalOutcome&&(!c.pendingFrames.containsKey(surface.id+":"+clientFrameId)||
+       surface.clientFrameId!=clientFrameId||surface.contentVersion!=contentVersion))){
+     if(terminalOutcome)complete(c,surface.id,clientFrameId,contentVersion,FrameOutcome.Status.HIDDEN,trace,"Extension surface no longer visible",metadataDropped);
+     return;
+    }
+   }
+   try{
+    FaceclawExternalAppListener current=listener;
+    if(current==null){if(terminalOutcome)complete(c,surface.id,clientFrameId,contentVersion,FrameOutcome.Status.HIDDEN,trace,"Extension callback unavailable",metadataDropped);return;}
+    current.onExtensionFrame(c.component,feature,generation,width,height,ByteBuffer.wrap(snapshot));
+    if(terminalOutcome)complete(c,surface.id,clientFrameId,contentVersion,FrameOutcome.Status.PREVIEW_COMMITTED,trace,"Extension frame delivered",metadataDropped);
+   }catch(Exception error){
+    if(terminalOutcome)complete(c,surface.id,clientFrameId,contentVersion,FrameOutcome.Status.CANCELLED,trace,"Extension callback failed",metadataDropped);
+    disconnect(c.component,false);
+   }
+  });
+ }
  private void deliverFrame(Connection c,Surface surface,ByteBuffer pixels,int[] damage,byte[] draws,long clientFrameId,long contentVersion,String trace,boolean metadataDropped){
   surface.rasterSinceScene=true;
   if(connections.get(c.component)!=c||!c.ready||!surface.visible||!surface.screenOn){complete(c,surface.id,clientFrameId,contentVersion,FrameOutcome.Status.HIDDEN,trace,"Surface no longer visible",metadataDropped);return;}
+  if(surface.id.startsWith("extension:")){deliverExtensionFrame(c,surface,surface.generation,surface.width,surface.height,pixels,clientFrameId,contentVersion,trace,metadataDropped,true);return;}
   String compositorId="window".equals(surface.id)?"window:apk:"+c.component:"extension:"+c.component+":"+surface.id.substring(10);FaceclawBleCommunicator display=FaceclawBleCommunicator.getActive();
   if(display!=null){display.submitExternalSurfaceFrame(pixels,compositorId,surface.width,surface.height,damage,"apk:"+c.component+":"+contentVersion,draws==null?null:ByteBuffer.wrap(draws),(status,detail)->complete(c,surface.id,clientFrameId,contentVersion,status,trace,detail,metadataDropped),trace);return;}
   FaceclawPreviewCompositor preview=FaceclawPreviewCompositor.getActive();if(preview!=null){try{preview.submitSurfaceFrame(pixels,compositorId,0,0,surface.width,surface.height,"apk:"+contentVersion,0,0,draws==null?null:ByteBuffer.wrap(draws));complete(c,surface.id,clientFrameId,contentVersion,FrameOutcome.Status.PREVIEW_COMMITTED,trace,"Preview compositor committed",metadataDropped);}catch(Exception error){complete(c,surface.id,clientFrameId,contentVersion,FrameOutcome.Status.CANCELLED,trace,"Preview surface unavailable",metadataDropped);}return;}
@@ -277,7 +314,7 @@ public final class FaceclawExternalApps {
  private void drawLine(byte[] pixels,int surfaceWidth,int surfaceHeight,int x0,int y0,int x1,int y1,int width,byte value,ScenePlacement clip){int dx=Math.abs(x1-x0),sx=x0<x1?1:-1,dy=-Math.abs(y1-y0),sy=y0<y1?1:-1,error=dx+dy;while(true){fillRect(pixels,surfaceWidth,surfaceHeight,x0-width/2,y0-width/2,width,width,value,clip);if(x0==x1&&y0==y1)break;int e=2*error;if(e>=dy){error+=dy;x0+=sx;}if(e<=dx){error+=dx;y0+=sy;}}}
  private void blit(byte[] pixels,int surfaceWidth,int surfaceHeight,byte[] sourcePixels,int sourceWidth,int sourceHeight,int x,int y,int value,ScenePlacement clip){for(int row=0;row<sourceHeight;row++)for(int col=0;col<sourceWidth;col++){int dx=x+col,dy=y+row;if(dx<Math.max(0,clip.left)||dy<Math.max(0,clip.top)||dx>=Math.min(surfaceWidth,clip.right)||dy>=Math.min(surfaceHeight,clip.bottom))continue;int source=sourcePixels[row*sourceWidth+col]&255;if(source!=0)pixels[dy*surfaceWidth+dx]=(byte)(source*value/255);}}
  private int[] changedBounds(byte[] before,byte[] after,int width,int height){if(before==null||before.length!=after.length)return new int[]{0,0,width,height};int minX=width,minY=height,maxX=-1,maxY=-1;for(int i=0;i<after.length;i++)if(before[i]!=after[i]){int x=i%width,y=i/width;minX=Math.min(minX,x);minY=Math.min(minY,y);maxX=Math.max(maxX,x);maxY=Math.max(maxY,y);}return maxX<minX?new int[0]:new int[]{minX,minY,maxX-minX+1,maxY-minY+1};}
- private void deliverSceneFrame(Connection c,Surface surface,long generation,int width,int height,ByteBuffer pixels,int[] damage,String fingerprint){synchronized(surface){if(surface.generation!=generation||surface.width!=width||surface.height!=height||!surface.visible||!surface.screenOn)return;}if(connections.get(c.component)!=c||!c.ready)return;String compositorId="window".equals(surface.id)?"window:apk:"+c.component:"extension:"+c.component+":"+surface.id.substring(10);FaceclawBleCommunicator display=FaceclawBleCommunicator.getActive();if(display!=null)display.submitExternalSurfaceFrame(pixels,compositorId,width,height,damage,fingerprint,null,null);else{FaceclawPreviewCompositor preview=FaceclawPreviewCompositor.getActive();if(preview!=null)preview.submitSurfaceFrame(pixels,compositorId,0,0,width,height,fingerprint,0,0,null);}}
+ private void deliverSceneFrame(Connection c,Surface surface,long generation,int width,int height,ByteBuffer pixels,int[] damage,String fingerprint){synchronized(surface){if(surface.generation!=generation||surface.width!=width||surface.height!=height||!surface.visible||!surface.screenOn)return;}if(connections.get(c.component)!=c||!c.ready)return;if(surface.id.startsWith("extension:")){deliverExtensionFrame(c,surface,generation,width,height,pixels,0,0,"",false,false);return;}String compositorId="window".equals(surface.id)?"window:apk:"+c.component:"extension:"+c.component+":"+surface.id.substring(10);FaceclawBleCommunicator display=FaceclawBleCommunicator.getActive();if(display!=null)display.submitExternalSurfaceFrame(pixels,compositorId,width,height,damage,fingerprint,null,null);else{FaceclawPreviewCompositor preview=FaceclawPreviewCompositor.getActive();if(preview!=null)preview.submitSurfaceFrame(pixels,compositorId,0,0,width,height,fingerprint,0,0,null);}}
  private final class Connection implements ServiceConnection {
   final ServiceInfo service; final String component,session=UUID.randomUUID().toString();
   java.lang.ref.WeakReference<Activity> selectionActivity; long selectionUntil;
@@ -324,7 +361,7 @@ public final class FaceclawExternalApps {
    PendingIntent pi=value==null?null:value.consent;
    if(pi!=null&&pi.getCreatorUid()==uid&&service.packageName.equals(pi.getCreatorPackage())&&(Build.VERSION.SDK_INT<31||pi.isActivity())){consent=pi;emit(component,"consent",new JSONObject());launchRequestedConsent(this,pi);}
   }
-  Set<String> supported(){return listener==null?Collections.emptySet():new HashSet<>(Arrays.asList("control.result","window.policy","capture.session","invocation.lifecycle","resource.release"));}
+  Set<String> supported(){return listener==null?Collections.emptySet():new HashSet<>(Arrays.asList("control.result","window.policy","capture.session","invocation.lifecycle","resource.release",ExtensionContract.NOTIFICATION_PREVIEW_TIMING));}
   JSONObject catalog(){JSONArray features=new JSONArray();for(String id:supported())features.put(Protocol.object("id",id,"version",1,"limits",Protocol.object("maxPendingControls",32,"maxPolicyBytes",4096)));return Protocol.object("contractVersion",1,"epoch",catalogEpoch,"features",features);}
   void negotiate(JSONObject data)throws RemoteException{
    JSONObject result;
@@ -753,9 +790,14 @@ public final class FaceclawExternalApps {
   if(visible&&screenOn)scheduleCredit(c,surface,DisplayScheduler.Priority.VISIBLE_EXTENSION);
  }
  public void closeExtensionSurface(String component,String feature) {
+  closeExtensionSurface(component,feature,null);
+ }
+ public void closeExtensionSurface(String component,String feature,String presentationId) {
   Connection c=connections.get(component); if(c==null) return; Surface surface=c.surfaces.remove(feature); if(surface==null) return;
   surface.close();
-  send(component,"extension-surface",Protocol.object("feature",feature,"type","close","generation",surface.generation).toString());
+  JSONObject payload=Protocol.object("feature",feature,"type","close","generation",surface.generation);
+  if(presentationId!=null&&!presentationId.isEmpty())try{payload.put("presentationId",presentationId);}catch(Exception ignored){}
+  send(component,"extension-surface",payload.toString());
  }
  private String extensionLabel(String feature) {
   switch(feature) {

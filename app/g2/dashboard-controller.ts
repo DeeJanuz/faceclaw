@@ -91,6 +91,11 @@ import { isPreviewOnlyMode } from "../phone-ui/onboarding-state";
 
 type ConnectionPhase = "disconnected" | "connecting" | "connected" | "charging" | "disconnecting";
 
+// A provider must produce a correctly sized first frame promptly.  If it
+// does not, retire the presentation so a logical wake cannot strand the
+// display in a pending state indefinitely.
+const NOTIFICATION_FIRST_FRAME_TIMEOUT_MS = 2000;
+
 export type DashboardSnapshot = {
   phase: ConnectionPhase;
   status: string;
@@ -259,6 +264,8 @@ class DashboardController {
   private evenHubSuspendTimer: ReturnType<typeof setTimeout> | null = null;
   private evenHubSessionSuspended = false;
   private evenHubResumePromise: Promise<boolean> | null = null;
+  private notificationResumePromise: Promise<boolean> | null = null;
+  private notificationSessionReady = false;
   private faceclawWakeLeaseSupported = false;
   private faceclawWakeLeaseState: boolean | null = null;
   private wearNotifySupported = false;
@@ -315,7 +322,7 @@ class DashboardController {
   private unpairedDisconnectPending = false;
 
   private pendingNotificationWake: ExtensionLayer | null = null;
-  private extensionSurfaces = new Map<string, { component: string; layer: ExtensionLayer; timer?: ReturnType<typeof setTimeout>; wokeScreen: boolean; interacted: boolean; presentationId?: string }>();
+  private extensionSurfaces = new Map<string, { component: string; layer: ExtensionLayer; timer?: ReturnType<typeof setTimeout>; frameTimer?: ReturnType<typeof setTimeout>; wokeScreen: boolean; interacted: boolean; revealed: boolean; presentationId?: string; durationMs?: number }>();
   private externalApps: ExternalAppPlatform;
 
   constructor() {
@@ -409,6 +416,10 @@ class DashboardController {
           }
           const state = this.extensionSurfaces.get(feature);
           if (!state || state.component !== component) return;
+          if (feature === "ui.notifications") {
+            const viewport = appViewportRect("medium");
+            if (width !== viewport.width || height !== viewport.height) return;
+          }
           state.layer.setFrame(pixels, width, height); this.requestShellRender();
         },
       },
@@ -609,6 +620,7 @@ class DashboardController {
     }
 
     const communicator = this.communicator;
+    this.notificationSessionReady = false;
     if (communicator) {
       // Blanking is a compositor-level flag so worker-window surfaces go dark
       // too; retained state survives while the EvenHub page is absent.
@@ -737,8 +749,36 @@ class DashboardController {
    * the first caller's spans.
    */
   private ensureEvenHubSessionActive(frameId = 0): Promise<boolean> {
-    // A notification wake must not expose the retained full-screen app first.
-    if (this.pendingNotificationWake) return Promise.resolve(false);
+    // Notification previews have a two-step wake. First restore the physical
+    // G2 power and EvenHub session while the compositor remains blank. The
+    // normal barrier below unblanks only after the first valid preview frame.
+    if (this.pendingNotificationWake) {
+      if (this.notificationResumePromise) return this.notificationResumePromise;
+      const notificationCommunicator = this.communicator;
+      if (!notificationCommunicator) return Promise.resolve(Boolean(this.previewTarget));
+      if (this.phase === "charging" || this.phase === "disconnected") return Promise.resolve(false);
+      const notificationOperation = (async () => {
+        await frameTimings.spanAsync(frameId, "wake:screen-on", () => notificationCommunicator.setG2ScreenOn(true));
+        const resumed = await frameTimings.spanAsync(frameId, "wake:resume-session", () =>
+          notificationCommunicator.resumeEvenHubSession(),
+        );
+        if (!resumed) return false;
+        const ready = await frameTimings.spanAsync(frameId, "wake:await-ready", () =>
+          notificationCommunicator.awaitEvenHubSessionReady(EVENHUB_WAKE_READY_TIMEOUT_MS),
+        );
+        if (ready && this.communicator === notificationCommunicator) {
+          this.notificationSessionReady = true;
+          this.evenHubSessionSuspended = false;
+        }
+        return ready;
+      })();
+      this.notificationResumePromise = notificationOperation;
+      const clearNotificationOperation = () => {
+        if (this.notificationResumePromise === notificationOperation) this.notificationResumePromise = null;
+      };
+      void notificationOperation.then(clearNotificationOperation, clearNotificationOperation);
+      return notificationOperation;
+    }
     if (this.evenHubResumePromise) return this.evenHubResumePromise;
     const communicator = this.communicator;
     if (!communicator) {
@@ -755,11 +795,17 @@ class DashboardController {
       return Promise.resolve(false);
     }
 
+    const notificationSessionReady = this.notificationSessionReady;
+    const notificationResume = this.notificationResumePromise;
     const operation = (async () => {
-      await frameTimings.spanAsync(frameId, "wake:screen-on", () => communicator.setG2ScreenOn(true));
-      const resumed = await frameTimings.spanAsync(frameId, "wake:resume-session", () =>
-        communicator.resumeEvenHubSession(),
-      );
+      let resumed = notificationSessionReady;
+      if (notificationResume) resumed = await notificationResume;
+      if (!resumed) {
+        await frameTimings.spanAsync(frameId, "wake:screen-on", () => communicator.setG2ScreenOn(true));
+        resumed = await frameTimings.spanAsync(frameId, "wake:resume-session", () =>
+          communicator.resumeEvenHubSession(),
+        );
+      }
       if (!resumed) {
         return false;
       }
@@ -772,6 +818,7 @@ class DashboardController {
       if (ready && this.communicator === communicator) {
         this.evenHubSessionSuspended = false;
       }
+      this.notificationSessionReady = false;
       return ready;
     })();
     this.evenHubResumePromise = operation;
@@ -1348,6 +1395,8 @@ class DashboardController {
     this.wearNotifySupported = false;
     this.lockSurfaceConfigured = false;
     this.evenHubResumePromise = null;
+    this.notificationResumePromise = null;
+    this.notificationSessionReady = false;
     this.connectRunning = true;
 
     try {
@@ -1607,6 +1656,8 @@ class DashboardController {
       this.faceclawWakeLeaseSupported = false;
       this.faceclawWakeLeaseState = null;
       this.evenHubResumePromise = null;
+      this.notificationResumePromise = null;
+      this.notificationSessionReady = false;
       this.clearDashboardTimer();
       stopForegroundNotification();
       this.setPhase("disconnected");
@@ -1740,6 +1791,8 @@ class DashboardController {
     this.lockSurfaceConfigured = false;
     this.evenHubSessionSuspended = false;
     this.evenHubResumePromise = null;
+    this.notificationResumePromise = null;
+    this.notificationSessionReady = false;
 
     // The recording's frame store lives in the communicator, so save what has
     // accumulated rather than silently losing it with the connection.
@@ -2467,7 +2520,12 @@ class DashboardController {
     const planes = frameTimings.span(frameId, "paint", () =>
       frameTimings.runWithFrame(frameId, () => shell.paintSurface()),
     );
+    const notificationState = this.extensionSurfaces.get("ui.notifications");
     const notificationWakeFrame = this.pendingNotificationWake?.readyForDisplay ? this.pendingNotificationWake : null;
+    const notificationRevealState = notificationState?.durationMs !== undefined && !notificationState.revealed &&
+      notificationState.layer.readyForDisplay ? notificationState : null;
+    const notificationWakePresentationId = notificationState?.layer === notificationWakeFrame ? notificationState.presentationId : undefined;
+    const notificationWakeState = this.extensionSurfaces.get("ui.notifications");
     const paintMs = Date.now() - paintStartedAtMs;
     const paintUsedStaleData = endRenderPass();
     if (paintUsedStaleData) {
@@ -2509,9 +2567,28 @@ class DashboardController {
         preparedDraws,
       ),
     );
-    if (notificationWakeFrame && this.pendingNotificationWake === notificationWakeFrame) {
+    const notificationWakeIsCurrent = notificationWakeFrame && this.pendingNotificationWake === notificationWakeFrame &&
+      (!notificationWakeState || (notificationWakeState.layer === notificationWakeFrame &&
+        notificationWakeState.presentationId === notificationWakePresentationId));
+    if (notificationWakeIsCurrent) {
       this.pendingNotificationWake = null;
-      if (shell.isScreenOn()) await this.ensureEvenHubSessionActive(frameId);
+      const ready = shell.isScreenOn() && await this.ensureEvenHubSessionActive(frameId);
+      if (!ready) {
+        frameTimings.finishFrame(frameId, "discarded: notification wake unavailable");
+        this.closeExtensionSurface("ui.notifications", true, notificationWakePresentationId);
+        return;
+      }
+    }
+    const currentNotificationState = this.extensionSurfaces.get("ui.notifications");
+    if (notificationRevealState && currentNotificationState === notificationRevealState && shell.isScreenOn()) {
+      notificationRevealState.revealed = true;
+      if (notificationRevealState.frameTimer) clearTimeout(notificationRevealState.frameTimer);
+      notificationRevealState.frameTimer = undefined;
+      if (!notificationRevealState.interacted) {
+        notificationRevealState.timer = setTimeout(() => this.closeExtensionSurface(
+          "ui.notifications", true, notificationRevealState.presentationId,
+        ), notificationRevealState.durationMs ?? 5000);
+      }
     }
     if (this.pendingNotificationWake) {
       frameTimings.finishFrame(frameId, "discarded: waiting for notification content before wake");
@@ -2540,11 +2617,22 @@ class DashboardController {
     // The provider can reject an arrival (duplicate, summary, or its own APK
     // completion) after this hook returns; closing here would leave a blank
     // overlay. The provider updates the same layer when a valid frame exists.
+    const configuredSeconds = Number(this.externalApps?.extensions?.feature?.("ui.notifications")?.configuration?.previewSeconds);
+    const durationMs = [3, 5, 7, 10].includes(configuredSeconds) ? configuredSeconds * 1000 : 5000;
     if (prior && feature === "ui.notifications" && target !== "inbox" && prior.component === component) {
+      const replacement = prior.presentationId !== target;
       prior.presentationId = target;
       prior.layer.setPresentationId?.(target);
       if (prior.timer) clearTimeout(prior.timer);
-      prior.timer = setTimeout(() => this.closeExtensionSurface(feature, true, target), 5000);
+      if (prior.frameTimer) clearTimeout(prior.frameTimer);
+      prior.durationMs = durationMs;
+      prior.timer = undefined;
+      if (replacement) prior.revealed = false;
+      if (prior.revealed) {
+        prior.timer = setTimeout(() => this.closeExtensionSurface(feature, true, target), durationMs);
+      } else {
+        prior.frameTimer = setTimeout(() => this.closeExtensionSurface(feature, true, target), NOTIFICATION_FIRST_FRAME_TIMEOUT_MS);
+      }
       return true;
     }
     if (prior) { this.closeExtensionSurface(feature, false); }
@@ -2555,7 +2643,12 @@ class DashboardController {
       if (state) {
         if (feature !== "ui.notifications" || event.type === "click") state.interacted = true;
         if (event.type === "click") { state.layer.opaque = true; state.layer.alignTop = false; }
-        if (event.type !== "long-press" && event.type !== "long-press-release") { if (state.timer) clearTimeout(state.timer); state.timer = undefined; }
+        if (event.type !== "long-press" && event.type !== "long-press-release") {
+          if (state.timer) clearTimeout(state.timer);
+          if (state.frameTimer) clearTimeout(state.frameTimer);
+          state.timer = undefined;
+          state.frameTimer = undefined;
+        }
       }
       this.externalApps.extensions.surfaceInput(feature, event);
     }, (width, height) => {
@@ -2565,21 +2658,43 @@ class DashboardController {
       const state = this.extensionSurfaces.get(feature);
       if (!state || state.layer !== layer || (removedPresentationId && state.presentationId && removedPresentationId !== state.presentationId)) return;
       if (state.timer) clearTimeout(state.timer);
+      if (state.frameTimer) clearTimeout(state.frameTimer);
       if (this.pendingNotificationWake === layer) {
         this.pendingNotificationWake = null;
         setTimeout(() => { if (shell.isScreenOn() && !this.pendingNotificationWake) void this.ensureEvenHubSessionActive(); }, 0);
       }
       this.extensionSurfaces.delete(feature);
-      this.externalApps.extensions.closeSurface(feature);
+      this.externalApps.extensions.closeSurface(feature, removedPresentationId);
     }, feature === "ui.notifications" ? "medium" : "min", feature !== "ui.notifications" || target === "inbox" || wokeScreen, feature === "ui.notifications" && target !== "inbox");
     const presentationId = feature === "ui.notifications" && target !== "inbox" ? target : undefined;
-    const state = { component, layer, wokeScreen, interacted: target === "inbox", presentationId, timer: undefined as ReturnType<typeof setTimeout> | undefined };
+    const state = {
+      component,
+      layer,
+      wokeScreen,
+      interacted: target === "inbox",
+      revealed: target === "inbox",
+      presentationId,
+      durationMs: feature === "ui.notifications" && target !== "inbox" ? durationMs : undefined,
+      timer: undefined as ReturnType<typeof setTimeout> | undefined,
+      frameTimer: undefined as ReturnType<typeof setTimeout> | undefined,
+    };
     layer.setPresentationId?.(presentationId);
     this.extensionSurfaces.set(feature, state);
     if (feature === "ui.notifications" && wokeScreen) this.pendingNotificationWake = layer;
-    if (!shell.isScreenOn()) shell.wake("window");
-    if (!shell.showExtensionOverlay(layer, feature !== "ui.app-menu")) { this.extensionSurfaces.delete(feature); if (this.pendingNotificationWake === layer) this.pendingNotificationWake = null; if (wokeScreen) shell.sleep(); return false; }
-    if (feature === "ui.notifications" && target !== "inbox") state.timer = setTimeout(() => this.closeExtensionSurface(feature, true, state.presentationId), 5000);
+    // The shell refuses to install an overlay while the display is dark. Wake
+    // before adding the layer so the extension surface is opened with
+    // screenOn=true and its first frame can release the notification barrier.
+    const displayWasOff = !shell.isScreenOn();
+    if (displayWasOff) shell.wake("window");
+    if (!shell.showExtensionOverlay(layer, feature !== "ui.app-menu")) {
+      this.extensionSurfaces.delete(feature);
+      if (this.pendingNotificationWake === layer) this.pendingNotificationWake = null;
+      if (wokeScreen || displayWasOff) shell.sleep();
+      return false;
+    }
+    if (feature === "ui.notifications" && target !== "inbox") {
+      state.frameTimer = setTimeout(() => this.closeExtensionSurface(feature, true, state.presentationId), NOTIFICATION_FIRST_FRAME_TIMEOUT_MS);
+    }
     this.requestShellRender();
     return true;
   }
@@ -2599,6 +2714,10 @@ class DashboardController {
     if (feature === "ui.launcher") { setTimeout(() => shell.getWindows().find(window => window.appId === "launcher")?.requestRender(), 0); return true; }
     const state = this.extensionSurfaces.get(feature);
     if (!state || (feature === "ui.notifications" && presentationId !== undefined && state.presentationId !== presentationId)) return false;
+    if (state.timer) clearTimeout(state.timer);
+    if (state.frameTimer) clearTimeout(state.frameTimer);
+    state.timer = undefined;
+    state.frameTimer = undefined;
     shell.closeExtensionOverlay(state.layer);
     if (restoreSleep && state.wokeScreen && !shell.hasOverlay()) shell.sleep();
     return true;

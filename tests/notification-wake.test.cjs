@@ -10,7 +10,7 @@ function harness() {
   let methods;
   function visit(node) { if (ts.isClassDeclaration(node)) { const found = node.members.filter(m => wanted.has(m.name?.getText(source))); if (found.length === 2) methods = found.map(m => m.getText(source)); } ts.forEachChild(node, visit); }
   visit(source);
-  const events = []; let submit;
+  const events = []; const timers = []; let submit;
   const context = {
     shell: { isScreenOn: () => true, describeInputTarget() {}, paintSurface: () => [], underlayDim: () => 256 },
     frameTimings: { startFrame: () => 1, annotateFrame() {}, span: (_id, _label, fn) => fn(), runWithFrame: (_id, fn) => fn(), spanAsync: (_id, _label, fn) => fn(), finishFrame() {}, logFrame() {} },
@@ -18,23 +18,24 @@ function harness() {
     flattenPlanesWithDraws: () => ({ image: { width: 640, height: 350, to8bppBuffer: () => [] }, draws: [] }),
     prepareFrameDraws: () => [], SHELL_SURFACE_ID: 'shell', SHELL_SURFACE_Z_ORDER: 100,
     FRAME_TRANSMIT_BACKPRESSURE_TIMEOUT_MS: 1, EVENHUB_WAKE_READY_TIMEOUT_MS: 1,
+    setTimeout: fn => { timers.push(fn); return timers.length; }, clearTimeout() {},
   };
   vm.createContext(context);
   vm.runInContext(ts.transpileModule(`class Harness { ${methods.join('\n')} }; globalThis.Harness = Harness;`, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText, context);
   const controller = new context.Harness();
-  Object.assign(controller, { pendingNotificationWake: { readyForDisplay: false }, phase: 'connected', appliedUnderlayDim: 256,
+  Object.assign(controller, { pendingNotificationWake: { readyForDisplay: false }, extensionSurfaces: new Map(), phase: 'connected', appliedUnderlayDim: 256,
     schedulePreviewUpdate() {}, display: { submitSurfaceFrame: async () => { events.push('submit'); if (submit) await submit(); }, waitForFrameFinished: async () => { events.push('wait'); return true; } },
     communicator: { setG2ScreenOn: async () => events.push('screen-on'), resumeEvenHubSession: async () => { events.push('resume'); return true; }, setScreenBlanked: async () => events.push('unblank'), awaitEvenHubSessionReady: async () => true },
   });
-  return { controller, events, onSubmit: fn => submit = fn };
+  return { controller, events, timers, onSubmit: fn => submit = fn };
 }
 test('notification wake stays blank until content is submitted, without waiting for a blank frame ACK', async () => {
   const h = harness();
-  assert.equal(await h.controller.ensureEvenHubSessionActive(), false);
-  await h.controller.renderShell(); assert.deepEqual(h.events, ['submit']);
+  assert.equal(await h.controller.ensureEvenHubSessionActive(), true);
+  await h.controller.renderShell(); assert.deepEqual(h.events, ['screen-on', 'resume', 'submit']);
   h.controller.pendingNotificationWake.readyForDisplay = true;
   await h.controller.renderShell();
-  assert.deepEqual(h.events, ['submit', 'submit', 'screen-on', 'resume', 'unblank', 'wait']);
+  assert.deepEqual(h.events, ['screen-on', 'resume', 'submit', 'submit', 'unblank', 'wait']);
   assert.equal(h.controller.pendingNotificationWake, null);
 });
 test('a replaced notification cannot unblank from the previous in-flight submission', async () => {
@@ -43,4 +44,18 @@ test('a replaced notification cannot unblank from the previous in-flight submiss
   h.onSubmit(() => { h.controller.pendingNotificationWake = replacement; });
   await h.controller.renderShell();
   assert.deepEqual(h.events, ['submit']); assert.equal(h.controller.pendingNotificationWake, replacement);
+});
+
+test('the configured preview timer starts only after the first valid frame is revealed', async () => {
+  const h = harness();
+  const layer = { readyForDisplay: true };
+  h.controller.extensionSurfaces.set('ui.notifications', {
+    layer, component: 'com.faceclaw.t3/Service', wokeScreen: false, interacted: false,
+    revealed: false, presentationId: 'preview', durationMs: 3000,
+  });
+  await h.controller.renderShell();
+  const state = h.controller.extensionSurfaces.get('ui.notifications');
+  assert.equal(state.revealed, true);
+  assert.equal(typeof state.timer, 'number');
+  assert.equal(h.timers.length, 1);
 });

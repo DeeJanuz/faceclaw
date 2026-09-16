@@ -48,3 +48,10 @@ test('extension cleanup reports the presentation identity it was bound to',()=>{
  layer.setPresentationId('preview-1');layer.onRemoved();assert.deepEqual(removed,['preview-1']);
  layer.setPresentationId('bad token');layer.onRemoved();assert.deepEqual(removed,['preview-1',undefined]);
 });
+test('a new presentation cannot reuse pixels from the previous notification',()=>{
+ const image=load('app/graphics/image.ts',{'./bdffont':{},'./textwrap':{}});
+ const {ExtensionLayer}=load('app/ui/shell/extension-layer.ts',{'../../graphics/image':image,'./geometry':{appViewportRect:()=>({x:0,y:0,width:1,height:1})}});
+ const layer=new ExtensionLayer(()=>{},()=>{},()=>{},'medium',false);
+ layer.setPresentationId('preview-1');layer.setFrame(new Uint8Array([180]),1,1);assert.equal(layer.readyForDisplay,true);
+ layer.setPresentationId('preview-2');assert.equal(layer.readyForDisplay,false);
+});

@@ -142,7 +142,11 @@ public abstract class FaceclawAppService extends Service {
  public final JSONObject extensions() { try { return new JSONObject(extensionSnapshot.toString()); } catch(Exception ignored) { return new JSONObject(); } }
  /** Explicit compatibility fallback: legacy hosts retain host-owned assistant invocation. */
  public final boolean publishCompatibleExtensions(JSONArray declarations){
-  try{JSONArray copy=new JSONArray(declarations.toString());if(controls()==null||!controls().supports("invocation.lifecycle"))for(int i=0;i<copy.length();i++){JSONObject d=copy.getJSONObject(i);if(d.optString("feature").equals("assistant")&&d.optJSONObject("configuration")!=null)d.getJSONObject("configuration").remove("invocation");}return publishExtensions(copy);}catch(Exception invalid){return false;}
+  try{
+   AppControls negotiated=controls();
+   JSONArray copy=ExtensionContract.compatibleDeclarations(declarations,negotiated!=null&&negotiated.supports("invocation.lifecycle"),negotiated!=null&&negotiated.supports(ExtensionContract.NOTIFICATION_PREVIEW_TIMING));
+   return publishExtensions(copy);
+  }catch(Exception invalid){return false;}
  }
  public final boolean publishExtensions(org.json.JSONArray declarations) {
   try { return send("publish-extensions",Protocol.object("declarations",ExtensionContract.declarations(declarations))); } catch(Exception ignored) { return false; }

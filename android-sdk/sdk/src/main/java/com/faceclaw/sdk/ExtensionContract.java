@@ -6,6 +6,7 @@ import java.util.*;
 /** Versioned, bounded extension messages. Keys never name host preferences or native objects. */
 public final class ExtensionContract {
  public static final int VERSION=1, MAX_FEATURES=11, MAX_CONFIG=8192;
+ public static final String NOTIFICATION_PREVIEW_TIMING="notifications.preview-timing";
  public static final List<String> FEATURES=Collections.unmodifiableList(Arrays.asList("ui.launcher","ui.navigation","ui.app-menu","ui.window-layout","ui.typography","ui.notifications","assistant","transcription","refinement","device-tools","notification-content"));
  public static boolean known(String feature) { return FEATURES.contains(feature); }
  public static boolean live(String feature) { return known(feature)&&!Arrays.asList("ui.navigation","ui.window-layout","ui.typography").contains(feature); }
@@ -40,6 +41,7 @@ public final class ExtensionContract {
   else if(feature.equals("ui.typography")) { rules.put("font","(?:Inter_18pt|Roboto|RobotoMono|Montserrat)-(?:Regular|Light|Bold)\\.ttf"); rules.put("size","8:20"); rules.put("raster","antialiased|crisp|hinted"); rules.put("borderWidth","1:4"); rules.put("selectionBorderWidth","1:5"); rules.put("cardRadius","0:24"); }
   else if(feature.equals("ui.app-menu")) { rules.put("title","text"); rules.put("systemTitle","text"); rules.put("displayOffFirst","boolean"); rules.put("systemActionsLast","boolean"); }
   else if(feature.equals("assistant")) { rules.put("label","text"); rules.put("invocation","app|host"); }
+  else if(feature.equals("ui.notifications")) { rules.put("label","text"); rules.put("previewSeconds","3|5|7|10"); }
   else rules.put("label","text");
   for(Iterator<String> keys=data.keys();keys.hasNext();) {
    String key=keys.next(),rule=rules.get(key); Object value=data.get(key);
@@ -50,6 +52,23 @@ public final class ExtensionContract {
    else if(!(value instanceof String)||!((String)value).matches(rule)) throw new IllegalArgumentException("Unknown configuration token");
   }
   return new JSONObject(data.toString());
+ }
+ /**
+  * Remove optional configuration fields that this app cannot safely use on
+  * the current host. The returned declarations are still validated by
+  * {@link #declarations(JSONArray)} before publication.
+  */
+ static JSONArray compatibleDeclarations(JSONArray supplied,boolean invocationLifecycle,boolean notificationPreviewTiming) throws JSONException {
+  if(supplied==null)return null;
+  JSONArray copy=new JSONArray(supplied.toString());
+  for(int i=0;i<copy.length();i++) {
+   JSONObject declaration=copy.getJSONObject(i);
+   JSONObject config=declaration.optJSONObject("configuration");
+   if(config==null)continue;
+   if(!invocationLifecycle&&"assistant".equals(declaration.optString("feature")))config.remove("invocation");
+   if(!notificationPreviewTiming&&"ui.notifications".equals(declaration.optString("feature")))config.remove("previewSeconds");
+  }
+  return copy;
  }
  public static JSONArray declarations(JSONArray supplied) throws JSONException {
   if(supplied==null||supplied.length()>MAX_FEATURES||supplied.toString().length()>Protocol.MAX_JSON) throw new IllegalArgumentException("Too many extensions");

@@ -53,6 +53,7 @@ export class ExtensionPlatform {
   private menu: { component: string; generation: number; windowId: string; items: Map<string, { label: string; enabled?: boolean; onSelect: () => void }>; onClosed?: () => void } | null = null;
   private readonly conversationIds = new Map<string, string>();
   private lastGesture = new Map<string, number>();
+  private lastTapGesture = new Map<string, number>();
   constructor(private readonly native: any, private readonly hooks: ExtensionHooks, private readonly isLocked: () => boolean, private readonly isProtected: () => boolean = () => false) {
     active = this;
     this.appCapabilities = new AppCapabilityRegistry((component, type, data) => {
@@ -122,6 +123,7 @@ export class ExtensionPlatform {
     if (changed.has("ui.app-menu")) this.closeMenu();
     for (const feature of changed) {
       this.lastGesture.delete(feature);
+      this.lastTapGesture.delete(feature);
       if (["ui.launcher", "ui.app-menu", "ui.notifications"].includes(feature)) this.hooks.closeSurface?.(feature);
     }
     if (generation !== this.generation) {
@@ -183,10 +185,11 @@ export class ExtensionPlatform {
   setSurfaceVisibility(feature: string, visible: boolean, screenOn: boolean): void {
     const selected = this.feature(feature); if (selected) this.native.setExtensionSurfaceVisibility(selected.component, feature, visible, screenOn && !this.isLocked());
   }
-  closeSurface(feature: string): void {
+  closeSurface(feature: string, presentationId?: string): void {
     if (feature === "ui.app-menu") this.closeMenu();
     if (feature === "ui.notifications") this.notificationPresentation = null;
-    const selected = this.feature(feature); if (selected) this.native.closeExtensionSurface(selected.component, feature); this.lastGesture.delete(feature);
+    const selected = this.feature(feature); if (selected) this.native.closeExtensionSurface(selected.component, feature, presentationId ?? null);
+    this.lastGesture.delete(feature); this.lastTapGesture.delete(feature);
   }
   /** A foreground app can host its notification reader in its own window.
    * Only host-delivered input counts; IPC requests cannot manufacture a gesture.
@@ -199,13 +202,16 @@ export class ExtensionPlatform {
   surfaceInput(feature: string, input: unknown): void {
     const selected = this.feature(feature); if (!selected || this.isLocked() || !shell.isScreenOn() || !record(input)) return;
     if (["click", "double-click", "scroll-up", "scroll-down", "back", "long-press", "short-then-long-press"].includes(String(input.type))) this.lastGesture.set(feature, Date.now());
+    if (feature === "ui.notifications" && input.type === "click") this.lastTapGesture.set(feature, Date.now());
     this.native.sendExtension(selected.component, feature, "input", JSON.stringify({ event: "input", input }));
   }
   surfacePointer(feature: string, x: number, y: number, width: number, height: number): boolean {
     const selected = this.feature(feature);
     if (!selected || this.isLocked() || !shell.isScreenOn() || ![x, y, width, height].every(Number.isSafeInteger) || width < 1 || height < 1 || width > 640 || height > 480 || x < 0 || y < 0 || x >= width || y >= height) return false;
     if (!this.native.sendExtensionPointer(selected.component, feature, x, y, width, height)) return false;
-    this.lastGesture.set(feature, Date.now()); return true;
+    this.lastGesture.set(feature, Date.now());
+    if (feature === "ui.notifications") this.lastTapGesture.set(feature, Date.now());
+    return true;
   }
   onFrame(component: string, feature: string, generation: number, width: number, height: number, pixels: Uint8Array): void {
     if (!this.controls(component, feature) || this.isLocked() || !shell.isScreenOn()) return;
@@ -216,7 +222,7 @@ export class ExtensionPlatform {
     if (this.isLocked()) {
       for (const review of this.reviews.values()) review.cancel(); this.reviews.clear();
       for (const feature of ["ui.launcher", "ui.app-menu", "ui.notifications"]) { this.setSurfaceVisibility(feature, false, false); this.hooks.closeSurface?.(feature); }
-      this.lastGesture.clear(); this.uiNotifications.clear(); this.ownNotifications.clear(); this.lastNotificationSnapshot = ""; this.notificationPresentation = null;
+      this.lastGesture.clear(); this.lastTapGesture.clear(); this.uiNotifications.clear(); this.ownNotifications.clear(); this.lastNotificationSnapshot = ""; this.notificationPresentation = null;
     }
     this.lastState = ""; this.publishState();
   }
@@ -296,7 +302,9 @@ export class ExtensionPlatform {
       const wokeScreen = !shell.isScreenOn();
       if (this.hooks.showSurface?.("ui.notifications", selected.component, item.id) !== true) return;
       this.notificationPresentation = { id: item.id, key: item.source.key, postTime: item.source.postTime };
-      this.event(selected.component, "ui.notifications", { event: "notification-arrived", key: item.id, postTime: item.source.postTime, presentationId: item.id, wokeScreen });
+      const configuredSeconds = Number(selected.configuration?.previewSeconds);
+      const durationMs = [3, 5, 7, 10].includes(configuredSeconds) ? configuredSeconds * 1000 : 5000;
+      this.event(selected.component, "ui.notifications", { event: "notification-arrived", key: item.id, postTime: item.source.postTime, presentationId: item.id, wokeScreen, durationMs });
     }
   }
   clearOwnNotifications(component: string): void { this.ownNotifications.delete(component); }
@@ -366,7 +374,20 @@ export class ExtensionPlatform {
     if (action === "close-surface") {
       const hasPresentationId = feature === "ui.notifications" && Object.prototype.hasOwnProperty.call(data, "presentationId");
       const presentationId = hasPresentationId ? (boundedToken(data.presentationId) ? data.presentationId : "") : undefined;
-      const closed = this.hooks.closeSurface?.(feature, undefined, presentationId);
+      // A reader handoff keeps the physical display awake while the owning
+      // app opens.  Only a fresh notification gesture with a bound lease may
+      // request that behavior; every other close retains the default sleep
+      // restoration.
+      const keepAwake = data.restoreSleep === false;
+      if (keepAwake) {
+        const gesture = this.lastTapGesture.get(feature) ?? 0;
+        if (feature !== "ui.notifications" || !presentationId || this.notificationPresentation?.id !== presentationId ||
+            Date.now() - gesture > 5000 || !shell.isScreenOn()) {
+          result(false, "A fresh feature gesture is required"); return;
+        }
+        this.lastGesture.delete(feature); this.lastTapGesture.delete(feature);
+      }
+      const closed = this.hooks.closeSurface?.(feature, keepAwake ? false : undefined, presentationId);
       result(closed !== false, closed === false ? "Presentation is stale" : undefined); return;
     }
     // UI presentation is not blanket authority to perform background actions.

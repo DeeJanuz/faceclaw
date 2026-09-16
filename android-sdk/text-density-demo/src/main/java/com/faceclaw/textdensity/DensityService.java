@@ -34,6 +34,7 @@ import java.util.concurrent.Executors;
 public final class DensityService extends FaceclawAppService {
  private static final String TAG="DensityLab",FONT_KEY="density-mono-14-v1";
  private static final int LEVELS=8,HEADER_HEIGHT=54,GLYPH_WIDTH=9,GLYPH_HEIGHT=18,GLYPH_BASELINE=14;
+ private static final int MAX_ENTERING_GLYPHS_PER_FRAME=120;
  private static final long DURATION_NS=700_000_000L;
  private static volatile DensityService active;
  private final Object stateLock=new Object();
@@ -90,7 +91,7 @@ public final class DensityService extends FaceclawAppService {
   long sample=Math.max(SystemClock.elapsedRealtimeNanos(),request.credit.targetPresentationTimeNanos);
   synchronized(stateLock){
    from=level;to=targetLevel;move=direction;moving=animating;useCopy=copyEnabled;useCache=cacheEnabled;
-   if(moving){double raw=Math.max(0,Math.min(1,(sample-animationStartNs)/(double)DURATION_NS));double eased=raw*raw*(3-2*raw);offset=(int)Math.round((move>0?-width:width)*eased);continueAnimation=raw<1;}
+   if(moving){double raw=Math.max(0,Math.min(1,(sample-animationStartNs)/(double)DURATION_NS));double eased=raw*raw*(3-2*raw);int finalOffset=move>0?-width:width,desired=(int)Math.round(finalOffset*eased);int denseRows=Math.max(rowsFor(from),rowsFor(to));int maxStep=Math.max(GLYPH_WIDTH,Math.min(width,MAX_ENTERING_GLYPHS_PER_FRAME*GLYPH_WIDTH/denseRows));int change=Math.max(-maxStep,Math.min(maxStep,desired-lastSubmittedOffset));offset=lastSubmittedOffset+change;continueAnimation=offset!=finalOffset;}
    else{offset=0;continueAnimation=false;}
    previousOffset=lastSubmittedOffset;lastSubmittedOffset=offset;
    if(moving&&!continueAnimation){level=to;targetLevel=to;animating=false;lastSubmittedOffset=0;}

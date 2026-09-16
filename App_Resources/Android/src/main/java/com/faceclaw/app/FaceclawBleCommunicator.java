@@ -2793,31 +2793,45 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             FrameTimings.getInstance().spanEnd(frameId,"retained-copy-plan");
         }
 
+        // A copy with no repairs is already the complete frame in 21 bytes
+        // for the common one-region case. Avoid a second full texture scan.
+        if(copyCandidate!=null&&copyCandidate.repairRectCount==0){
+            nextImageFrameId=copyCandidate.nextFid;
+            BleImageOptimizer.TileImagePlan plan=new BleImageOptimizer.TileImagePlan(0,DASHBOARD_TILE,packed,width,height,nextMapSessionId(),copyCandidate.payload);
+            plan.fragments=BleImageOptimizer.planImageFragments(plan.payload,ConnectionOptions.IMAGE_FRAGMENT_SIZE);
+            FrameTimings.getInstance().log(frameId,"retained-copy exact copies="+copyCandidate.copyCount+" payload="+copyCandidate.payload.length+"B (vs raster "+copyOrdinaryBytes+"B)");
+            finishEnqueueDesiredImageLocked(plan,fingerprint,paintMs,frameId);return;
+        }
+
         // Texture-cache path: ship text as cached-glyph draws, punching their
-        // ink out of the baked deltas. When copy is also viable, plan against
-        // a forked cache model so the smaller wire candidate can win without
-        // falsely marking discarded texture uploads resident.
+        // ink out of the baked deltas. With a retained-copy candidate, plan
+        // only the exposed repair region and prefix its mode-9 move. Planning
+        // uses a forked cache model so a discarded candidate cannot falsely
+        // mark unsent texture uploads resident.
         if (textureCacheSupported && connectionOptions.TEXTURE_CACHE_FRAMES
                 && draws != null && draws.length > 0 && packed.length > 0) {
             byte[] deltaBase = (connectionOptions.INCREMENTAL_FRAMES && lastEnqueuedPacked.length > 0
                     && lastEnqueuedWidth == width && lastEnqueuedHeight == height)
                     ? lastEnqueuedPacked : null;
             TextureCacheState plannedCache = copyCandidate == null ? textureCache : textureCache.fork();
-            FrameTimings.getInstance().spanStart(frameId, "texture-plan");
-            TexturePlanner.Result tex = TexturePlanner.plan(
-                    deltaBase, packed, width, height, draws, plannedCache,
-                    nextImageFrameId,
-                    connectionOptions.MULTI_RECT_FRAMES, ConnectionOptions.MULTI_RECT_MAX_RECTS,
-                    textureImagesSupported, fwTextSupported);
+            String textureSpan=copyCandidate==null?"texture-plan":"copy-texture-plan";
+            FrameTimings.getInstance().spanStart(frameId, textureSpan);
+            TexturePlanner.Result tex = copyCandidate == null
+                    ? TexturePlanner.plan(deltaBase, packed, width, height, draws, plannedCache,
+                        nextImageFrameId, connectionOptions.MULTI_RECT_FRAMES,
+                        ConnectionOptions.MULTI_RECT_MAX_RECTS, textureImagesSupported, fwTextSupported)
+                    : TexturePlanner.planAfterCopies(copyCandidate, packed, width, height, draws, plannedCache,
+                        nextImageFrameId, connectionOptions.MULTI_RECT_FRAMES,
+                        ConnectionOptions.MULTI_RECT_MAX_RECTS, textureImagesSupported, fwTextSupported);
             if (tex != null) {
-                FrameTimings.getInstance().spanEnd(frameId, "texture-plan");
+                FrameTimings.getInstance().spanEnd(frameId, textureSpan);
                 int textureWireBytes=tex.payload.length;
                 for(byte[] upload:tex.uploads)textureWireBytes+=upload.length;
                 if(copyCandidate!=null&&copyCandidate.payload.length<textureWireBytes){
                     nextImageFrameId=copyCandidate.nextFid;
                     BleImageOptimizer.TileImagePlan plan=new BleImageOptimizer.TileImagePlan(0,DASHBOARD_TILE,packed,width,height,nextMapSessionId(),copyCandidate.payload);
                     plan.fragments=BleImageOptimizer.planImageFragments(plan.payload,ConnectionOptions.IMAGE_FRAGMENT_SIZE);
-                    FrameTimings.getInstance().log(frameId,"retained-copy update copies="+copyCandidate.copyCount+" repairs="+copyCandidate.repairRectCount+" repaired="+copyCandidate.repairedBytes+"B payload="+copyCandidate.payload.length+"B (vs texture "+textureWireBytes+"B, raster "+copyOrdinaryBytes+"B)");
+                    FrameTimings.getInstance().log(frameId,"retained-copy update copies="+copyCandidate.copyCount+" repairs="+copyCandidate.repairRectCount+" repaired="+copyCandidate.repairedBytes+"B payload="+copyCandidate.payload.length+"B (vs hybrid "+textureWireBytes+"B, raster "+copyOrdinaryBytes+"B)");
                     finishEnqueueDesiredImageLocked(plan,fingerprint,paintMs,frameId);return;
                 }
                 if(plannedCache!=textureCache)textureCache.adopt(plannedCache);
@@ -2826,7 +2840,8 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 BleImageOptimizer.TileImagePlan plan = new BleImageOptimizer.TileImagePlan(
                         0, DASHBOARD_TILE, packed, width, height, nextMapSessionId(), tex.payload);
                 plan.fragments = BleImageOptimizer.planImageFragments(plan.payload, ConnectionOptions.IMAGE_FRAGMENT_SIZE);
-                String texLog = "texture update " + (tex.fullFrame ? "full" : ("rects=" + tex.rectCount))
+                String texLog = (copyCandidate==null?"texture update ":"retained-copy+texture update copies="+copyCandidate.copyCount+" ")
+                        + (tex.fullFrame ? "full" : ("rects=" + tex.rectCount))
                         + " glyphs=" + tex.drawnGlyphs + " runs=" + tex.runCount
                         + " images=" + tex.drawnImages
                         + " fw=" + tex.fwGlyphs + "/" + tex.fwRuns
@@ -2841,7 +2856,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 finishEnqueueDesiredImageLocked(plan, fingerprint, paintMs, frameId);
                 return;
             }
-            FrameTimings.getInstance().spanEnd(frameId, "texture-plan");
+            FrameTimings.getInstance().spanEnd(frameId, textureSpan);
         }
 
         if(copyCandidate!=null){

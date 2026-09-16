@@ -127,6 +127,36 @@ public final class TexturePlanner {
             SurfaceCompositor.ScreenDraw[] draws,
             TextureCacheState cache, int fidStart,
             boolean allowMultiRect, int maxRects, boolean allowImages, boolean allowFwText) {
+        return planInternal(previous, next, width, height, draws, cache, fidStart,
+                allowMultiRect, maxRects, allowImages, allowFwText,
+                Collections.<byte[]>emptyList());
+    }
+
+    /**
+     * Plan cached draws only for pixels left different after a retained copy.
+     * The returned mode-8 batch starts with the already-validated mode-9 copy
+     * sub-messages, repairs the exposed pixels, then draws matching glyphs and
+     * images from the firmware cache.
+     */
+    public static Result planAfterCopies(
+            BleImageOptimizer.CopyPlan copyPlan,
+            byte[] next, int width, int height,
+            SurfaceCompositor.ScreenDraw[] draws,
+            TextureCacheState cache, int fidStart,
+            boolean allowMultiRect, int maxRects, boolean allowImages, boolean allowFwText) {
+        if (copyPlan == null || copyPlan.predicted == null || copyPlan.copySubmessages == null
+                || copyPlan.copySubmessages.isEmpty()) return null;
+        return planInternal(copyPlan.predicted, next, width, height, draws, cache, fidStart,
+                allowMultiRect, maxRects, allowImages, allowFwText,
+                copyPlan.copySubmessages);
+    }
+
+    private static Result planInternal(
+            byte[] previous, byte[] next, int width, int height,
+            SurfaceCompositor.ScreenDraw[] draws,
+            TextureCacheState cache, int fidStart,
+            boolean allowMultiRect, int maxRects, boolean allowImages, boolean allowFwText,
+            List<byte[]> prefixSubs) {
         if (next == null || draws == null || draws.length == 0 || width <= 0 || height <= 0) {
             return null;
         }
@@ -252,7 +282,8 @@ public final class TexturePlanner {
         List<Selected> drawn = new ArrayList<>(drawnGlyphs);
         drawn.addAll(imageDrawable);
         if ((drawn.isEmpty() && fwSubs.isEmpty())
-                || rects.size() + runs.size() + imageDrawable.size() + fwSubs.size() > 255) {
+                || prefixSubs.size() + rects.size() + runs.size()
+                    + imageDrawable.size() + fwSubs.size() > 255) {
             if (!selected.isEmpty()) {
                 cache.reset();
             }
@@ -271,12 +302,35 @@ public final class TexturePlanner {
         }
 
         long encodeStartedAtMs = android.os.SystemClock.elapsedRealtime();
-        List<byte[]> subs = new ArrayList<>();
+        // Once cached draws have been punched out, compare the remaining
+        // raster against the actual base again. A newly exposed text strip
+        // often becomes identical to the copied black background, so no
+        // mode-3 repair is needed at all; the mode-14 draws are sufficient.
+        List<int[]> rasterRects = rects;
+        if (!fullFrame) {
+            int[] rasterBox = BleImageOptimizer.computeChangedBox(previous, punched, width, height);
+            if (rasterBox == null) {
+                rasterRects = Collections.emptyList();
+            } else {
+                List<int[]> split = allowMultiRect
+                        ? BleImageOptimizer.computeChangedRects(previous, punched, width, height, maxRects)
+                        : null;
+                rasterRects = split != null ? split : Collections.singletonList(rasterBox);
+            }
+        }
+        if (prefixSubs.size() + rasterRects.size() + runs.size()
+                + imageDrawable.size() + fwSubs.size() > 255) {
+            if (!selected.isEmpty()) cache.reset();
+            return null;
+        }
+        List<byte[]> subs = new ArrayList<>(prefixSubs.size() + rasterRects.size()
+                + imageDrawable.size() + runs.size() + fwSubs.size());
+        subs.addAll(prefixSubs);
         int fid = fidStart;
         if (fullFrame) {
             subs.add(BleImageOptimizer.maybeCompress(punched, width, height));
         } else {
-            for (int[] r : rects) {
+            for (int[] r : rasterRects) {
                 subs.add(BleImageOptimizer.encodeMode3Rect(punched, stride, r[0], r[1], r[2], r[3], fid));
                 fid = (fid >= 0xfffe) ? 1 : fid + 1;
             }
@@ -290,7 +344,7 @@ public final class TexturePlanner {
 
         int uploadBytes = cache.pendingUploadBytes();
         List<byte[]> uploads = cache.drainUploadPayloads(UPLOAD_PAYLOAD_MAX);
-        Result result = new Result(payload, uploads, fid, rects.size(), drawnGlyphs.size(), runs.size(),
+        Result result = new Result(payload, uploads, fid, rasterRects.size(), drawnGlyphs.size(), runs.size(),
                 imageDrawable.size(), fwGlyphCount, fwSubs.size(),
                 bakedCandidates, uploadBytes, fullFrame);
         long doneAtMs = android.os.SystemClock.elapsedRealtime();

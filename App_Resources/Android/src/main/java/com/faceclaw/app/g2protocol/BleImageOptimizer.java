@@ -316,10 +316,16 @@ public final class BleImageOptimizer {
         public final int repairRectCount;
         public final int repairedBytes;
         public final int nextFid;
+        /** Shadow after the mode-9 copies, before raster repairs. */
+        final byte[] predicted;
+        /** Encoded mode-9 sub-messages, retained for copy+texture planning. */
+        final List<byte[]> copySubmessages;
 
-        CopyPlan(byte[] payload,int copyCount,int repairRectCount,int repairedBytes,int nextFid) {
+        CopyPlan(byte[] payload,int copyCount,int repairRectCount,int repairedBytes,int nextFid,
+                byte[] predicted,List<byte[]> copySubmessages) {
             this.payload=payload;this.copyCount=copyCount;this.repairRectCount=repairRectCount;
-            this.repairedBytes=repairedBytes;this.nextFid=nextFid;
+            this.repairedBytes=repairedBytes;this.nextFid=nextFid;this.predicted=predicted;
+            this.copySubmessages=copySubmessages;
         }
     }
 
@@ -363,13 +369,28 @@ public final class BleImageOptimizer {
         if(copySubs.size()+repairSubs.size()>255)return null;
         List<byte[]> all=new ArrayList<>(copySubs.size()+repairSubs.size());all.addAll(copySubs);all.addAll(repairSubs);
         byte[] payload=encodeMode8(all);if(payload==null)return null;
-        return new CopyPlan(payload,copySubs.size(),repairSubs.size(),repairedBytes,nextFid);
+        return new CopyPlan(payload,copySubs.size(),repairSubs.size(),repairedBytes,nextFid,
+                predicted,copySubs);
     }
 
     /** Mirrors the CFW overlap-safe 4bpp copy, including odd-pixel rectangles. */
     static void applyRetainedCopy(byte[] packed,int width,SurfaceCompositor.ScreenCopy copy) {
         int stride=(width+1)>>1;
         boolean reverseY=copy.destinationY>copy.sourceY,reverseX=copy.destinationX>copy.sourceX;
+        // Animation offsets land on even pixels about half the time. In that
+        // case the 4bpp region is byte aligned and arraycopy supplies the same
+        // overlap-safe memmove semantics as the firmware without walking two
+        // nibbles per byte in Java.
+        if(((copy.sourceX|copy.destinationX|copy.width)&1)==0){
+            int bytes=copy.width>>1;
+            for(int row=0;row<copy.height;row++){
+                int y=reverseY?copy.height-1-row:row;
+                int source=(copy.sourceY+y)*stride+(copy.sourceX>>1);
+                int destination=(copy.destinationY+y)*stride+(copy.destinationX>>1);
+                System.arraycopy(packed,source,packed,destination,bytes);
+            }
+            return;
+        }
         for(int row=0;row<copy.height;row++){
             int y=reverseY?copy.height-1-row:row;
             for(int column=0;column<copy.width;column++){

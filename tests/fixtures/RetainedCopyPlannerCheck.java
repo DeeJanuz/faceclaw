@@ -37,6 +37,23 @@ public final class RetainedCopyPlannerCheck {
   speculative=live.fork();speculative.reset();
   if(live.usedBytes()==0||live.generation()==speculative.generation())throw new AssertionError("speculative reset changed live cache");
 
+  int hybridWidth=96,hybridHeight=32;byte[] glyphGray=new byte[4*8];Arrays.fill(glyphGray,(byte)255);
+  int hybridFont=GlyphAtlas.ensureGray("hybrid-copy-font",'A',4,8,ByteBuffer.wrap(glyphGray));
+  byte[] hybridPrevious=new byte[(hybridWidth/2)*hybridHeight];int[] previousXs={12,28,44,60,76};
+  for(int x:previousXs)for(int y=8;y<16;y++)for(int px=x;px<x+4;px++)set(hybridPrevious,hybridWidth,px,y,15);
+  SurfaceCompositor.ScreenCopy hybridCopy=new SurfaceCompositor.ScreenCopy(8,0,hybridWidth-8,hybridHeight,0,0);
+  byte[] hybridNext=expectedCopy(hybridPrevious,hybridWidth,hybridCopy);int[] nextXs={4,20,36,52,68,88};
+  for(int y=8;y<16;y++)for(int x=88;x<92;x++)set(hybridNext,hybridWidth,x,y,15);
+  SurfaceCompositor.ScreenDraw[] hybridDraws=new SurfaceCompositor.ScreenDraw[nextXs.length];
+  for(int i=0;i<nextXs.length;i++)hybridDraws[i]=SurfaceCompositor.ScreenDraw.glyph(hybridFont,'A',nextXs[i],8,255);
+  BleImageOptimizer.CopyPlan hybridCopyPlan=BleImageOptimizer.buildRetainedCopyPayload(hybridPrevious,hybridNext,hybridWidth,hybridHeight,new SurfaceCompositor.ScreenCopy[]{hybridCopy},11,6);
+  TexturePlanner.Result hybrid=TexturePlanner.planAfterCopies(hybridCopyPlan,hybridNext,hybridWidth,hybridHeight,hybridDraws,new TextureCacheState(),11,true,6,false,false);
+  TexturePlanner.Result ordinaryTexture=TexturePlanner.plan(hybridPrevious,hybridNext,hybridWidth,hybridHeight,hybridDraws,new TextureCacheState(),11,true,6,false,false);
+  if(hybrid==null||ordinaryTexture==null||hybrid.drawnGlyphs!=1||hybrid.drawnGlyphs>=ordinaryTexture.drawnGlyphs)throw new AssertionError("hybrid planner did not limit glyph work to the exposed strip");
+  if(hybrid.rectCount!=0)throw new AssertionError("hybrid planner retained a redundant raster repair");
+  int hybridFirstLength=(hybrid.payload[2]&255)|((hybrid.payload[3]&255)<<8);
+  if(hybridFirstLength!=17||hybrid.payload[4]!=9)throw new AssertionError("hybrid batch does not apply retained copy first");
+
   SurfaceCompositor compositor=new SurfaceCompositor();compositor.configureScreen(20,10);compositor.configureSurface("apk",2,3,10,4,0,SurfaceCompositor.TRANSPARENCY_OPAQUE);
   byte[] gray=new byte[40];compositor.applyDamageAndCompositePacked("apk",ByteBuffer.wrap(gray),null,"first",null,null,new byte[100]);
   gray[0]=(byte)255;SurfaceCompositor.PackedComposite translated=compositor.applyDamageAndCompositePacked("apk",ByteBuffer.wrap(gray),null,"second",null,new int[]{2,0,8,4,0,0},new byte[100]);

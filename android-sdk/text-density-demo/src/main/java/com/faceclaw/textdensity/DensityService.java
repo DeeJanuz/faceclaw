@@ -20,6 +20,7 @@ import com.faceclaw.sdk.InvalidateReason;
 import com.faceclaw.sdk.RenderRequest;
 import com.faceclaw.sdk.RenderSurface;
 import com.faceclaw.sdk.ResourceHandle;
+import com.faceclaw.sdk.SdkDiagnostic;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -53,11 +54,12 @@ public final class DensityService extends FaceclawAppService {
 
  @Override public void onCreate(){super.onCreate();active=this;copyEnabled=getSharedPreferences("density-lab",MODE_PRIVATE).getBoolean("copy",true);cacheEnabled=getSharedPreferences("density-lab",MODE_PRIVATE).getBoolean("cache",true);text.setTypeface(Typeface.MONOSPACE);text.setColor(Color.WHITE);rule.setColor(Color.rgb(80,80,80));}
  @Override public void onDestroy(){if(active==this)active=null;renderer.shutdownNow();closeGlyphs();super.onDestroy();}
- @Override protected void onSessionReady(FaceclawSession session){current=session;surface=session.windowSurface();surface.setRasterRenderer(renderer,this::render);}
- @Override protected void onHostSnapshot(HostSnapshot snapshot){if(surface!=null&&snapshot.windowOpen)surface.invalidate(InvalidateReason.STATE);}
+ @Override protected void onSessionReady(FaceclawSession session){current=session;surface=session.windowSurface();surface.setRasterRenderer(renderer,this::renderSafely);Log.i(TAG,"session ready");}
+ @Override protected void onHostSnapshot(HostSnapshot snapshot){Log.i(TAG,"snapshot open="+snapshot.windowOpen+" generation="+snapshot.windowGeneration+" size="+snapshot.windowWidth+"x"+snapshot.windowHeight);if(surface!=null&&snapshot.windowOpen)surface.invalidate(InvalidateReason.STATE);}
+ @Override protected void onSdkDiagnostic(SdkDiagnostic diagnostic){Log.e(TAG,"sdk "+diagnostic.category+" operation="+diagnostic.operation+" surface="+diagnostic.surfaceId+" generation="+diagnostic.generation+" recoverable="+diagnostic.recoverable);}
  @Override protected void onControlEvent(ControlEvent event){
   if(event.type.equals("resource-prefetch-result")){synchronized(stateLock){cacheStatus=event.data.optString("state","UNKNOWN").toUpperCase(Locale.US);}Log.i(TAG,"prefetch "+event.data);return;}
-  if(surface!=null&&(event.type.equals("open")||event.type.equals("resize")||event.type.equals("visibility")))surface.invalidate(InvalidateReason.STATE);
+  if(surface!=null&&(event.type.equals("open")||event.type.equals("resize")||event.type.equals("visibility"))){if(event.type.equals("open"))surface.recoverRenderer();surface.invalidate(InvalidateReason.STATE);}
  }
  @Override protected void onFrameOutcome(FrameOutcome outcome){
   boolean shouldPrefetch=false;
@@ -70,13 +72,17 @@ public final class DensityService extends FaceclawAppService {
   else if("click".equals(event.type)||"pointer-click".equals(event.type)||"scroll-down".equals(event.type))start(1);
  }
 
- static void openWindow(){DensityService service=active;if(service!=null)service.requestOpenWindow();}
+ static void openWindow(){DensityService service=active;if(service==null){Log.w(TAG,"open requested before service creation");return;}RenderSurface currentSurface=service.surface;if(currentSurface!=null)currentSurface.recoverRenderer();boolean sent=service.requestOpenWindow();Log.i(TAG,"open requested sent="+sent+" session="+(service.current!=null)+(currentSurface==null?" surface=null":" surface="+currentSurface.width()+"x"+currentSurface.height()+" generation="+currentSurface.generation()+" visible="+currentSurface.visible()+" suspended="+currentSurface.rendererSuspended()));}
  static void step(int direction){DensityService service=active;if(service!=null)service.start(direction);}
  static void reset(){DensityService service=active;if(service!=null){synchronized(service.stateLock){service.animating=false;service.level=0;service.targetLevel=0;service.lastSubmittedOffset=0;service.cacheStatus="COLD";}if(service.surface!=null)service.surface.invalidate(InvalidateReason.STATE);}}
  static void setCopyEnabled(boolean value){DensityService service=active;if(service!=null){synchronized(service.stateLock){service.copyEnabled=value;}if(service.surface!=null)service.surface.invalidate(InvalidateReason.STATE);}}
  static void setCacheEnabled(boolean value){DensityService service=active;if(service!=null){synchronized(service.stateLock){service.cacheEnabled=value;service.cacheStatus=value?"COLD":"OFF";}if(service.surface!=null)service.surface.invalidate(InvalidateReason.STATE);}}
 
  private void start(int step){RenderSurface nextSurface;synchronized(stateLock){if(animating)return;direction=step<0?-1:1;targetLevel=Math.floorMod(level+direction,LEVELS);animationStartNs=SystemClock.elapsedRealtimeNanos();lastSubmittedOffset=0;animating=true;nextSurface=surface;}if(nextSurface!=null)nextSurface.invalidate(InvalidateReason.ANIMATION);}
+
+ private void renderSafely(FrameLease frame,RenderRequest request)throws Exception{
+  try{render(frame,request);}catch(Exception error){Log.e(TAG,"render failed",error);throw error;}catch(Error error){Log.e(TAG,"render failed",error);throw error;}
+ }
 
  private void render(FrameLease frame,RenderRequest request){
   int width=frame.width(),height=frame.height();ensureBitmap(width,height);ensureGlyphs();

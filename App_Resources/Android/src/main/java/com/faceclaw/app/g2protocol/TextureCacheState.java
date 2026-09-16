@@ -42,6 +42,39 @@ public final class TextureCacheState {
     private int generation = 0;
 
     /**
+     * Clone the phone-side cache model for speculative frame planning. The
+     * returned state can allocate and drain uploads without changing the live
+     * model; adopt() commits it only when that transport plan wins.
+     */
+    TextureCacheState fork() {
+        TextureCacheState copy = new TextureCacheState();
+        copy.allocEnd = allocEnd;
+        copy.fontTableOffsets.putAll(fontTableOffsets);
+        copy.glyphOffsets.putAll(glyphOffsets);
+        copy.imageOffsets.putAll(imageOffsets);
+        for (byte[] entry : pendingEntries) copy.pendingEntries.add(entry.clone());
+        copy.pendingBytes = pendingBytes;
+        copy.generation = generation;
+        return copy;
+    }
+
+    /** Commit a previously forked planner state after its plan is selected. */
+    void adopt(TextureCacheState source) {
+        if (source == null || source == this) return;
+        allocEnd = source.allocEnd;
+        fontTableOffsets.clear();
+        fontTableOffsets.putAll(source.fontTableOffsets);
+        glyphOffsets.clear();
+        glyphOffsets.putAll(source.glyphOffsets);
+        imageOffsets.clear();
+        imageOffsets.putAll(source.imageOffsets);
+        pendingEntries.clear();
+        for (byte[] entry : source.pendingEntries) pendingEntries.add(entry.clone());
+        pendingBytes = source.pendingBytes;
+        generation = source.generation;
+    }
+
+    /**
      * Forget everything: the on-glasses cache is gone (session teardown, lease
      * loss) or no longer trustworthy (upload timeout), or we ran out of space.
      * Glyphs and images re-upload lazily on next use.

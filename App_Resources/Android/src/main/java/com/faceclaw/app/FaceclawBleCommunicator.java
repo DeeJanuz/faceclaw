@@ -2767,30 +2767,65 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             return;
         }
 
+        // A retained-copy hint can shift the firmware shadow before repairing
+        // the exposed edge. Build that candidate before texture planning: a
+        // sideways text animation should not resend every cached-glyph
+        // placement when a 17-byte mode-9 copy plus a narrow repair is cheaper.
+        BleImageOptimizer.CopyPlan copyCandidate = null;
+        int copyOrdinaryBytes = Integer.MAX_VALUE;
+        if(retainedCopySupported&&connectionOptions.RETAINED_COPY_FRAMES&&connectionOptions.INCREMENTAL_FRAMES
+                &&copies!=null&&copies.length>0&&lastEnqueuedPacked.length>0
+                &&lastEnqueuedWidth==width&&lastEnqueuedHeight==height){
+            int baseFid=nextImageFrameId;
+            FrameTimings.getInstance().spanStart(frameId,"retained-copy-plan");
+            BleImageOptimizer.CopyPlan copy=BleImageOptimizer.buildRetainedCopyPayload(
+                    lastEnqueuedPacked,packed,width,height,copies,baseFid,ConnectionOptions.MULTI_RECT_MAX_RECTS);
+            if(copy!=null){
+                BleImageOptimizer.TileImagePlan keyframe=new BleImageOptimizer.TileImagePlan(0,DASHBOARD_TILE,packed,width,height,0);
+                copyOrdinaryBytes=keyframe.payload.length;
+                BleImageOptimizer.IncrementalPlan single=BleImageOptimizer.buildIncrementalImagePayload(lastEnqueuedPacked,packed,width,height,baseFid);
+                if(single!=null){
+                    copyOrdinaryBytes=Math.min(copyOrdinaryBytes,single.payload.length);
+                    if(connectionOptions.MULTI_RECT_FRAMES){BleImageOptimizer.MultiRectPlan multi=BleImageOptimizer.buildMultiRectImagePayload(lastEnqueuedPacked,packed,width,height,baseFid,ConnectionOptions.MULTI_RECT_MAX_RECTS);if(multi!=null)copyOrdinaryBytes=Math.min(copyOrdinaryBytes,multi.payload.length);}
+                }
+                if(copy.payload.length<copyOrdinaryBytes)copyCandidate=copy;
+            }
+            FrameTimings.getInstance().spanEnd(frameId,"retained-copy-plan");
+        }
+
         // Texture-cache path: ship text as cached-glyph draws, punching their
-        // ink out of the baked deltas. Uploads (mode 12) ride ahead of the
-        // image message on the ordered transport. Falls through to the plain
-        // paths whenever the planner has nothing to draw.
+        // ink out of the baked deltas. When copy is also viable, plan against
+        // a forked cache model so the smaller wire candidate can win without
+        // falsely marking discarded texture uploads resident.
         if (textureCacheSupported && connectionOptions.TEXTURE_CACHE_FRAMES
                 && draws != null && draws.length > 0 && packed.length > 0) {
             byte[] deltaBase = (connectionOptions.INCREMENTAL_FRAMES && lastEnqueuedPacked.length > 0
                     && lastEnqueuedWidth == width && lastEnqueuedHeight == height)
                     ? lastEnqueuedPacked : null;
+            TextureCacheState plannedCache = copyCandidate == null ? textureCache : textureCache.fork();
             FrameTimings.getInstance().spanStart(frameId, "texture-plan");
             TexturePlanner.Result tex = TexturePlanner.plan(
-                    deltaBase, packed, width, height, draws, textureCache,
+                    deltaBase, packed, width, height, draws, plannedCache,
                     nextImageFrameId,
                     connectionOptions.MULTI_RECT_FRAMES, ConnectionOptions.MULTI_RECT_MAX_RECTS,
                     textureImagesSupported, fwTextSupported);
             if (tex != null) {
-                nextImageFrameId = tex.nextFid;
-                for (byte[] upload : tex.uploads) {
-                    enqueueTextureUploadLocked(upload);
+                FrameTimings.getInstance().spanEnd(frameId, "texture-plan");
+                int textureWireBytes=tex.payload.length;
+                for(byte[] upload:tex.uploads)textureWireBytes+=upload.length;
+                if(copyCandidate!=null&&copyCandidate.payload.length<textureWireBytes){
+                    nextImageFrameId=copyCandidate.nextFid;
+                    BleImageOptimizer.TileImagePlan plan=new BleImageOptimizer.TileImagePlan(0,DASHBOARD_TILE,packed,width,height,nextMapSessionId(),copyCandidate.payload);
+                    plan.fragments=BleImageOptimizer.planImageFragments(plan.payload,ConnectionOptions.IMAGE_FRAGMENT_SIZE);
+                    FrameTimings.getInstance().log(frameId,"retained-copy update copies="+copyCandidate.copyCount+" repairs="+copyCandidate.repairRectCount+" repaired="+copyCandidate.repairedBytes+"B payload="+copyCandidate.payload.length+"B (vs texture "+textureWireBytes+"B, raster "+copyOrdinaryBytes+"B)");
+                    finishEnqueueDesiredImageLocked(plan,fingerprint,paintMs,frameId);return;
                 }
+                if(plannedCache!=textureCache)textureCache.adopt(plannedCache);
+                nextImageFrameId = tex.nextFid;
+                for (byte[] upload : tex.uploads) enqueueTextureUploadLocked(upload);
                 BleImageOptimizer.TileImagePlan plan = new BleImageOptimizer.TileImagePlan(
                         0, DASHBOARD_TILE, packed, width, height, nextMapSessionId(), tex.payload);
                 plan.fragments = BleImageOptimizer.planImageFragments(plan.payload, ConnectionOptions.IMAGE_FRAGMENT_SIZE);
-                FrameTimings.getInstance().spanEnd(frameId, "texture-plan");
                 String texLog = "texture update " + (tex.fullFrame ? "full" : ("rects=" + tex.rectCount))
                         + " glyphs=" + tex.drawnGlyphs + " runs=" + tex.runCount
                         + " images=" + tex.drawnImages
@@ -2809,34 +2844,12 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             FrameTimings.getInstance().spanEnd(frameId, "texture-plan");
         }
 
-        // Retained-copy path: mode 9 moves pixels already present in the CFW
-        // shadow, and mode 3 repairs make the full submitted raster authoritative.
-        // Compare against both the ordinary keyframe and raster delta before use.
-        if(retainedCopySupported&&connectionOptions.RETAINED_COPY_FRAMES&&connectionOptions.INCREMENTAL_FRAMES
-                &&copies!=null&&copies.length>0&&lastEnqueuedPacked.length>0
-                &&lastEnqueuedWidth==width&&lastEnqueuedHeight==height){
-            int baseFid=nextImageFrameId;
-            FrameTimings.getInstance().spanStart(frameId,"retained-copy-plan");
-            BleImageOptimizer.CopyPlan copy=BleImageOptimizer.buildRetainedCopyPayload(
-                    lastEnqueuedPacked,packed,width,height,copies,baseFid,ConnectionOptions.MULTI_RECT_MAX_RECTS);
-            if(copy!=null){
-                BleImageOptimizer.TileImagePlan keyframe=new BleImageOptimizer.TileImagePlan(0,DASHBOARD_TILE,packed,width,height,0);
-                int ordinaryBytes=keyframe.payload.length;
-                BleImageOptimizer.IncrementalPlan single=BleImageOptimizer.buildIncrementalImagePayload(lastEnqueuedPacked,packed,width,height,baseFid);
-                if(single!=null){
-                    ordinaryBytes=Math.min(ordinaryBytes,single.payload.length);
-                    if(connectionOptions.MULTI_RECT_FRAMES){BleImageOptimizer.MultiRectPlan multi=BleImageOptimizer.buildMultiRectImagePayload(lastEnqueuedPacked,packed,width,height,baseFid,ConnectionOptions.MULTI_RECT_MAX_RECTS);if(multi!=null)ordinaryBytes=Math.min(ordinaryBytes,multi.payload.length);}
-                }
-                if(copy.payload.length<ordinaryBytes){
-                    nextImageFrameId=copy.nextFid;
-                    BleImageOptimizer.TileImagePlan plan=new BleImageOptimizer.TileImagePlan(0,DASHBOARD_TILE,packed,width,height,nextMapSessionId(),copy.payload);
-                    plan.fragments=BleImageOptimizer.planImageFragments(plan.payload,ConnectionOptions.IMAGE_FRAGMENT_SIZE);
-                    FrameTimings.getInstance().spanEnd(frameId,"retained-copy-plan");
-                    FrameTimings.getInstance().log(frameId,"retained-copy update copies="+copy.copyCount+" repairs="+copy.repairRectCount+" repaired="+copy.repairedBytes+"B payload="+copy.payload.length+"B (vs raster "+ordinaryBytes+"B)");
-                    finishEnqueueDesiredImageLocked(plan,fingerprint,paintMs,frameId);return;
-                }
-            }
-            FrameTimings.getInstance().spanEnd(frameId,"retained-copy-plan");
+        if(copyCandidate!=null){
+            nextImageFrameId=copyCandidate.nextFid;
+            BleImageOptimizer.TileImagePlan plan=new BleImageOptimizer.TileImagePlan(0,DASHBOARD_TILE,packed,width,height,nextMapSessionId(),copyCandidate.payload);
+            plan.fragments=BleImageOptimizer.planImageFragments(plan.payload,ConnectionOptions.IMAGE_FRAGMENT_SIZE);
+            FrameTimings.getInstance().log(frameId,"retained-copy update copies="+copyCandidate.copyCount+" repairs="+copyCandidate.repairRectCount+" repaired="+copyCandidate.repairedBytes+"B payload="+copyCandidate.payload.length+"B (vs raster "+copyOrdinaryBytes+"B)");
+            finishEnqueueDesiredImageLocked(plan,fingerprint,paintMs,frameId);return;
         }
 
         FrameTimings.getInstance().spanStart(frameId, "compress-and-plan");

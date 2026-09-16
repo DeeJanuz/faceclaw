@@ -27,6 +27,16 @@ public final class RetainedCopyPlannerCheck {
   BleImageOptimizer.IncrementalPlan raster=BleImageOptimizer.buildIncrementalImagePayload(previous,next,width,height,7);int rasterBytes=raster==null?BleImageOptimizer.maybeCompress(next,width,height).length:raster.payload.length;
   if(plan.payload.length>=rasterBytes)throw new AssertionError("copy plan did not reduce payload");
 
+  int imageId=ImageAtlas.ensure("fork-check",2,2,ByteBuffer.wrap(new byte[]{0,64,(byte)128,(byte)255}));
+  TextureCacheState live=new TextureCacheState();int imageOffset=live.ensureImage(imageId,ImageAtlas.get(imageId));
+  if(imageOffset<0||!live.hasPendingUploads())throw new AssertionError("cache setup failed");
+  TextureCacheState speculative=live.fork();speculative.drainUploadPayloads(3600);
+  if(!live.hasPendingUploads())throw new AssertionError("speculative drain changed live cache");
+  live.adopt(speculative);
+  if(live.hasPendingUploads()||live.ensureImage(imageId,ImageAtlas.get(imageId))!=imageOffset)throw new AssertionError("cache adoption lost planned residency");
+  speculative=live.fork();speculative.reset();
+  if(live.usedBytes()==0||live.generation()==speculative.generation())throw new AssertionError("speculative reset changed live cache");
+
   SurfaceCompositor compositor=new SurfaceCompositor();compositor.configureScreen(20,10);compositor.configureSurface("apk",2,3,10,4,0,SurfaceCompositor.TRANSPARENCY_OPAQUE);
   byte[] gray=new byte[40];compositor.applyDamageAndCompositePacked("apk",ByteBuffer.wrap(gray),null,"first",null,null,new byte[100]);
   gray[0]=(byte)255;SurfaceCompositor.PackedComposite translated=compositor.applyDamageAndCompositePacked("apk",ByteBuffer.wrap(gray),null,"second",null,new int[]{2,0,8,4,0,0},new byte[100]);

@@ -239,6 +239,23 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     private boolean fwTextSupported;
     private boolean retainedCopySupported;
 
+    /** Content-free result returned to an SDK app after a texture prefetch request. */
+    public static final class TexturePrefetchResult {
+        public final String state;
+        public final int requested;
+        public final int resident;
+        public final int uploadBytes;
+        public final int cacheBytes;
+
+        TexturePrefetchResult(String state, int requested, int resident, int uploadBytes, int cacheBytes) {
+            this.state = state;
+            this.requested = requested;
+            this.resident = resident;
+            this.uploadBytes = uploadBytes;
+            this.cacheBytes = cacheBytes;
+        }
+    }
+
     private final ArrayDeque<OutboundMessage> pendingMessages = new ArrayDeque<>();
     private final ArrayDeque<OutboundMessage> inFlightMessages = new ArrayDeque<>();
     private OutboundMessage prewrittenMessage;
@@ -1164,6 +1181,71 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             if (!pendingMessages.isEmpty() || !inFlightMessages.isEmpty()) return 24;
             return 0;
         }
+    }
+
+    /**
+     * Upload immutable glyphs and images before a frame references them. Replacement is
+     * accepted only while the image pipeline is idle, so new cache bytes cannot
+     * overwrite offsets used by an already-planned draw. A later frame follows
+     * these mode-12 uploads on the ordered transport.
+     */
+    public TexturePrefetchResult prefetchTextures(int[] kinds, int[] resourceIds, int[] encodings, boolean replace) {
+        TexturePrefetchResult result;
+        synchronized (lock) {
+            int requested = resourceIds == null ? 0 : resourceIds.length;
+            if (kinds == null || encodings == null || resourceIds == null
+                    || kinds.length != requested || encodings.length != requested) {
+                return new TexturePrefetchResult("invalid", requested, 0, 0, textureCache.usedBytes());
+            }
+            if (!running || !sessionReady || shutdownRequested || !fixedLayoutCreated
+                    || !textureCacheSupported
+                    || !connectionOptions.TEXTURE_CACHE_FRAMES) {
+                return new TexturePrefetchResult("unsupported", requested, 0, 0, textureCache.usedBytes());
+            }
+            boolean busy = prewrittenMessage != null
+                    && ("image".equals(prewrittenMessage.kind) || "texcache".equals(prewrittenMessage.kind));
+            for (OutboundMessage message : pendingMessages) {
+                busy |= "image".equals(message.kind) || "texcache".equals(message.kind);
+            }
+            for (OutboundMessage message : inFlightMessages) {
+                busy |= "image".equals(message.kind) || "texcache".equals(message.kind);
+            }
+            synchronized (desiredTilesLock) {
+                busy |= desiredFrameId != 0;
+            }
+            if (busy && replace) {
+                return new TexturePrefetchResult("busy", requested, 0, 0, textureCache.usedBytes());
+            }
+            if (replace) textureCache.reset();
+            java.util.HashSet<String> unique = new java.util.HashSet<>();
+            int resident = 0;
+            for (int i = 0; i < requested; i++) {
+                int kind = kinds[i], resourceId = resourceIds[i], encoding = encodings[i];
+                String key = kind + ":" + resourceId + ":" + encoding;
+                if (resourceId <= 0 || !unique.add(key)) continue;
+                int offset = kind == SurfaceCompositor.ScreenDraw.KIND_GLYPH
+                        ? textureCache.ensureGlyph(resourceId, encoding, GlyphAtlas.get(resourceId, encoding))
+                        : kind == SurfaceCompositor.ScreenDraw.KIND_IMAGE && textureImagesSupported
+                            ? textureCache.ensureImage(resourceId, ImageAtlas.get(resourceId)) : -1;
+                if (offset >= 0) resident++;
+            }
+            int uploadBytes = textureCache.pendingUploadBytes();
+            for (byte[] upload : textureCache.drainUploadPayloads(3600)) {
+                enqueueTextureUploadLocked(upload);
+            }
+            String state = resident == unique.size() ? "queued" : (resident == 0 ? "cache_full" : "partial");
+            result = new TexturePrefetchResult(state, unique.size(), resident, uploadBytes, textureCache.usedBytes());
+            logLine("texture prefetch " + state + " resident=" + resident + "/" + unique.size()
+                    + " upload=" + uploadBytes + "B cache=" + textureCache.usedBytes() + "B");
+        }
+        interruptibleSleep.interrupt();
+        return result;
+    }
+
+    public TexturePrefetchResult prefetchTextureImages(int[] imageIds, boolean replace) {
+        int count=imageIds==null?0:imageIds.length;int[] kinds=new int[count],encodings=new int[count];
+        java.util.Arrays.fill(kinds,SurfaceCompositor.ScreenDraw.KIND_IMAGE);
+        return prefetchTextures(kinds,imageIds==null?new int[0]:imageIds,encodings,replace);
     }
 
     /**

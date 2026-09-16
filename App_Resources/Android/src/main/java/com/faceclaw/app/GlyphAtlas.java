@@ -132,6 +132,7 @@ public final class GlyphAtlas {
     private static final Object lock = new Object();
     private static final Map<String, Integer> fontIds = new HashMap<>();
     private static final Map<Long, Glyph> glyphs = new HashMap<>();
+    private static final Map<Long, Integer> grayReferences = new HashMap<>();
     private static int nextFontId = 1;
 
     /** Stable id for a font key; assigns one on first use. */
@@ -184,7 +185,29 @@ public final class GlyphAtlas {
                 }
                 glyphs.put(glyphKey, new Glyph(width, height, 0, height, 0, null, coverage));
             }
+            grayReferences.put(glyphKey, grayReferences.getOrDefault(glyphKey, 0) + 1);
             return fontId;
+        }
+    }
+
+    /**
+     * Drop one externally-owned glyph after its SDK resource is released. Font
+     * and glyph ids are never reused because TextureCacheState may still hold
+     * an old id-to-offset mapping until its next reset.
+     */
+    public static void forgetGray(String contentKey, int fontId, int encoding) {
+        if (contentKey == null || fontId <= 0) return;
+        synchronized (lock) {
+            Integer current = fontIds.get(contentKey);
+            if (current == null || current != fontId) return;
+            long glyphKey=key(fontId, encoding);int count=grayReferences.getOrDefault(glyphKey,1);
+            if(count>1){grayReferences.put(glyphKey,count-1);return;}
+            grayReferences.remove(glyphKey);glyphs.remove(glyphKey);
+            boolean remaining = false;
+            for (long remainingKey : glyphs.keySet()) {
+                if ((int) (remainingKey >>> 32) == fontId) { remaining = true; break; }
+            }
+            if (!remaining) fontIds.remove(contentKey, fontId);
         }
     }
 

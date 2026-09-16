@@ -2,6 +2,7 @@ package com.faceclaw.sdk;
 
 import android.os.*;
 import com.faceclaw.sdk.ipc.IFaceclawHostSession;
+import org.json.JSONArray;
 import org.json.JSONObject;
 import java.util.*;
 
@@ -124,7 +125,8 @@ public final class FaceclawSession {
  }
  boolean sendControl(String type,JSONObject json){return sendControlEvent(new ControlEvent(type,json));}
  private boolean sendControlEvent(ControlEvent event){IFaceclawHostSession current=currentHost();if(current==null)return false;try{current.sendControl(event);return true;}catch(RemoteException error){reportDiagnostic(SdkDiagnostic.Category.TRANSPORT_FAILURE,"send-control",null,0,true);transportLost(current);return false;}catch(RuntimeException error){reportDiagnostic(SdkDiagnostic.Category.LOCAL_VALIDATION,"send-control",null,0,false);return false;}}
- void registerResource(ResourceHandle handle,byte[] pixels){IFaceclawHostSession current=currentHost();if(current==null)return;try{current.registerResource(new ResourceRegistration(handle.id,handle.type.name(),handle.width,handle.height,handle.sha256,pixels));}catch(RemoteException error){reportDiagnostic(SdkDiagnostic.Category.TRANSPORT_FAILURE,"register-resource",null,0,true);transportLost(current);}catch(RuntimeException error){reportDiagnostic(SdkDiagnostic.Category.LOCAL_VALIDATION,"register-resource",null,0,false);}}
+ void registerResource(ResourceHandle handle,byte[] pixels){IFaceclawHostSession current=currentHost();if(current==null)return;try{current.registerResource(new ResourceRegistration(handle.id,handle.wireType,handle.width,handle.height,handle.sha256,pixels));}catch(RemoteException error){reportDiagnostic(SdkDiagnostic.Category.TRANSPORT_FAILURE,"register-resource",null,0,true);transportLost(current);}catch(RuntimeException error){reportDiagnostic(SdkDiagnostic.Category.LOCAL_VALIDATION,"register-resource",null,0,false);}}
+ boolean prefetchResources(List<Integer> ids,boolean replace){JSONArray values=new JSONArray();for(int id:ids)values.put(id);return sendControl("resource-prefetch",Protocol.object("requestId",UUID.randomUUID().toString(),"resourceIds",values,"replace",replace));}
  boolean commitScene(RenderSurface surface,SceneTransaction transaction){
   long generation=surface.generation();IFaceclawHostSession current=currentHost();if(current==null||generation==0)return false;
   try{current.commitScene(transaction.wire(surface.id(),generation));return true;}catch(RemoteException error){reportDiagnostic(SdkDiagnostic.Category.TRANSPORT_FAILURE,"commit-scene",surface,generation,true);transportLost(current);return false;}catch(RuntimeException error){reportDiagnostic(SdkDiagnostic.Category.LOCAL_VALIDATION,"commit-scene",surface,generation,false);return false;}

@@ -17,4 +17,17 @@ public class ResourceRecoveryTest {
   List<Integer> registered=new ArrayList<>();ResourceRegistry registry=new ResourceRegistry((h,p)->registered.add(h.id),id->{fail("legacy release");return false;},()->false,()->false,Collections::emptySet,()->{});
   ResourceHandle a=registry.registerGrayImage(1,1,ByteBuffer.wrap(new byte[]{9})),b=registry.registerGrayImage(1,1,ByteBuffer.wrap(new byte[]{1}));a.close();registered.clear();registry.replay();assertEquals(Arrays.asList(a.id,b.id),registered);
  }
+ @Test public void workingSetIsValidatedDeduplicatedAndMarkedForReplacement(){
+  List<Integer> prefetched=new ArrayList<>();boolean[] replace={false};
+  ResourceRegistry registry=new ResourceRegistry((h,p)->{},id->true,()->true,(ids,value)->{prefetched.addAll(ids);replace[0]=value;return true;},()->true,()->false,Collections::emptySet,()->{});
+  ResourceHandle a=registry.registerGrayImage(1,1,ByteBuffer.wrap(new byte[]{9})),b=registry.registerGlyph("mono",65,1,1,ByteBuffer.wrap(new byte[]{1}));
+  assertEquals("GLYPH/65/mono",b.wireType);
+  ResourceHandle samePixelsDifferentCharacter=registry.registerGlyph("mono",66,1,1,ByteBuffer.wrap(new byte[]{1}));assertNotEquals(b.id,samePixelsDifferentCharacter.id);
+  assertTrue(registry.prefetchWorkingSet(Arrays.asList(a,b,a)));assertEquals(Arrays.asList(a.id,b.id),prefetched);assertTrue(replace[0]);
+  a.close();try{registry.prefetchImages(a);fail();}catch(IllegalArgumentException expected){}
+ }
+ @Test public void unsupportedHostReceivesNoPrefetch(){
+  ResourceRegistry registry=new ResourceRegistry((h,p)->{},id->true,()->true,(ids,replace)->{fail();return false;},()->false,()->false,Collections::emptySet,()->{});
+  ResourceHandle image=registry.registerGrayImage(1,1,ByteBuffer.wrap(new byte[]{1}));assertFalse(registry.prefetch(image));
+ }
 }

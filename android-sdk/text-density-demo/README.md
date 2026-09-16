@@ -5,9 +5,9 @@ This standalone Faceclaw APK renders eight list pages. Each page adds two rows a
 - Click, pointer-click, or scroll down: next density.
 - Double-click, back, or scroll up: previous density.
 - Long-press: toggle retained copy plus repair.
-- The phone activity exposes the same optimization toggle and basic navigation controls.
+- The phone activity exposes independent firmware pre-cache and retained-copy toggles plus basic navigation controls.
 
-The renderer always submits a complete Gray8 target. In optimized mode it adds one `retainedCopy` hint for the moving body below the fixed header. The host can therefore compare mode 9 plus residual mode 3 repairs against its ordinary raster plan without changing application correctness.
+The renderer always submits a complete Gray8 target. It also registers the benchmark's printable monospace characters as a shared firmware glyph table and attaches their `DrawBatch.glyph` placements to every frame. After a settled frame is acknowledged, the app calls `prefetch` for the complete character set. A compatible host uploads those immutable glyphs to the firmware's 64 KiB texture cache while the display is idle, then sends compact mode-14 strings during the next swipe. Repeated characters reuse the same cached raster. Retained-copy mode independently adds one move hint for the body below the fixed header. Raster pixels remain authoritative when either optimization is unavailable.
 
 Build with Android SDK 35 and JDK 17:
 

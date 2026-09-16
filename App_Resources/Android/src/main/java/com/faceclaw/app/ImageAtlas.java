@@ -80,6 +80,7 @@ public final class ImageAtlas {
 
     private static final Object lock = new Object();
     private static final Map<String, Integer> ids = new HashMap<>();
+    private static final Map<Integer, Integer> references = new HashMap<>();
     private static final List<Entry> entries = new ArrayList<>();
 
     /**
@@ -95,7 +96,7 @@ public final class ImageAtlas {
         }
         synchronized (lock) {
             Integer existing = ids.get(key);
-            if (existing != null) return existing;
+            if (existing != null) { references.put(existing, references.getOrDefault(existing, 0) + 1); return existing; }
             byte[] nibbles = new byte[width * height];
             for (int i = 0; i < nibbles.length; i++) {
                 nibbles[i] = (byte) BmpUtil.nibbleForGray(pixels8bpp.get(i) & 0xff);
@@ -103,6 +104,7 @@ public final class ImageAtlas {
             entries.add(new Entry(width, height, nibbles));
             int id = entries.size(); // ids start at 1
             ids.put(key, id);
+            references.put(id, 1);
             return id;
         }
     }
@@ -110,6 +112,24 @@ public final class ImageAtlas {
     public static Entry get(int id) {
         synchronized (lock) {
             return id >= 1 && id <= entries.size() ? entries.get(id - 1) : null;
+        }
+    }
+
+    /**
+     * Drop one externally-owned content key after its SDK resource is released.
+     * Ids are never reused because TextureCacheState may still contain an old
+     * id-to-offset mapping until its next reset.
+     */
+    public static void forget(String key, int id) {
+        if (key == null || id <= 0) return;
+        synchronized (lock) {
+            Integer current = ids.get(key);
+            if (current == null || current != id) return;
+            int count = references.getOrDefault(id, 1);
+            if (count > 1) { references.put(id, count - 1); return; }
+            references.remove(id);
+            ids.remove(key);
+            if (id <= entries.size()) entries.set(id - 1, null);
         }
     }
 }

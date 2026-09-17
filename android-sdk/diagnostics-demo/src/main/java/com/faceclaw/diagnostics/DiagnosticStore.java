@@ -62,8 +62,12 @@ final class DiagnosticStore {
     if (durationMs >= 500) event("frame-severe", durationMs + "ms " + outcome);
     else if (durationMs >= 150) event("frame-slow", durationMs + "ms " + outcome);
     else if (outcome.contains("timeout")) event("frame-timeout", durationMs + "ms " + outcome);
-    else if (!outcome.startsWith("sent") && !outcome.contains("no change from displayed image") && !outcome.contains("handled by shell"))
-      event("frame-outcome", durationMs + "ms " + outcome);
+    else if (!outcome.startsWith("sent")) {
+      String lower = outcome.toLowerCase(Locale.US);
+      if (lower.contains("throttled") || lower.contains("ble_timeout") || lower.contains("session_lost")
+        || lower.contains("torn") || lower.contains("failure") || lower.contains("rejected"))
+        event("frame-outcome", durationMs + "ms " + outcome);
+    }
   }
 
   static synchronized void disconnect(String detail) {

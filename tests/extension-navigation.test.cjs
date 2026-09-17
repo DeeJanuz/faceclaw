@@ -138,6 +138,12 @@ test('tap-and-hold selects the switcher, including from a sleeping display', asy
   assert.deepEqual({ ...h.shell.screenshotCropRect() }, { x: 0, y: 0, width: 640, height: 480 });
  }
 });
+test('a standalone ring hold keeps the switcher reachable from a sleeping display', async () => {
+ const h = harness(); h.shell.sleep(); await h.send('long-press', 'ring');
+ assert.equal(h.shell.isScreenOn(), true);
+ assert.equal(h.shell.getFocus(), 'sidebar');
+ assert.equal(h.delivered.length, 0);
+});
 test('single hold requests App actions even when an app claims hold; text capture stays protected', async () => {
  const h = harness(); await h.send('long-press');
  assert.equal(h.delivered.length, 1); assert.equal(h.delivered[0].type, 'short-then-long-press');

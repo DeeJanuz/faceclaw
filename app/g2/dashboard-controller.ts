@@ -2681,7 +2681,9 @@ class DashboardController {
       const state = this.extensionSurfaces.get(feature);
       if (state) {
         if (feature !== "ui.notifications" || event.type === "click") state.interacted = true;
-        if (event.type === "click") { state.layer.opaque = true; state.layer.alignTop = false; }
+        // Keep an arrival preview's geometry and backdrop until the provider
+        // confirms its reader handoff. If opening fails, the same card remains
+        // usable instead of becoming a centered opaque overlay that traps input.
         if (event.type !== "long-press" && event.type !== "long-press-release") {
           if (state.timer) clearTimeout(state.timer);
           if (state.frameTimer) clearTimeout(state.frameTimer);

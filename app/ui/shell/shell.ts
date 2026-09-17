@@ -744,7 +744,10 @@ class Shell {
     }
 
     if (!this.screenOn) {
-      if (event.type === "short-then-long-press" && navigationPolicy().tapHold === "switcher") {
+      // The direct ring can lose the leading tap or deliver it outside the
+      // compound-gesture window. A hold on a dark display has no competing
+      // action, so keep the app switcher reachable as a safe fallback.
+      if ((event.type === "short-then-long-press" || event.type === "long-press") && navigationPolicy().tapHold === "switcher") {
         this.wake("sidebar");
         this.yieldFocusToSidebar();
         this.config.requestShellRender();

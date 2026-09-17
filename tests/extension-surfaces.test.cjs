@@ -58,9 +58,9 @@ test('awake previews retain the backdrop and protected flows never wake or open'
   const busy = harness({ awake: false, protectedFlow: true }); busy.controller.showExtensionSurface('ui.notifications', 'example/Service', 'key');
   assert.equal(busy.wakes(), 0); assert.equal(busy.layer(), undefined); assert.equal(busy.timers.size, 0);
 });
-test('opening content cancels timeout and new arrivals cannot replace the reader', () => {
+test('opening content cancels timeout without reframing the preview before handoff', () => {
   const h = harness({ awake: false }); h.controller.showExtensionSurface('ui.notifications', 'example/Service', 'first');
-  const reader = h.layer(); assert.equal(reader.alignTop, true); reader.input({ type: 'click' }); assert.equal(reader.alignTop, false);
+  const reader = h.layer(); assert.equal(reader.alignTop, true); reader.input({ type: 'click' }); assert.equal(reader.alignTop, true);
   assert.equal(reader.opaque, true); assert.equal(h.timers.size, 0);
   h.controller.showExtensionSurface('ui.notifications', 'example/Service', 'second');
   assert.equal(h.layer(), reader); h.controller.closeExtensionSurface('ui.notifications'); assert.equal(h.awake(), false);

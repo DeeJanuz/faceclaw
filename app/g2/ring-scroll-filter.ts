@@ -4,7 +4,10 @@
  * reach the UI so an ordinary flick does not skip several rows.
  */
 export const RING_SCROLL_REPEAT_INTERVAL_MS = 700;
-export const RING_TAP_HOLD_MAX_GAP_MS = 1_600;
+// Direct-ring firmware reports the tap and following hold as separate events.
+// Leave enough time for a deliberate tap, reposition, and hold; a captured
+// failed launcher gesture used 4.015 seconds between those packets.
+export const RING_TAP_HOLD_MAX_GAP_MS = 5_000;
 
 export type RingScrollDirection = "up" | "down";
 

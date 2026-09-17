@@ -202,7 +202,11 @@ export class ExtensionPlatform {
   surfaceInput(feature: string, input: unknown): void {
     const selected = this.feature(feature); if (!selected || this.isLocked() || !shell.isScreenOn() || !record(input)) return;
     if (["click", "double-click", "scroll-up", "scroll-down", "back", "long-press", "short-then-long-press"].includes(String(input.type))) this.lastGesture.set(feature, Date.now());
-    if (feature === "ui.notifications" && input.type === "click") this.lastTapGesture.set(feature, Date.now());
+    // The selected provider may map a wake-origin double click to "open" while
+    // keeping an awake double click as dismissal. Record both as physical tap
+    // evidence; the provider action and presentation identity still determine
+    // whether the gesture can release the preview without restoring sleep.
+    if (feature === "ui.notifications" && (input.type === "click" || input.type === "double-click")) this.lastTapGesture.set(feature, Date.now());
     this.native.sendExtension(selected.component, feature, "input", JSON.stringify({ event: "input", input }));
   }
   surfacePointer(feature: string, x: number, y: number, width: number, height: number): boolean {
@@ -383,8 +387,10 @@ export class ExtensionPlatform {
         const gesture = this.lastTapGesture.get(feature) ?? 0;
         if (feature !== "ui.notifications" || !presentationId || this.notificationPresentation?.id !== presentationId ||
             Date.now() - gesture > 5000 || !shell.isScreenOn()) {
+          console.warn(`[NotificationHandoff] rejected feature=${feature} presentation=${Boolean(presentationId)} current=${this.notificationPresentation?.id === presentationId} gestureAgeMs=${gesture ? Date.now() - gesture : -1} screenOn=${shell.isScreenOn()}`);
           result(false, "A fresh feature gesture is required"); return;
         }
+        console.info(`[NotificationHandoff] accepted gestureAgeMs=${Date.now() - gesture}`);
         this.lastGesture.delete(feature); this.lastTapGesture.delete(feature);
       }
       const closed = this.hooks.closeSurface?.(feature, keepAwake ? false : undefined, presentationId);

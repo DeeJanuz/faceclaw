@@ -128,6 +128,17 @@ test('reader handoff keeps the display awake only for a fresh bound notification
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(h.closed, [arrival.data.presentationId]);
 
+  const wakeTap = harness({ sources: [notification('wake-double')] });
+  wakeTap.arrive('wake-double');
+  const wakeArrival = wakeTap.arrivals()[0];
+  wakeTap.platform.surfaceInput('ui.notifications', { type: 'double-click' });
+  wakeTap.platform.onNativeEvent(wakeArrival.owner, 'extension-event', {
+    feature: 'ui.notifications', generation: 1, type: 'action', action: 'close-surface',
+    data: { callId: 'wake-handoff', presentationId: wakeArrival.data.presentationId, restoreSleep: false },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(wakeTap.closed, [wakeArrival.data.presentationId]);
+
   const stale = harness({ sources: [notification('stale-handoff')] });
   stale.arrive('stale-handoff');
   const staleArrival = stale.arrivals()[0];

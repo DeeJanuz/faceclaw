@@ -75,7 +75,7 @@ function controllerFor(h, options = {}) {
   return operation;
  };
  Object.assign(controller, { glassesLocked: false, evenHubSessionSuspended: options.suspended ?? true,
-  ensureEvenHubSessionActive: ensure, requestShellRender() {}, appendLog() {} });
+  ensureEvenHubSessionActive: ensure, requestShellRender() {}, appendLog() {}, ringScrollDirection() { return null; } });
  return {
   controller, barriers: () => barriers,
   send: (kind = 'display-wake', eventType = kind === 'even-ai' ? 1 : 3) => controller.handleInputEvent({ kind, eventType, eventSource: 0, frameId: 1 }),

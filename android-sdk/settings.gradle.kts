@@ -7,3 +7,4 @@ include(":priority-demo")
 
 include(":standalone-example")
 include(":text-density-demo")
+include(":diagnostics-demo")

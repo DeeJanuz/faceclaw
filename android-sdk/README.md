@@ -134,6 +134,7 @@ The complete application-owned capability contract is in [CAPABILITY-PROTOCOL.md
   starters, including compilation of the Java example against the SDK.
 - `priority-demo` contains independent installable provider applications.
 - `text-density-demo` is an installable swipe benchmark with eight increasing text-density levels and a retained-copy/raster A/B toggle.
+- `diagnostics-demo` is a launcher-visible, size-bounded incident recorder for frame degradation, BLE disconnects, crashes, ANRs, and notification handoffs.
 
 Run local checks with:
 

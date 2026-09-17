@@ -1,0 +1,18 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+ <uses-permission android:name="android.permission.READ_LOGS"/>
+ <uses-permission android:name="android.permission.DUMP" tools:ignore="ProtectedPermissions"/>
+ <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+ <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+ <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+ <queries><package android:name="com.faceclaw.app"/></queries>
+ <application android:theme="@android:style/Theme.Material.NoActionBar" android:label="Faceclaw Diagnostics" android:icon="@drawable/ic_diagnostics" android:allowBackup="false">
+  <activity android:name=".DiagnosticsActivity" android:exported="true">
+   <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
+  </activity>
+  <service android:name=".DiagnosticsService" android:exported="true" android:foregroundServiceType="specialUse" tools:ignore="ExportedService">
+   <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="Local diagnostics for the connected glasses display transport"/>
+   <intent-filter><action android:name="com.faceclaw.action.APP_SERVICE"/></intent-filter>
+   <meta-data android:name="com.faceclaw.PROTOCOL_MAJOR" android:value="2"/>
+  </service>
+ </application>
+</manifest>

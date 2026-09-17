@@ -141,7 +141,7 @@ generate an unbounded retry loop that competes with the foreground animation.
 
 ## A8 — Pace dense text by newly exposed work
 
-For a translated list, keep full source and destination snapshots with their
+Start a translated list with full source and destination snapshots carrying their
 glyph resource identity. Prefetch the combined printable-glyph set before the
 first visible offset. On each accepted frame, copy the overlap from the prior
 accepted frame and draw or repair only the entering strip.
@@ -154,6 +154,14 @@ nominal FPS. In the September 2026 Density Lab run, ordinary dense frames were
 about 61 ms median and 89 ms p90, while frames exposing roughly 170-864 glyphs at
 once produced periodic 191-197 ms stalls. Treat those values as one device/run,
 not firmware guarantees; the durable rule is to bound entering work.
+
+Measure the full-page path on the target glasses. Cached glyphs remove bitmap
+uploads, but the firmware still has to process placements and repair newly exposed
+raster regions. When a dense page remains materially slower, animate lightweight
+loading/unloading snapshots and issue the full destination frame once at rest.
+Keep the same retained-copy and glyph-cache rules for those snapshots. This is an
+intentional density fallback, not a reason to discard the final authoritative
+page or to rebuild dense layout on every animation frame.
 
 Use stable font and character identity (`registerGlyph(fontKey, encoding, ...)`)
 instead of registering printable characters as unrelated images. Keep the baked

@@ -35,13 +35,21 @@ new SDK lifecycle methods or wire events.
 
 ## Dense text translations
 
-Keep the complete source and destination content prepared during a list or reader
-transition. Do not replace either page with a loading/unloading label solely to
-reduce animation work. Register printable characters with
+Use complete source and destination snapshots when measurements show that their
+combined entering-glyph work fits the transport budget. Register printable characters with
 `registerGlyph(fontKey, encoding, ...)`, attach their `DrawBatch` placements to
 every authoritative Gray8 frame, and call `resources.prefetch(...)` while the
 first frame is still at the settled source position. If the next animation has a
 known complete cache set, `prefetchWorkingSet(...)` may replace an idle cache.
+
+Dense lists can still exceed the glasses' placement and raster-repair budget even
+when every glyph bitmap is cached. If paced full-page translation remains slower
+than the same motion with sparse content, replace the moving pages with explicit
+loading/unloading states and render the full destination only after motion ends.
+Prepare those lightweight snapshots before starting the clock, retain their glyph
+identity, and perform one authoritative full redraw at rest. This trades continuous
+content visibility for stable frame pacing and is the preferred fallback for
+session lists or transcripts that regress under measured device load.
 
 For each later translation frame, add a `retainedCopy(...)` for the overlap with
 the last **successfully submitted** frame. Clear that baseline after rejection,

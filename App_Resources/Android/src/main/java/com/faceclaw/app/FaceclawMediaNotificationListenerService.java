@@ -32,6 +32,7 @@ import org.json.JSONObject;
 
 public class FaceclawMediaNotificationListenerService extends NotificationListenerService {
     private static final String TAG = "FaceclawNotify";
+    private static final String DIAGNOSTICS_PACKAGE = "com.faceclaw.diagnostics";
     private static final double NOTIFICATION_ICON_GAMMA = 1.6;
     private static final String EXTRA_SUBSTITUTE_APP_NAME = "android.substName";
 
@@ -472,11 +473,11 @@ public class FaceclawMediaNotificationListenerService extends NotificationListen
             return false;
         }
         if (android.os.Process.myUserHandle().equals(statusBarNotification.getUser()) && FaceclawExternalApps.get(service).isSourceSuppressed(statusBarNotification.getPackageName())) return false;
-        // Our own notifications stay out of the mirror: the foreground-service
-        // one is noise, and the Timers app rings on the glasses itself (its
-        // phone notification is for the phone), so mirroring it would stack a
-        // notification modal over the ringing screen.
-        if (service.getPackageName().equals(statusBarNotification.getPackageName())) {
+        // Internal service notifications stay out of the mirror. In particular,
+        // mirroring the diagnostics foreground-service notification creates a
+        // feedback loop where an invisible shell overlay consumes glasses input.
+        String packageName = statusBarNotification.getPackageName();
+        if (service.getPackageName().equals(packageName) || DIAGNOSTICS_PACKAGE.equals(packageName)) {
             return false;
         }
         Notification notification = statusBarNotification.getNotification();

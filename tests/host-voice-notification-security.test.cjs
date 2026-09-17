@@ -110,6 +110,14 @@ test('native reply dispatch retains access, freshness, creator and duplicate che
     'getCreatorPackage()', 'getAllowFreeFormInput()', 'sentReplies.contains(receipt)', 'sentReplies.add(receipt)']) assert.ok(reply.includes(guard), guard);
   assert.ok(reply.indexOf('sentReplies.add(receipt)') < reply.indexOf('action.actionIntent.send('));
 });
+
+test('diagnostics foreground notification cannot enter the glasses notification overlay', () => {
+  const source = fs.readFileSync('App_Resources/Android/src/main/java/com/faceclaw/app/FaceclawMediaNotificationListenerService.java', 'utf8');
+  const filter = source.slice(source.indexOf('private static boolean shouldShowNotificationInList'), source.indexOf('private static String getNotificationDedupeGroupKey'));
+  assert.ok(source.includes('private static final String DIAGNOSTICS_PACKAGE = "com.faceclaw.diagnostics";'));
+  assert.ok(filter.includes('DIAGNOSTICS_PACKAGE.equals(packageName)'));
+});
+
 test('phone removal invalidates cached icons and reaches every removal observer', async () => {
   let proxy; let active = true; let fetches = 0; const removed = [];
   class GrayImage { constructor(w, h) { this.pixels = new Uint8Array(w * h); } clone() { return this; } }

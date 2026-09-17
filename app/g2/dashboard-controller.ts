@@ -24,7 +24,6 @@ import { firmwareIncompatibilityMessage } from "./firmware-compat";
 import { hasExtractedEvenHubFonts } from "./firmware-builder";
 import { resumeAutoReconnect, suppressAutoReconnect } from "./reconnect-policy";
 import { WearRemote, type WearRemoteInputKind } from "./wear-remote";
-import { RingScrollRateLimiter, type RingScrollDirection } from "./ring-scroll-filter";
 
 /** Who a synthetic (non-firmware) input stands for. */
 type SyntheticInputOrigin = "ring" | "watch";
@@ -254,7 +253,6 @@ class DashboardController {
   // Set at connect time from the persisted flag; the one-time post-onboarding
   // welcome sound plays on the first rendered frame (proof the session is warm).
   private welcomeSoundArmed = false;
-  private readonly ringScrollRateLimiter = new RingScrollRateLimiter();
 
   private communicator: FaceclawCommunicatorBridge | null = null;
   // Headless stand-in for the compositor when no glasses are paired
@@ -2131,14 +2129,6 @@ class DashboardController {
     const frameId =
       event.frameId > 0 ? event.frameId : frameTimings.startFrame(`input:${event.kind} (untracked source)`);
     frameTimings.logFrame(frameId, `TS input handler start: ${event.kind} ${eventLabel(event.kind, event.eventType)}`);
-    const ringScrollDirection = this.ringScrollDirection(event);
-    if (
-      ringScrollDirection !== null &&
-      !this.ringScrollRateLimiter.shouldDispatch(ringScrollDirection, Date.now())
-    ) {
-      frameTimings.finishFrame(frameId, "coalesced: ring scroll repeat rate limited");
-      return;
-    }
     let frameOwned = false;
     try {
       const inputEvent = rawInputEventToInputEvent(event);
@@ -2245,14 +2235,6 @@ class DashboardController {
         frameTimings.finishFrame(frameId, "discarded: input did not trigger a render");
       }
     }
-  }
-
-  /** Physical ring scrolls encode travel as a burst; temple and watch input keep their native cadence. */
-  private ringScrollDirection(event: RawInputEvent): RingScrollDirection | null {
-    if (event.eventSource !== EventSourceType.TOUCH_EVENT_FROM_RING) return null;
-    if (event.eventType === OsEventTypeList.SCROLL_TOP_EVENT) return "up";
-    if (event.eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT) return "down";
-    return null;
   }
 
   /** Launch or focus an in-process singleton app (notifications, debug tests). */

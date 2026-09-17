@@ -75,8 +75,7 @@ function controllerFor(h, options = {}) {
   return operation;
  };
  Object.assign(controller, { glassesLocked: false, evenHubSessionSuspended: options.suspended ?? true,
-  ensureEvenHubSessionActive: ensure, requestShellRender() {}, appendLog() {},
-  normalizeRingTapHold(event) { return event; }, ringScrollDirection() { return null; } });
+  ensureEvenHubSessionActive: ensure, requestShellRender() {}, appendLog() {}, ringScrollDirection() { return null; } });
  return {
   controller, barriers: () => barriers,
   send: (kind = 'display-wake', eventType = kind === 'even-ai' ? 1 : 3) => controller.handleInputEvent({ kind, eventType, eventSource: 0, frameId: 1 }),
@@ -206,18 +205,18 @@ test('allowlisted game holds cannot bypass text capture or a shell overlay', asy
  }
 });
 
-test('allowlisted gameplay hold keeps the extended system escape and release cancels it', async t => {
+test('allowlisted gameplay hold keeps the four-second system escape and release cancels it', async t => {
  t.mock.timers.enable({ apis: ['setTimeout'] });
  for (const appId of ['blocks', 'minesweeper', 'pinball']) {
   const released = harness({ appId });
   await released.send('long-press');
   await released.send('long-press-release');
-  t.mock.timers.tick(2500);
+  t.mock.timers.tick(4000);
   assert.equal(released.shell.stack.isAtBase(), true);
 
   const held = harness({ appId });
   await held.send('long-press');
-  t.mock.timers.tick(2499);
+  t.mock.timers.tick(3999);
   assert.equal(held.shell.stack.isAtBase(), true);
   t.mock.timers.tick(1);
   assert.equal(held.shell.stack.isAtBase(), false, appId);

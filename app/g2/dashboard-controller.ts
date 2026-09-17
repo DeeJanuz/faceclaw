@@ -24,7 +24,7 @@ import { firmwareIncompatibilityMessage } from "./firmware-compat";
 import { hasExtractedEvenHubFonts } from "./firmware-builder";
 import { resumeAutoReconnect, suppressAutoReconnect } from "./reconnect-policy";
 import { WearRemote, type WearRemoteInputKind } from "./wear-remote";
-import { RingScrollRateLimiter, RingTapHoldRecognizer, type RingScrollDirection } from "./ring-scroll-filter";
+import { RingScrollRateLimiter, type RingScrollDirection } from "./ring-scroll-filter";
 
 /** Who a synthetic (non-firmware) input stands for. */
 type SyntheticInputOrigin = "ring" | "watch";
@@ -255,7 +255,6 @@ class DashboardController {
   // welcome sound plays on the first rendered frame (proof the session is warm).
   private welcomeSoundArmed = false;
   private readonly ringScrollRateLimiter = new RingScrollRateLimiter();
-  private readonly ringTapHoldRecognizer = new RingTapHoldRecognizer();
 
   private communicator: FaceclawCommunicatorBridge | null = null;
   // Headless stand-in for the compositor when no glasses are paired
@@ -2132,7 +2131,6 @@ class DashboardController {
     const frameId =
       event.frameId > 0 ? event.frameId : frameTimings.startFrame(`input:${event.kind} (untracked source)`);
     frameTimings.logFrame(frameId, `TS input handler start: ${event.kind} ${eventLabel(event.kind, event.eventType)}`);
-    event = this.normalizeRingTapHold(event, Date.now());
     const ringScrollDirection = this.ringScrollDirection(event);
     if (
       ringScrollDirection !== null &&
@@ -2247,25 +2245,6 @@ class DashboardController {
         frameTimings.finishFrame(frameId, "discarded: input did not trigger a render");
       }
     }
-  }
-
-  private normalizeRingTapHold(event: RawInputEvent, nowMs: number): RawInputEvent {
-    if (event.eventSource !== EventSourceType.TOUCH_EVENT_FROM_RING || event.kind !== "sys-event") return event;
-    if (event.eventType === OsEventTypeList.CLICK_EVENT) {
-      this.ringTapHoldRecognizer.noteTap(nowMs);
-      return event;
-    }
-    if (event.eventType === OsEventTypeList.RING_LONG_PRESS_EVENT) {
-      if (this.ringTapHoldRecognizer.consumeLongPress(nowMs)) {
-        frameTimings.logFrame(event.frameId, "direct ring tap + hold normalized to tap-then-hold");
-        return { ...event, eventType: OsEventTypeList.SHORT_THEN_LONG_PRESS_EVENT };
-      }
-      return event;
-    }
-    if (event.eventType !== OsEventTypeList.RING_LONG_PRESS_RELEASE_EVENT) {
-      this.ringTapHoldRecognizer.reset();
-    }
-    return event;
   }
 
   /** Physical ring scrolls encode travel as a burst; temple and watch input keep their native cadence. */

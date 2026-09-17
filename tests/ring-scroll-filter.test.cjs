@@ -38,20 +38,3 @@ test('reset rearms the next scroll immediately', () => {
   limiter.reset();
   assert.equal(limiter.shouldDispatch('up', 5_010), true);
 });
-
-test('tap followed promptly by a hold reconstructs the combined ring gesture', () => {
-  const { RingTapHoldRecognizer, RING_TAP_HOLD_MAX_GAP_MS } = load();
-  const recognizer = new RingTapHoldRecognizer();
-  recognizer.noteTap(10_000);
-  assert.equal(recognizer.consumeLongPress(14_015), true);
-  recognizer.noteTap(20_000);
-  assert.equal(recognizer.consumeLongPress(20_000 + RING_TAP_HOLD_MAX_GAP_MS), true);
-  assert.equal(recognizer.consumeLongPress(20_001 + RING_TAP_HOLD_MAX_GAP_MS), false);
-});
-
-test('an old tap does not consume a standalone long press', () => {
-  const { RingTapHoldRecognizer, RING_TAP_HOLD_MAX_GAP_MS } = load();
-  const recognizer = new RingTapHoldRecognizer();
-  recognizer.noteTap(20_000);
-  assert.equal(recognizer.consumeLongPress(20_001 + RING_TAP_HOLD_MAX_GAP_MS), false);
-});

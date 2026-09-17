@@ -199,9 +199,7 @@ const noopActions: LayerActions = noopLayerActions;
  * hold) and the shell opens the system menu anyway — the recovery path when
  * the app ignores or mishandles the gesture.
  */
-// The ring reports LONG_PRESS only after its own hold threshold. Count 2.5s
-// from that report so the system escape opens after roughly 3.5s of contact.
-const LONG_PRESS_ESCAPE_MENU_MS = 2500;
+const LONG_PRESS_ESCAPE_MENU_MS = 4000;
 
 /** Only these built-in games may keep an active gameplay hold over hold: app-menu. */
 const GAMEPLAY_HOLD_ALLOWLIST = new Set(["blocks", "minesweeper", "pinball"]);

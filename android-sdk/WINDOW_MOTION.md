@@ -33,6 +33,33 @@ new SDK lifecycle methods or wire events.
 6. On hide/loss/removal, stop work and release unsafe caches. On return, redraw the
    authorized desired state using current geometry/generation, not old intermediate frames.
 
+## Dense text translations
+
+Keep the complete source and destination content prepared during a list or reader
+transition. Do not replace either page with a loading/unloading label solely to
+reduce animation work. Register printable characters with
+`registerGlyph(fontKey, encoding, ...)`, attach their `DrawBatch` placements to
+every authoritative Gray8 frame, and call `resources.prefetch(...)` while the
+first frame is still at the settled source position. If the next animation has a
+known complete cache set, `prefetchWorkingSet(...)` may replace an idle cache.
+
+For each later translation frame, add a `retainedCopy(...)` for the overlap with
+the last **successfully submitted** frame. Clear that baseline after rejection,
+resize, generation change, session loss, or a different transition. The Gray8
+target remains authoritative, so the host can repair exposed edges and any cache
+miss. A horizontal delta `dx < 0`, for example, copies
+`(-dx, 0, width + dx, height)` to `(0, 0)`; the newly exposed right strip is then
+supplied by cached glyph draws or sparse raster repair.
+
+A delayed render credit can otherwise jump across many new characters at once.
+Bound translation progress by the amount of newly exposed content, then continue
+requesting credits after the nominal duration until the final offset is reached.
+`FrameAnimator.limitTranslationStep(previous, desired, maxStep)` implements the
+integer pacing rule. Choose `maxStep` from measured glyph density; about 100-150
+new glyph placements per submitted frame is a useful starting budget. This cap
+may lengthen a delayed transition, but it avoids a single large resource/payload
+burst and produces steadier visible motion.
+
 ### One clock domain
 
 In Java, sample `request.credit.targetPresentationTimeNanos / 1_000_000L`.
@@ -111,6 +138,9 @@ does not authorize rendering without credits or implement BLE backpressure.
 - [ ] Pending/closed previews do not suppress window animations.
 - [ ] Active capture still blocks conflicts; disconnect clears local overlay state.
 - [ ] Delayed credits skip obsolete samples and submit the final state.
+- [ ] Dense text prefetches its glyph working set before visible translation.
+- [ ] Translation copy hints use the last accepted frame and reset on lifecycle changes.
+- [ ] Catch-up frames cap newly exposed text and continue until the final offset.
 - [ ] Settled content redraws after invalidation/recovery.
 - [ ] Hidden surfaces stop work; resize/reconnect use current generations.
 - [ ] Sparse output matches full composition, including newly revealed background.

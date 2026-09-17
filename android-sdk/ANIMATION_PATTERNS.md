@@ -139,6 +139,27 @@ or transport recovery event. Distinguish supersession during healthy delivery
 from invalid geometry or missing surface registration. A rejected frame must not
 generate an unbounded retry loop that competes with the foreground animation.
 
+## A8 — Pace dense text by newly exposed work
+
+For a translated list, keep full source and destination snapshots with their
+glyph resource identity. Prefetch the combined printable-glyph set before the
+first visible offset. On each accepted frame, copy the overlap from the prior
+accepted frame and draw or repair only the entering strip.
+
+Elapsed-time sampling still determines the desired offset, but a delayed credit
+must not expose an unbounded number of new glyphs in one submission. Limit the
+distance advanced per frame and continue past the nominal duration until the
+destination is complete. Tune the distance from glyph density rather than a
+nominal FPS. In the September 2026 Density Lab run, ordinary dense frames were
+about 61 ms median and 89 ms p90, while frames exposing roughly 170-864 glyphs at
+once produced periodic 191-197 ms stalls. Treat those values as one device/run,
+not firmware guarantees; the durable rule is to bound entering work.
+
+Use stable font and character identity (`registerGlyph(fontKey, encoding, ...)`)
+instead of registering printable characters as unrelated images. Keep the baked
+Gray8 frame as fallback. Reset retained-copy history after a rejected submission,
+resize, generation change, reconnect, or transition reversal.
+
 ## A3 reference implementation follow-up
 
 T3's host integration now classifies ordinary host-state refreshes as `ambient`

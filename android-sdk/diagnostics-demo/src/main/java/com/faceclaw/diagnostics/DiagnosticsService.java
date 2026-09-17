@@ -154,7 +154,7 @@ public final class DiagnosticsService extends FaceclawAppService {
     snapshotCommand("meminfo", new String[]{"dumpsys", "meminfo", "com.faceclaw.app"}, 80);
     snapshotCommand("bluetooth", new String[]{"dumpsys", "bluetooth_manager"}, 80);
     DiagnosticStore.event("snapshot", "screenInteractive=" + getSystemService(android.os.PowerManager.class).isInteractive()
-      + " battery=" + batteryPercent() + "% sdkConnected=" + sdkConnected + " monitoring=" + monitoring);
+      + " battery=" + batteryPercent() + "% diagnosticsWindowConnected=" + sdkConnected + " monitoring=" + monitoring);
   }
 
   private void snapshotCommand(String category, String[] command, int limit) {
@@ -181,7 +181,7 @@ public final class DiagnosticsService extends FaceclawAppService {
     if (bitmap == null || bitmap.getWidth() != width || bitmap.getHeight() != height) { if (bitmap != null) bitmap.recycle(); bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888); argb = new int[width * height]; }
     Canvas canvas = new Canvas(bitmap); canvas.drawColor(Color.BLACK); Paint text = new Paint(Paint.ANTI_ALIAS_FLAG); text.setColor(Color.WHITE); text.setTypeface(Typeface.MONOSPACE); text.setTextSize(17);
     canvas.drawText("FACECLAW DIAGNOSTICS", 14, 25, text); text.setTextSize(13); int y = 52;
-    String body = (monitoring ? "MONITOR ACTIVE" : "MONITOR STOPPED") + " / SDK " + (sdkConnected ? "CONNECTED" : "WAITING") + "\n" + DiagnosticStore.summary() + "\n" + transport + "\n\nTap: mark issue and capture snapshot";
+    String body = (monitoring ? "MONITOR ACTIVE" : "MONITOR STOPPED") + " / TEST WINDOW " + (sdkConnected ? "READY" : "WAITING") + "\n" + DiagnosticStore.summary() + "\n" + transport + "\n\nTap: mark issue and capture snapshot";
     for (String raw : body.split("\\n")) { for (String wrapped : wrap(raw, 68)) { if (y > height - 12) break; canvas.drawText(wrapped, 14, y, text); y += 19; } }
     bitmap.getPixels(argb, 0, width, 0, 0, width, height); ByteBuffer gray = frame.gray8();
     for (int value : argb) { int alpha = value >>> 24, luminance = (((value >> 16) & 255) * 54 + ((value >> 8) & 255) * 183 + (value & 255) * 19) >> 8; gray.put((byte)(luminance * alpha / 255)); }

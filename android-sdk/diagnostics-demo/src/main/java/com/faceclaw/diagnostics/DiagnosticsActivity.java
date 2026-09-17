@@ -39,7 +39,7 @@ public final class DiagnosticsActivity extends Activity {
 
   private void update() {
     if (state == null) return;
-    state.setText((DiagnosticsService.monitoring ? "MONITORING" : "STOPPED") + "  ·  SDK " + (DiagnosticsService.sdkConnected ? "CONNECTED" : "WAITING") + "\n" + DiagnosticStore.summary() + "\nTransport: " + DiagnosticsService.transport);
+    state.setText((DiagnosticsService.monitoring ? "MONITORING" : "STOPPED") + "  ·  GLASSES TEST WINDOW " + (DiagnosticsService.sdkConnected ? "READY" : "WAITING") + "\n" + DiagnosticStore.summary() + "\nTransport: " + DiagnosticsService.transport);
     recent.setText(DiagnosticStore.recentText());
   }
 

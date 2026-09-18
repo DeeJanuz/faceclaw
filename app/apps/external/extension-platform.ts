@@ -463,7 +463,10 @@ export class ExtensionPlatform {
       // sleep from racing the action-result delivery that clears the reader's
       // opaque visit token.
       result(true);
-      if (origin) shell.focusWindow(origin);
+      // Returning to the window that is already foreground is a lifecycle
+      // no-op. Re-focusing an APK service can recreate its render surface and
+      // interrupt the reader's local close animation.
+      if (origin && shell.foregroundWindow()?.windowId !== origin) shell.focusWindow(origin);
       if (restoreSleep) shell.sleepAtAppRoot();
       return;
     }
@@ -511,7 +514,7 @@ export class ExtensionPlatform {
       // A failed launch must not strand the display in the temporary wake
       // state created for its preview. Resolve IPC before focus/sleep changes.
       result(true);
-      if (originExists) shell.focusWindow(origin!);
+      if (originExists && shell.foregroundWindow()?.windowId !== origin) shell.focusWindow(origin!);
       if (restoreSleep) shell.sleepAtAppRoot();
       return;
     }

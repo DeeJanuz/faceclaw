@@ -7,7 +7,7 @@ function harness(registry = {}) {
  let sources=[{key:'native-secret',postTime:5,packageName:'app.native',appName:'Native',title:'Native note',actions:[]},{key:'apk:secret',postTime:6,component:'private/component',target:'private-target',replyToken:'SECRET',packageName:'app.external',appName:'External',title:'External note',actions:[{index:0,title:'Open',enabled:true}]}];
  const imports={
  '../../assistant/tool-registry':registry,
- '../../ui/shell/shell':{shell:{isScreenOn:()=>screenOn,foregroundWindow:()=>({windowId:foreground}),getWindows:()=>[{windowId:'prior-app'}],focusWindow:id=>opened.push(`focus:${id}`),sleepAtAppRoot:()=>opened.push('sleep'),openNotificationModal:key=>opened.push(key),getBatteryLevels:()=>({})}},
+ '../../ui/shell/shell':{shell:{isScreenOn:()=>screenOn,foregroundWindow:()=>({windowId:foreground}),getWindows:()=>[{windowId:'prior-app'},{windowId:foreground}],focusWindow:id=>opened.push(`focus:${id}`),sleepAtAppRoot:()=>opened.push('sleep'),openNotificationModal:key=>opened.push(key),getBatteryLevels:()=>({})}},
  '../../native/notification-icons':{readActiveNotifications:()=>sources,dismissNotification:(key)=>{dismissed.push(key);return key!=='apk:secret';}},
  '../../native/external-notifications':{invokeExternalNotification:key=>{opened.push(key);return true;}},
  '../../native/notification-apps':{readNotificationApps:()=>catalog},
@@ -55,6 +55,14 @@ test('notification visit return uses the host-captured origin instead of launche
  assert.deepEqual(h.opened,['focus:prior-app']);
  assert.equal(h.platform.notificationVisit,null);
  assert.equal(h.platform.lastGesture.has('ui.notifications'),false);
+});
+
+test('notification visit return does not refocus an origin already in front', async () => {
+ const h=harness(); h.platform.controls=()=>true; h.platform.lastGesture=new Map(); h.platform.lastTapGesture=new Map();
+ h.platform.notificationVisit={presentationId:'lease-1',component:'owner',generation:3,originWindowId:'apk:owner',wokeScreen:false,handedOff:true};
+ await h.platform.action('owner','ui.notifications',3,'notification-return',{callId:'return',presentationId:'lease-1'});
+ assert.deepEqual(h.opened,[]);
+ assert.equal(h.platform.notificationVisit,null);
 });
 
 test('stale notification visit return cannot focus a client-supplied window', async () => {

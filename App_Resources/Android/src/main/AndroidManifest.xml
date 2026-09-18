@@ -120,7 +120,7 @@
 			android:name="com.faceclaw.app.FaceclawForegroundService"
 			android:enabled="true"
 			android:exported="false"
-			android:foregroundServiceType="connectedDevice|microphone|location" />
+			android:foregroundServiceType="connectedDevice" />
 		<service
 			android:name="com.faceclaw.app.FaceclawMediaNotificationListenerService"
 			android:enabled="true"

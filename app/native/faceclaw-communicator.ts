@@ -128,6 +128,8 @@ export function dimFactor256(factor: number): number {
 export class FaceclawCommunicatorBridge {
   private readonly communicator: any;
   private readonly listenerProxy: any;
+  private initialDisconnectedStatePending = true;
+  private closed = false;
   private javaCallQueue: Promise<void> = Promise.resolve();
   /** Calls waiting on javaCallQueue; 0 means enqueueJavaCall's fast path is safe. */
   private queuedJavaCalls = 0;
@@ -164,8 +166,18 @@ export class FaceclawCommunicatorBridge {
         this.emitAsync(this.logListeners, String(line));
       },
       onStateChange: (phase: string, status: string) => {
+        const normalizedPhase = String(phase) as CommunicatorPhase;
+        // FaceclawBleCommunicator emits its current state from setListener().
+        // That initial snapshot is normally "disconnected" and can arrive
+        // after the JS listeners are installed because the Java callback is
+        // posted through the main looper. Do not let it roll a live connect
+        // attempt back to disconnected before start() has taken ownership.
+        if (this.initialDisconnectedStatePending) {
+          this.initialDisconnectedStatePending = false;
+          if (normalizedPhase === "disconnected") return;
+        }
         const state = {
-          phase: String(phase) as CommunicatorPhase,
+          phase: normalizedPhase,
           status: String(status),
         };
         this.emitAsync(this.stateListeners, state);
@@ -241,6 +253,7 @@ export class FaceclawCommunicatorBridge {
   private emitAsync<T>(listeners: Set<(value: T) => void>, value: T): void {
     const snapshot = Array.from(listeners);
     setTimeout(() => {
+      if (this.closed) return;
       for (const listener of snapshot) {
         listener(value);
       }
@@ -662,6 +675,22 @@ export class FaceclawCommunicatorBridge {
   }
 
   async close(): Promise<void> {
+    this.closed = true;
+    this.logListeners.clear();
+    this.stateListeners.clear();
+    this.ringListeners.clear();
+    this.batteryListeners.clear();
+    this.silentModeListeners.clear();
+    this.wearStateListeners.clear();
+    this.phoneLockStateListeners.clear();
+    this.evenAppConflictListeners.clear();
+    this.frameMetricsListeners.clear();
+    this.firmwareInfoListeners.clear();
+    this.frameMetricWaiters.clear();
+    for (const waiters of this.frameFinishedWaiters.values()) {
+      for (const waiter of waiters) waiter("closed");
+    }
+    this.frameFinishedWaiters.clear();
     await this.enqueueJavaCall(() => this.communicator.close());
   }
 }

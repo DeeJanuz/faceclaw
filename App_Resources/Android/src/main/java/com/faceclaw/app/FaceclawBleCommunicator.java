@@ -27,10 +27,13 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @SuppressLint("MissingPermission")
 public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, DisplayTransport {
     private static final String TAG = "FaceclawComm";
+    private static final Object ACTIVE_LOCK = new Object();
+    private static final AtomicInteger NEXT_INSTANCE_ID = new AtomicInteger();
 
     // The EvenHub image container is a memory carrier only. Its 576x288 geometry
     // gives the firmware separate 165888-byte display and reconstruction
@@ -60,6 +63,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     private final String rightAddress;
     private final String leftAddress;
     private final String ringAddress;
+    private final int instanceId = NEXT_INSTANCE_ID.incrementAndGet();
 
     private volatile FaceclawBleCommunicatorListener listener;
     private final java.util.List<FaceclawImuListener> imuListeners =
@@ -272,7 +276,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         FrameTimings.getInstance().init(appContext);
         this.powerManager = (PowerManager) appContext.getSystemService(Context.POWER_SERVICE);
         this.keyguardManager = (KeyguardManager) appContext.getSystemService(Context.KEYGUARD_SERVICE);
-        this.bleManager = new FaceclawBleManager(appContext);
+        this.bleManager = new FaceclawBleManager(appContext, instanceId);
         this.bleManager.setListener(this);
         this.rightAddress = requireAddress("rightAddress", rightAddress);
         this.leftAddress = requireAddress("leftAddress", leftAddress);
@@ -288,31 +292,63 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
 
     public void setListener(FaceclawBleCommunicatorListener listener) {
         this.listener = listener;
-        emitState();
+        // A bridge is normally constructed before start(). Emitting the
+        // constructor-time "disconnected" snapshot lets a queued callback
+        // race the controller's connect setup and reset it back to idle. The
+        // worker emits connecting as soon as start() owns the transport; a
+        // listener attached to an already-running instance still receives the
+        // current snapshot.
+        if (running) emitState();
         emitPhoneLockStateIfChanged(true);
     }
 
     public void start() {
-        synchronized (lock) {
-            if (running) {
-                return;
+        synchronized (ACTIVE_LOCK) {
+            FaceclawBleCommunicator previous;
+            synchronized (lock) {
+                if (running) {
+                    return;
+                }
+                // A second NativeScript bridge can be created while the first
+                // bridge is still in its async surface setup. Claim the one
+                // process-wide transport slot before starting the worker so
+                // the old owner cannot continue driving the same glasses.
+                previous = activeInstance;
+                activeInstance = this;
+                running = true;
+                userDisconnectRequested = false;
+                reconnectHalted = false;
+                shutdownRequested = false;
             }
-            running = true;
-            userDisconnectRequested = false;
-            reconnectHalted = false;
-            shutdownRequested = false;
-            activeInstance = this;
-            workerThread = new Thread(this, "FaceclawBleCommunicator");
-            workerThread.start();
+            if (previous != null && previous != this) {
+                previous.closeStale();
+            }
+            synchronized (lock) {
+                if (!running) return;
+                workerThread = new Thread(this, "FaceclawBleCommunicator-" + instanceId);
+                workerThread.start();
+            }
         }
     }
 
     public void disconnect() {
+        // Only the process-wide owner may write CFW cleanup records. A stale
+        // bridge can still call this method after a replacement has claimed
+        // activeInstance, so make the ownership check part of the Java API.
+        disconnect(isActiveOwner());
+    }
+
+    /**
+     * Stop this transport. A stale duplicate must not send CFW cleanup or
+     * release the active owner's firmware lease: those writes would target a
+     * live session that this instance no longer owns.
+     */
+    private void disconnect(boolean sendProtocolCleanup) {
         /* On the normal path DashboardController already sent mode 11 after
          * quiescing its producers. Also cover direct/early close callers here;
          * a successful cleanup must remain the final BLE message. Older CFWs
          * fall back to the standalone framebuffer-lease release. */
-        if (!cfwCleanupDelivered && !sendCfwCleanup()) {
+        if (sendProtocolCleanup && !cfwCleanupDelivered && !sendCfwCleanup()) {
             releaseFaceclawFramebufferLease();
         }
         Thread threadToJoin;
@@ -352,13 +388,34 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     }
 
     public void close() {
-        if (activeInstance == this) {
-            activeInstance = null;
+        boolean protocolCleanupAllowed;
+        synchronized (ACTIVE_LOCK) {
+            protocolCleanupAllowed = activeInstance == this;
+            if (protocolCleanupAllowed) {
+                activeInstance = null;
+            }
         }
-        disconnect();
+        disconnect(protocolCleanupAllowed);
         if (phoneLockReceiverRegistered) {
             phoneLockReceiverRegistered = false;
             appContext.unregisterReceiver(phoneLockReceiver);
+        }
+        listener = null;
+    }
+
+    private void closeStale() {
+        logLine("closing stale duplicate communicator without protocol cleanup");
+        disconnect(false);
+        if (phoneLockReceiverRegistered) {
+            phoneLockReceiverRegistered = false;
+            appContext.unregisterReceiver(phoneLockReceiver);
+        }
+        listener = null;
+    }
+
+    private boolean isActiveOwner() {
+        synchronized (ACTIVE_LOCK) {
+            return activeInstance == this;
         }
     }
 
@@ -660,7 +717,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 try {
                     alsListener.onAmbientLight(copy);
                 } catch (Throwable t) {
-                    Log.w(TAG, "ambient light listener failed", t);
+                    logWarn("ambient light listener failed", t);
                 }
             }
         });
@@ -747,7 +804,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 try {
                     micListener.onMicStatus(copy, arm);
                 } catch (Throwable t) {
-                    Log.w(TAG, "mic status listener failed", t);
+                    logWarn("mic status listener failed", t);
                 }
             }
         });
@@ -1040,7 +1097,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             int frameId,
             java.nio.ByteBuffer glyphs
     ) {
-        Log.i(TAG, "Received an updated frame for surface " + surfaceId);
+        logInfo("Received an updated frame for surface " + surfaceId);
         FrameTimings.getInstance().log(frameId, "surface " + surfaceId + " updated rect="
                 + rectWidth + "x" + rectHeight + "+" + rectX + "+" + rectY
                 + (glyphs == null ? " (no glyph draws)" : ""));
@@ -1588,7 +1645,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         while (true) {
             try {
                 if (!running) {
-                    Log.w(TAG, "Exiting event looop");
+                    logWarn("Exiting event looop");
                     break;
                 }
                 emitPhoneLockStateIfChanged(false);
@@ -1602,7 +1659,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                         interruptibleSleep.sleep(Math.min(ConnectionOptions.IDLE_SLEEP_MS, reconnectAfterMs - now));
                         continue;
                     }
-                    Log.w(TAG, "Attempting to connect");
+                    logWarn("Attempting to connect");
                     connectLoopOnce();
                     continue;
                 }
@@ -1625,6 +1682,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     }
 
     @Override public void onNotification(String address, String characteristicUuid, byte[] data) {
+        if (!running || !isActiveOwner()) return;
         if (address == null || characteristicUuid == null || data == null) {
             return;
         }
@@ -1640,7 +1698,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         if (!BleProtocol.NOTIFY_CHAR_UUID.equals(uuid)) {
             return;
         }
-        Log.d(TAG, "onNotification: address=" + address + " characteristicUuid=" + characteristicUuid + " data.length=" + data.length);
+        logDebug("onNotification: address=" + address + " characteristicUuid=" + characteristicUuid + " data.length=" + data.length);
         BleProtocol.ParsedFrame frame = BleProtocol.parseFrame(data);
         int decodedWearState = BleProtocol.parseWearState(frame);
         BleProtocol.CompassEvent compassEvent = address.equalsIgnoreCase(rightAddress)
@@ -1798,7 +1856,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     private void handleDirectRingNotification(String characteristicUuid, byte[] data) {
         FaceclawRingEventDecoder.DirectRingEvent decoded = FaceclawRingEventDecoder.decode(data);
         if (decoded == null) {
-            Log.d(TAG, "direct ring notify ignored: characteristicUuid=" + characteristicUuid + " raw=" + hex(data));
+            logDebug("direct ring notify ignored: characteristicUuid=" + characteristicUuid + " raw=" + hex(data));
             return;
         }
 
@@ -1834,6 +1892,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     }
 
     @Override public void onConnectionStateChange(String address, boolean connected) {
+        if (!running || !isActiveOwner()) return;
         synchronized (lock) {
             if (address == null) {
                 return;
@@ -2064,7 +2123,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 ConnectionOptions.DESCRIPTOR_TIMEOUT_MS
             );
         } catch (Throwable t) {
-            Log.d(TAG, "direct ring notify subscribe skipped: " + characteristicUuid + " " + safeMessage(t));
+            logDebug("direct ring notify subscribe skipped: " + characteristicUuid + " " + safeMessage(t));
             return false;
         }
     }
@@ -2162,7 +2221,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     }
 
     private long driveSession() {
-        //Log.d(TAG, "driveSession called (pendingMessages.size=" + pendingMessages.size() + " inFlightMessages.size=" + inFlightMessages.size() + ")");
+        //logDebug("driveSession called (pendingMessages.size=" + pendingMessages.size() + " inFlightMessages.size=" + inFlightMessages.size() + ")");
         while (true) {
             OutboundMessage messageToWrite = null;
             OutboundMessage messageToPrewrite = null;
@@ -2199,7 +2258,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 if (!inFlightMessages.isEmpty()) {
                     OutboundMessage oldest = inFlightMessages.peekFirst();
                     if (oldest != null && oldest.ackDeadlineAtMs <= now) {
-                        Log.i(TAG, "message timed out: " + oldest.label);
+                        logInfo("message timed out: " + oldest.label);
                         inFlightMessages.removeFirst();
                         logLine("message timed out: " + oldest.label);
                         magicPool.release(oldest.sid, oldest.magic, oldest.label, "timeout");
@@ -2224,10 +2283,10 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                     finishDesiredFrameLocked("discarded: glasses charging");
                     if (sessionReady && inFlightMessages.isEmpty() && !pendingMessages.isEmpty()) {
                         messageToWrite = pendingMessages.removeFirst();
-                        Log.i(TAG, "sending pending message (charging): " + messageToWrite.label);
+                        logInfo("sending pending message (charging): " + messageToWrite.label);
                     } else if (sessionReady && pendingMessages.isEmpty() && inFlightMessages.isEmpty()
                             && now - lastBatteryRefreshAtMs >= ConnectionOptions.CHARGING_BATTERY_POLL_MS) {
-                        Log.i(TAG, "Writing charging-mode battery poll");
+                        logInfo("Writing charging-mode battery poll");
                         messageToWrite = createBatteryQueryMessageLocked();
                         lastBatteryRefreshAtMs = now;
                     } else {
@@ -2239,7 +2298,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                             && !fixedLayoutCreated
                             && pendingMessages.isEmpty()
                             && inFlightMessages.isEmpty()) {
-                        Log.i(TAG, "enqueueing create layout");
+                        logInfo("enqueueing create layout");
                         enqueueCreateLayoutLocked();
                     } else if (messageToPrewrite != null) {
                         // Prewrite outside the lock; the logical message remains pending until
@@ -2248,7 +2307,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                     if (messageToPrewrite == null && !shutdownRequested && fixedLayoutCreated
                             && (firmwareDebugFlagsEnabled ? 2 : 1) != firmwareDebugFlagsLastSent
                             && pendingMessages.isEmpty() && inFlightMessages.isEmpty()) {
-                        Log.i(TAG, "enqueueing firmware debug flags " + (firmwareDebugFlagsEnabled ? "show" : "hide"));
+                        logInfo("enqueueing firmware debug flags " + (firmwareDebugFlagsEnabled ? "show" : "hide"));
                         enqueueFirmwareDebugFlagsLocked();
                     }
 
@@ -2256,7 +2315,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                             && (compassOwners.isEmpty() ? 0 : 1) != compassControlLastSent
                             && pendingMessages.isEmpty() && inFlightMessages.isEmpty()) {
                         boolean wanted = !compassOwners.isEmpty();
-                        Log.i(TAG, "enqueueing compass " + (wanted ? "enable" : "disable"));
+                        logInfo("enqueueing compass " + (wanted ? "enable" : "disable"));
                         enqueueCompassControlLocked(false, wanted);
                     }
 
@@ -2285,7 +2344,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
 
                     if (messageToPrewrite == null && sessionReady && windowHasRoom && !pendingMessages.isEmpty()) {
                         messageToWrite = pendingMessages.removeFirst();
-                        Log.i(TAG, "sending pending message: " + messageToWrite.label);
+                        logInfo("sending pending message: " + messageToWrite.label);
                     } else if (messageToPrewrite == null && !shutdownRequested && fixedLayoutCreated
                             && windowHasRoom && !hasPendingImageLocked()
                             && now >= imageRetryAfterMs
@@ -2293,11 +2352,11 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                         // Enqueue the next frame's delta against lastEnqueuedPacked
                         // (what the shadow will be), so it can pipeline behind an
                         // image still awaiting its ack.
-                        Log.i(TAG, "Enqueued image update");
+                        logInfo("Enqueued image update");
                         enqueueDesiredImageLocked();
                         return 0;
                     } else if (messageToPrewrite == null && shouldPollBatteryLocked(now)) {
-                        Log.i(TAG, "Writing battery query");
+                        logInfo("Writing battery query");
                         messageToWrite = createBatteryQueryMessageLocked();
                         lastBatteryRefreshAtMs = now;
                     } else if (messageToPrewrite == null && (!pendingMessages.isEmpty() || !inFlightMessages.isEmpty())) {
@@ -2382,7 +2441,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 // inter-lens-sync invariant below (that path is untouched).
                 return false;
             }
-            Log.i(TAG, "Writing heartbeat");
+            logInfo("Writing heartbeat");
             OutboundMessage heartbeatMessage = createHeartbeatMessage();
             lastHeartbeatSentAtMs = now;
             writeMessage(heartbeatMessage);
@@ -2577,7 +2636,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     }
 
     private void resolveAckLocked(OutboundMessage message, byte[] pb) {
-        Log.i(TAG, "Got ACK for " + message.label + "(sid=" + message.sid + ", id=" + message.magic + ")");
+        logInfo("Got ACK for " + message.label + "(sid=" + message.sid + ", id=" + message.magic + ")");
         inFlightMessages.remove(message);
         message.ackPayload = pb == null ? new byte[0] : Arrays.copyOf(pb, pb.length);
         magicPool.release(message.sid, message.magic, message.label, "ack");
@@ -3587,7 +3646,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
      * connect (which builds a fresh communicator) starts a new attempt.
      */
     private void handleUnpairedFailure(String address) {
-        Log.e(TAG, "Connect failed and " + address + " is not paired; suspending reconnect");
+        logError("Connect failed and " + address + " is not paired; suspending reconnect");
         synchronized (lock) {
             reconnectHalted = true;
             sessionReady = false;
@@ -3616,7 +3675,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     }
 
     private void handleTransportFailure(String reason) {
-        Log.e(TAG, "Transport failure: "+reason);
+        logError("Transport failure: "+reason);
         synchronized (lock) {
             maybeEmitEvenAppConflictLocked(reason);
             sessionReady = false;
@@ -3701,7 +3760,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             try {
                 current.onRingEvent(kind, containerNameSnapshot, eventType, eventSource, systemExitReasonCode, frameId);
             } catch (Throwable t) {
-                Log.w(TAG, "listener onRingEvent failed", t);
+                logWarn("listener onRingEvent failed", t);
                 FrameTimings.getInstance().finishFrame(frameId, "discarded: listener onRingEvent failed");
             }
         });
@@ -3732,7 +3791,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             try {
                 current.onFrameFinished(frameId, outcome);
             } catch (Throwable t) {
-                Log.w(TAG, "listener onFrameFinished failed", t);
+                logWarn("listener onFrameFinished failed", t);
             }
         });
     }
@@ -3746,7 +3805,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 try {
                     imuListener.onImuData(x, y, z, eventSource);
                 } catch (Throwable t) {
-                    Log.w(TAG, "listener onImuData failed", t);
+                    logWarn("listener onImuData failed", t);
                 }
             }
         });
@@ -3758,7 +3817,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 try {
                     subscription.listener.onCompassEvent(command, headingDegrees);
                 } catch (Throwable t) {
-                    Log.w(TAG, "listener onCompassEvent failed", t);
+                    logWarn("listener onCompassEvent failed", t);
                 }
             });
         }
@@ -3773,7 +3832,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             try {
                 current.onSilentMode(silent);
             } catch (Throwable t) {
-                Log.w(TAG, "listener onSilentMode failed", t);
+                logWarn("listener onSilentMode failed", t);
             }
         });
     }
@@ -3785,7 +3844,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             try {
                 current.onWearState(wearing);
             } catch (Throwable t) {
-                Log.w(TAG, "listener onWearState failed", t);
+                logWarn("listener onWearState failed", t);
             }
         });
     }
@@ -3807,7 +3866,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             try {
                 current.onPhoneLockState(locked);
             } catch (Throwable t) {
-                Log.w(TAG, "listener onPhoneLockState failed", t);
+                logWarn("listener onPhoneLockState failed", t);
             }
         });
     }
@@ -3821,7 +3880,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             try {
                 current.onBatteryState(headsetBattery, headsetCharging);
             } catch (Throwable t) {
-                Log.w(TAG, "listener onBatteryState failed", t);
+                logWarn("listener onBatteryState failed", t);
             }
         });
     }
@@ -3835,7 +3894,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             try {
                 current.onFirmwareInfo(info.leftVersion, info.rightVersion, info.capabilities);
             } catch (Throwable t) {
-                Log.w(TAG, "listener onFirmwareInfo failed", t);
+                logWarn("listener onFirmwareInfo failed", t);
             }
         });
     }
@@ -3849,7 +3908,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             try {
                 current.onFrameMetrics(paintMs, transmitMs, tileCount);
             } catch (Throwable t) {
-                Log.w(TAG, "listener onFrameMetrics failed", t);
+                logWarn("listener onFrameMetrics failed", t);
             }
         });
     }
@@ -3882,7 +3941,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             try {
                 current.onEvenAppConflict(messageSnapshot);
             } catch (Throwable t) {
-                Log.w(TAG, "listener onEvenAppConflict failed", t);
+                logWarn("listener onEvenAppConflict failed", t);
             }
         });
     }
@@ -3910,7 +3969,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             try {
                 current.onStateChange(phaseSnapshot, statusSnapshot);
             } catch (Throwable t) {
-                Log.w(TAG, "listener onStateChange failed", t);
+                logWarn("listener onStateChange failed", t);
             }
         });
     }
@@ -3977,17 +4036,46 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         }
     }
 
+    private String tagMessage(String line) {
+        return "comm#" + instanceId + " " + line;
+    }
+
+    private void logInfo(String line) {
+        android.util.Log.i(TAG, tagMessage(line));
+    }
+
+    private void logDebug(String line) {
+        android.util.Log.d(TAG, tagMessage(line));
+    }
+
+    private void logWarn(String line) {
+        android.util.Log.w(TAG, tagMessage(line));
+    }
+
+    private void logWarn(String line, Throwable error) {
+        android.util.Log.w(TAG, tagMessage(line), error);
+    }
+
+    private void logError(String line) {
+        android.util.Log.e(TAG, tagMessage(line));
+    }
+
+    private void logError(String line, Throwable error) {
+        android.util.Log.e(TAG, tagMessage(line), error);
+    }
+
     private void logLine(String line) {
-        Log.i(TAG, line);
+        String taggedLine = tagMessage(line);
+        android.util.Log.i(TAG, taggedLine);
         final FaceclawBleCommunicatorListener current = listener;
         if (current == null) {
             return;
         }
         mainHandler.post(() -> {
             try {
-                current.onLog(line);
+                current.onLog(taggedLine);
             } catch (Throwable t) {
-                Log.w(TAG, "listener onLog failed", t);
+                logWarn("listener onLog failed", t);
             }
         });
     }

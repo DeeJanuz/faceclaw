@@ -1,18 +1,15 @@
 package com.faceclaw.app;
 
-import android.Manifest;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
-import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.IBinder;
-
-import androidx.core.content.ContextCompat;
+import android.util.Log;
 
 import com.tns.NativeScriptActivity;
 
@@ -58,10 +55,26 @@ public class FaceclawForegroundService extends Service {
         ensureNotificationChannel();
         Notification notification = buildNotification(nextText);
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, notification, foregroundServiceType());
-        } else {
-            startForeground(NOTIFICATION_ID, notification);
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(NOTIFICATION_ID, notification, foregroundServiceType());
+            } else {
+                startForeground(NOTIFICATION_ID, notification);
+            }
+        } catch (SecurityException typedStartFailure) {
+            // A vendor policy or a permission transition can reject the typed
+            // overload even though the process is otherwise healthy. Retry
+            // the manifest-declared connected-device service once; if Android
+            // still rejects it, stop cleanly instead of crashing the app while
+            // the sticky restore path is running in the background.
+            Log.e("FaceclawFgService", "typed foreground start rejected", typedStartFailure);
+            try {
+                startForeground(NOTIFICATION_ID, notification);
+            } catch (RuntimeException fallbackFailure) {
+                Log.e("FaceclawFgService", "connected-device foreground start rejected", fallbackFailure);
+                stopSelf();
+                return START_NOT_STICKY;
+            }
         }
         foregroundStarted = true;
         currentText = nextText;
@@ -113,28 +126,11 @@ public class FaceclawForegroundService extends Service {
     }
 
     private int foregroundServiceType() {
-        int type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE;
-        // TODO: Make this depend on which audio path (G2 vs phone) is selected
-        if (hasRecordAudioPermission()) {
-            type |= ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
-        }
-        // The location type keeps while-in-use location flowing to the
-        // Navigate app when the phone screen locks. Only claimed once the
-        // permission exists: on API 34+ claiming it without the permission
-        // makes startForeground throw.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && hasFineLocationPermission()) {
-            type |= ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION;
-        }
-        return type;
-    }
-
-    private boolean hasRecordAudioPermission() {
-        return ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-                == PackageManager.PERMISSION_GRANTED;
-    }
-
-    private boolean hasFineLocationPermission() {
-        return ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
-                == PackageManager.PERMISSION_GRANTED;
+        // This service owns the glasses transport. Android 14/16 validates
+        // every claimed type at startForeground(), so opportunistically adding
+        // microphone or location here can crash the whole process when those
+        // permissions are absent or while-in-use. Audio and navigation should
+        // claim their own typed service only when they actually run.
+        return ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE;
     }
 }

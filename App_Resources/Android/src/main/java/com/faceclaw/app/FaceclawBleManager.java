@@ -31,6 +31,7 @@ public class FaceclawBleManager {
     private final Context context;
     private final BluetoothAdapter bluetoothAdapter;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final String logPrefix;
 
     private final ConcurrentHashMap<String, BluetoothGatt> gattClients = new ConcurrentHashMap<>();
     private final Object bluetoothApiLock = new Object();
@@ -51,6 +52,7 @@ public class FaceclawBleManager {
     private final ConcurrentHashMap<String, Integer> writeStatuses = new ConcurrentHashMap<>();
 
     private volatile FaceclawBleListener listener;
+    private volatile boolean closed;
 
     // Process-wide outbound-traffic totals, sampled by the phone UI's BLE
     // bandwidth indicator. Static so counts from every manager instance and
@@ -70,7 +72,12 @@ public class FaceclawBleManager {
     }
 
     public FaceclawBleManager(Context context) {
+        this(context, 0);
+    }
+
+    public FaceclawBleManager(Context context, int communicatorId) {
         this.context = context.getApplicationContext();
+        this.logPrefix = communicatorId > 0 ? "comm#" + communicatorId + " " : "";
         BluetoothManager bluetoothManager = (BluetoothManager) this.context.getSystemService(Context.BLUETOOTH_SERVICE);
         if (bluetoothManager == null || bluetoothManager.getAdapter() == null) {
             throw new IllegalStateException("Bluetooth adapter unavailable");
@@ -80,6 +87,7 @@ public class FaceclawBleManager {
 
     public void setListener(FaceclawBleListener listener) {
         this.listener = listener;
+        if (listener != null) closed = false;
     }
 
     /**
@@ -273,7 +281,7 @@ public class FaceclawBleManager {
         }
         outboundMessages.incrementAndGet();
         int totalSize = frames.stream().mapToInt(frame -> frame != null ? frame.length : 0).sum();
-        Log.i(TAG, "writeFrames wrote " + frames.size() + " frames totaling " + totalSize + " bytes in " + (System.currentTimeMillis() - startMs) + "ms");
+        logInfo("writeFrames wrote " + frames.size() + " frames totaling " + totalSize + " bytes in " + (System.currentTimeMillis() - startMs) + "ms");
         return true;
     }
 
@@ -332,11 +340,11 @@ public class FaceclawBleManager {
 
     private boolean sleepBeforeWriteRetry(String address, String reason, int retryIndex) {
         if (retryIndex >= WRITE_RETRY_DELAYS_MS.length) {
-            Log.w(TAG, "writeCharacteristic retry exhausted: address=" + address + " reason=" + reason);
+            logWarn("writeCharacteristic retry exhausted: address=" + address + " reason=" + reason);
             return false;
         }
         int delayMs = WRITE_RETRY_DELAYS_MS[retryIndex];
-        Log.w(TAG, "writeCharacteristic retry: address=" + address + " reason=" + reason + " delayMs=" + delayMs);
+        logWarn("writeCharacteristic retry: address=" + address + " reason=" + reason + " delayMs=" + delayMs);
         try {
             Thread.sleep(delayMs);
             return true;
@@ -359,9 +367,21 @@ public class FaceclawBleManager {
     }
 
     public void close() {
+        closed = true;
+        listener = null;
         for (String address : gattClients.keySet()) {
             disconnect(address);
         }
+        connectLatches.clear();
+        connectResults.clear();
+        servicesLatches.clear();
+        servicesStatuses.clear();
+        mtuLatches.clear();
+        mtuStatuses.clear();
+        descriptorLatches.clear();
+        descriptorStatuses.clear();
+        writeLatches.clear();
+        writeStatuses.clear();
     }
 
     private BluetoothGatt requireGatt(String address) {
@@ -401,7 +421,8 @@ public class FaceclawBleManager {
     private final BluetoothGattCallback gattCallback = new BluetoothGattCallback() {
         @Override
         public void onConnectionStateChange(BluetoothGatt gatt, int status, int newState) {
-            Log.i(TAG, "onConnectionStateChange: status=" + status + " newState=" + newState);
+            if (closed) return;
+            logInfo("onConnectionStateChange: status=" + status + " newState=" + newState);
             String address = gatt.getDevice().getAddress();
 
             if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
@@ -431,6 +452,7 @@ public class FaceclawBleManager {
 
         @Override
         public void onServicesDiscovered(BluetoothGatt gatt, int status) {
+            if (closed) return;
             String address = gatt.getDevice().getAddress();
             servicesStatuses.put(address, status);
             CountDownLatch latch = servicesLatches.remove(address);
@@ -441,6 +463,7 @@ public class FaceclawBleManager {
 
         @Override
         public void onMtuChanged(BluetoothGatt gatt, int mtu, int status) {
+            if (closed) return;
             String address = gatt.getDevice().getAddress();
             mtuStatuses.put(address, status);
             CountDownLatch latch = mtuLatches.remove(address);
@@ -451,11 +474,13 @@ public class FaceclawBleManager {
 
         @Override
         public void onPhyRead(BluetoothGatt gatt, int txPhy, int rxPhy, int status) {
-            Log.i(TAG, "onPhyRead: txPhy=" + txPhy + " rxPhy=" + rxPhy + " status=" + status);
+            if (closed) return;
+            logInfo("onPhyRead: txPhy=" + txPhy + " rxPhy=" + rxPhy + " status=" + status);
         }
 
         @Override
         public void onDescriptorWrite(BluetoothGatt gatt, BluetoothGattDescriptor descriptor, int status) {
+            if (closed) return;
             String address = gatt.getDevice().getAddress();
             descriptorStatuses.put(address, status);
             CountDownLatch latch = descriptorLatches.remove(address);
@@ -466,6 +491,7 @@ public class FaceclawBleManager {
 
         @Override
         public void onCharacteristicWrite(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, int status) {
+            if (closed) return;
             String address = gatt.getDevice().getAddress();
             writeStatuses.put(address, status);
             CountDownLatch latch = writeLatches.remove(address);
@@ -476,26 +502,38 @@ public class FaceclawBleManager {
 
         @Override
         public void onCharacteristicChanged(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, byte[] value) {
+            if (closed) return;
             dispatchNotification(gatt.getDevice().getAddress(), characteristic.getUuid().toString(), value);
         }
 
         @Deprecated
         @Override
         public void onCharacteristicChanged(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic) {
+            if (closed) return;
             dispatchNotification(gatt.getDevice().getAddress(), characteristic.getUuid().toString(), characteristic.getValue());
         }
     };
 
     private void dispatchConnectionState(String address, boolean connected) {
+        if (closed) return;
         FaceclawBleListener current = listener;
         if (current == null) return;
         current.onConnectionStateChange(address, connected);
     }
 
     private void dispatchNotification(String address, String characteristicUuid, byte[] data) {
+        if (closed) return;
         FaceclawBleListener current = listener;
         if (current == null) return;
         byte[] copy = data != null ? data.clone() : new byte[0];
         current.onNotification(address, characteristicUuid, copy);
+    }
+
+    private void logInfo(String message) {
+        Log.i(TAG, logPrefix + message);
+    }
+
+    private void logWarn(String message) {
+        Log.w(TAG, logPrefix + message);
     }
 }

@@ -320,6 +320,12 @@ class DashboardController {
   // incompatible-firmware disconnect must not tear that communicator down
   // underneath it, so it waits for this to clear.
   private connectRunning = false;
+  // Every caller shares the same in-flight attempt. Android can invoke the
+  // boot restore hook while the visible page is also running autoConnect(); a
+  // phase snapshot alone is insufficient because the communicator posts its
+  // initial state asynchronously.
+  private connectPromise: Promise<void> | null = null;
+  private connectionGeneration = 0;
   private incompatibleDisconnectPending = false;
   private unpairedDisconnectPending = false;
 
@@ -1356,8 +1362,20 @@ class DashboardController {
     this.appendLog("Preview-only display released.");
   }
 
-  async connect(options?: { preserveBackgroundRestoreIntent?: boolean }): Promise<void> {
-    if (this.phase !== "disconnected") return;
+  connect(options?: { preserveBackgroundRestoreIntent?: boolean }): Promise<void> {
+    if (this.connectPromise) return this.connectPromise;
+    if (this.phase !== "disconnected") return Promise.resolve();
+    const attempt = this.connectInternal(options);
+    let tracked!: Promise<void>;
+    tracked = attempt.finally(() => {
+      if (this.connectPromise === tracked) this.connectPromise = null;
+    });
+    this.connectPromise = tracked;
+    return tracked;
+  }
+
+  private async connectInternal(options?: { preserveBackgroundRestoreIntent?: boolean }): Promise<void> {
+    const generation = ++this.connectionGeneration;
     const preserveBackgroundRestoreIntent = options?.preserveBackgroundRestoreIntent === true;
     // Connecting is the explicit way out of the manual-disconnected state.
     resumeAutoReconnect();
@@ -1416,10 +1434,14 @@ class DashboardController {
         ring: ringAddress,
       });
       this.communicator = communicator;
+      const isCurrentConnection = () =>
+        this.connectionGeneration === generation && this.communicator === communicator;
       this.offLog = communicator.onLog((line) => {
+        if (!isCurrentConnection()) return;
         this.appendLog(line);
       });
       this.offState = communicator.onStateChange((state) => {
+        if (!isCurrentConnection()) return;
         if (state.phase === "unpaired") {
           // Java parked its retry loop: an arm's Android bond is gone, so
           // every redial would fail the same way until the user re-pairs.
@@ -1478,23 +1500,28 @@ class DashboardController {
         }
       });
       this.offRing = communicator.onRingEvent((event) => {
+        if (!isCurrentConnection()) return;
         void this.handleInputEvent(event).catch((error) => {
           const message = this.formatError(error);
           this.appendLog(`input handler failed: ${message}`);
         });
       });
       this.offSilentMode = communicator.onSilentMode((silent) => {
+        if (!isCurrentConnection()) return;
         if (this.silentMode === silent) return;
         this.silentMode = silent;
         this.emit();
       });
       this.offWearState = communicator.onWearState((wearing) => {
+        if (!isCurrentConnection()) return;
         this.handleWearState(wearing);
       });
       this.offPhoneLockState = communicator.onPhoneLockState((locked) => {
+        if (!isCurrentConnection()) return;
         this.handlePhoneLockState(locked);
       });
       this.offBattery = communicator.onBatteryState((state) => {
+        if (!isCurrentConnection()) return;
         // An unavailable reading must not erase the useful last-known value,
         // especially while the glasses remain reachable in their case.
         const hasBatteryLevel = Number.isInteger(state.battery) && state.battery >= 0 && state.battery <= 100;
@@ -1513,6 +1540,7 @@ class DashboardController {
         this.emit();
       });
       this.offEvenAppConflict = communicator.onEvenAppConflict((message) => {
+        if (!isCurrentConnection()) return;
         this.refreshEvenAppStatus();
         if (!this.evenNotificationActive) {
           this.appendLog(`Even app conflict suspected, but notification was not active: ${message}`);
@@ -1523,6 +1551,7 @@ class DashboardController {
         this.emit();
       });
       this.offFrameMetrics = communicator.onFrameMetrics(() => {
+        if (!isCurrentConnection()) return;
         // Every composited frame refreshes the phone-side mirror (bounded by
         // CONNECTED_PREVIEW_MIN_UPDATE_MS) so it tracks the glasses instead
         // of trailing the 1s safety-net poll.
@@ -1543,6 +1572,7 @@ class DashboardController {
         }
       });
       this.offFirmwareInfo = communicator.onFirmwareInfo((info) => {
+        if (!isCurrentConnection()) return;
         this.appendLog(
           `firmware: L=${info.leftVersion || "?"} R=${info.rightVersion || "?"}` +
             (info.capabilities ? ` caps="${info.capabilities}"` : " (no CFW capability string)"),
@@ -1629,54 +1659,63 @@ class DashboardController {
       }, SCREEN_TIMEOUT_CHECK_MS);
     } catch (error) {
       const message = this.formatError(error);
-      this.offState?.();
-      this.offState = null;
-      this.offLog?.();
-      this.offLog = null;
-      this.offRing?.();
-      this.offRing = null;
-      this.offBattery?.();
-      this.offBattery = null;
-      this.offSilentMode?.();
-      this.offSilentMode = null;
-      this.offWearState?.();
-      this.offWearState = null;
-      this.offPhoneLockState?.();
-      this.offPhoneLockState = null;
-      this.offEvenAppConflict?.();
-      this.offEvenAppConflict = null;
-      this.offFrameMetrics?.();
-      this.offFrameMetrics = null;
-      this.offFirmwareInfo?.();
-      this.offFirmwareInfo = null;
-      this.offVoiceStatus?.();
-      this.offVoiceStatus = null;
-      await mediaControllerBridge.stop().catch(() => {});
-      await nightscoutBridge.stop().catch(() => {});
-      voiceControlBridge.stop();
+      const ownsController =
+        this.connectionGeneration === generation &&
+        (communicator === null || this.communicator === communicator);
+      if (ownsController) {
+        this.offState?.();
+        this.offState = null;
+        this.offLog?.();
+        this.offLog = null;
+        this.offRing?.();
+        this.offRing = null;
+        this.offBattery?.();
+        this.offBattery = null;
+        this.offSilentMode?.();
+        this.offSilentMode = null;
+        this.offWearState?.();
+        this.offWearState = null;
+        this.offPhoneLockState?.();
+        this.offPhoneLockState = null;
+        this.offEvenAppConflict?.();
+        this.offEvenAppConflict = null;
+        this.offFrameMetrics?.();
+        this.offFrameMetrics = null;
+        this.offFirmwareInfo?.();
+        this.offFirmwareInfo = null;
+        this.offVoiceStatus?.();
+        this.offVoiceStatus = null;
+        await mediaControllerBridge.stop().catch(() => {});
+        await nightscoutBridge.stop().catch(() => {});
+        voiceControlBridge.stop();
+      }
       if (communicator) {
-        await communicator.setFaceclawWakeLeaseEnabled(false).catch(() => false);
+        if (ownsController) {
+          await communicator.setFaceclawWakeLeaseEnabled(false).catch(() => false);
+        }
         await communicator.close().catch(() => {});
       }
-      this.communicator = null;
-      this.lockSurfaceConfigured = false;
-      this.wearNotifySupported = false;
-      this.faceclawWakeLeaseSupported = false;
-      this.faceclawWakeLeaseState = null;
-      this.evenHubResumePromise = null;
-      this.notificationResumePromise = null;
-      this.notificationSessionReady = false;
-      this.clearDashboardTimer();
-      stopForegroundNotification();
-      this.setPhase("disconnected");
-      this.setStatus(`Failed: ${message}`);
-      this.appendLog(`error: ${message}`);
-      if (!preserveBackgroundRestoreIntent || message.startsWith("Configure both left and right arm")) {
-        setBackgroundSessionRestoreRequested(false);
+      if (ownsController) {
+        if (this.communicator === communicator) this.communicator = null;
+        this.lockSurfaceConfigured = false;
+        this.wearNotifySupported = false;
+        this.faceclawWakeLeaseSupported = false;
+        this.faceclawWakeLeaseState = null;
+        this.evenHubResumePromise = null;
+        this.notificationResumePromise = null;
+        this.notificationSessionReady = false;
+        this.clearDashboardTimer();
+        stopForegroundNotification();
+        this.setPhase("disconnected");
+        this.setStatus(`Failed: ${message}`);
+        this.appendLog(`error: ${message}`);
+        if (!preserveBackgroundRestoreIntent || message.startsWith("Configure both left and right arm")) {
+          setBackgroundSessionRestoreRequested(false);
+        }
       }
       throw error;
     } finally {
-      this.connectRunning = false;
+      if (this.connectionGeneration === generation) this.connectRunning = false;
     }
   }
 
@@ -1772,10 +1811,13 @@ class DashboardController {
     // connect() is still mid-flight; let it finish so the teardown doesn't
     // race its surface setup. connect() returns once the Java worker thread
     // owns the retry loop, so this wait is short.
-    while (this.connectRunning) {
-      await new Promise((resolve) => setTimeout(resolve, 200));
-    }
-    if (this.phase === "disconnected" || this.phase === "disconnecting") return;
+    const connectAttempt = this.connectPromise;
+    if (connectAttempt) await connectAttempt.catch(() => {});
+    while (this.connectRunning) await new Promise((resolve) => setTimeout(resolve, 200));
+    // Invalidate callbacks already posted by the just-closed communicator
+    // before allowing a future connect to create a new owner.
+    this.connectionGeneration++;
+    if ((this.phase === "disconnected" && !this.communicator) || this.phase === "disconnecting") return;
 
     this.setPhase("disconnecting");
     this.setStatus("Disconnecting...");
@@ -2688,6 +2730,16 @@ class DashboardController {
           state.frameTimer = undefined;
         }
       }
+      if (feature === "ui.notifications" && event.type === "long-press") state.interacted = true;
+      if (feature === "ui.notifications" && event.type === "long-press") {
+        // The provider now owns dismissal and may need to reopen the card if
+        // native cancellation is rejected. Do not let the old arrival timer
+        // close the host surface underneath that recovery path.
+        if (state.timer) clearTimeout(state.timer);
+        if (state.frameTimer) clearTimeout(state.frameTimer);
+        state.timer = undefined;
+        state.frameTimer = undefined;
+      }
       this.externalApps.extensions.surfaceInput(feature, event);
     }, (width, height) => {
       this.externalApps.extensions.openSurface(feature, width, height);
@@ -2703,7 +2755,7 @@ class DashboardController {
       }
       this.extensionSurfaces.delete(feature);
       this.externalApps.extensions.closeSurface(feature, removedPresentationId);
-    }, feature === "ui.notifications" ? "medium" : "min", feature !== "ui.notifications" || target === "inbox" || wokeScreen, feature === "ui.notifications" && target !== "inbox");
+    }, feature === "ui.notifications" ? "medium" : "min", feature !== "ui.notifications" || target === "inbox" || wokeScreen, feature === "ui.notifications" && target !== "inbox", feature === "ui.notifications" && target !== "inbox");
     const presentationId = feature === "ui.notifications" && target !== "inbox" ? target : undefined;
     const state = {
       component,

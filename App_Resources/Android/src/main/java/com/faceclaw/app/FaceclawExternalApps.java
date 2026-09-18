@@ -755,7 +755,7 @@ public final class FaceclawExternalApps {
   if(!isConnected(component)||(!ownProvider&&!extensions.controls(component,feature))||json==null||json.length()>Protocol.MAX_JSON/2||!Arrays.asList("request","event","cancel","input").contains(type)) return false;
   Connection c=connections.get(component); if(c==null) return false;
   try {
-   JSONObject data=new JSONObject(json); long generation=extensions.generation(feature);String inputTrace="";if(type.equals("input")){inputTrace=data.optString("traceId");if(inputTrace.isEmpty())inputTrace=UUID.randomUUID().toString();data.put("traceId",inputTrace);JSONObject input=data.optJSONObject("input");if(input!=null)input.put("traceId",inputTrace);}
+   JSONObject data=new JSONObject(json); long generation=extensions.generation(feature);String inputTrace="";if(type.equals("input")){inputTrace=data.optString("traceId");if(inputTrace.isEmpty())inputTrace=UUID.randomUUID().toString();data.put("traceId",inputTrace);data.put("extensionGeneration",generation);JSONObject input=data.optJSONObject("input");if(input!=null){input.put("traceId",inputTrace);input.put("extensionGeneration",generation);}}
    if(type.equals("request")) {
     String id=data.getString("requestId"); if(!ExtensionContract.token(id)||c.extensionRequests.size()>=32||c.extensionRequests.containsKey(id)) return false;
     c.extensionRequests.put(id,feature);
@@ -766,10 +766,17 @@ public final class FaceclawExternalApps {
    }
    if(type.equals("cancel")) c.extensionRequests.remove(data.optString("requestId"));
    try {
-    if(type.equals("input")){JSONObject input=data.optJSONObject("input");c.sendInput("extension:"+feature,new FaceclawInputEvent(input==null?data:input));}
+    if(type.equals("input")){
+     Surface surface=c.surfaces.get(feature);
+     if(surface==null||!surface.visible||!surface.screenOn)return false;
+     JSONObject input=data.optJSONObject("input");
+     android.util.Log.i("NotificationInput","host-dispatch feature="+feature+" trace="+inputTrace);
+     c.sendInput("extension:"+feature,new FaceclawInputEvent(input==null?data:input));
+    }
     else c.sendControl("extension-event",Protocol.object("feature",feature,"generation",generation,"type",type,"data",data));
    }
    catch(Exception uncertain) {
+    if(type.equals("input"))android.util.Log.w("NotificationInput","host-dispatch-uncertain feature="+feature+" trace="+inputTrace,uncertain);
     String id=data.optString("requestId");
     if(feature.equals(c.extensionRequests.remove(id))) emit(component,"extension-event",Protocol.object("feature",feature,"generation",generation,"type","timeout","requestId",id));
     // IPC was attempted. A transport exception cannot safely authorize backend fallback/retry.

@@ -63,8 +63,14 @@ public final class FaceclawSession {
  }
 
  void applyControl(ControlEvent event){
-  synchronized(this){if(closed||!connected||event==null||!stateOrder.accept(event.data.optLong("stateRevision",0)))return;}
+  if(event==null)return;
   String type=event.type;JSONObject data=event.data;
+  // Scene acknowledgements complete a specific surface transaction and carry
+  // their own generation, version, and authority checks. They can cross a
+  // newer lifecycle event because host scene work and lifecycle work run on
+  // different queues. Applying the global state ordering here would strand the
+  // scene until its 15-second recovery timeout.
+  synchronized(this){if(closed||!connected||(!type.equals("scene-result")&&!stateOrder.accept(data.optLong("stateRevision",0))))return;}
   try{
    if(type.equals("scene-result")){
     RenderSurface surface=surface(data.getString("surfaceId"));

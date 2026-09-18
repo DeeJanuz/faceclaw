@@ -7,7 +7,7 @@ function harness(registry = {}) {
  let sources=[{key:'native-secret',postTime:5,packageName:'app.native',appName:'Native',title:'Native note',actions:[]},{key:'apk:secret',postTime:6,component:'private/component',target:'private-target',replyToken:'SECRET',packageName:'app.external',appName:'External',title:'External note',actions:[{index:0,title:'Open',enabled:true}]}];
  const imports={
  '../../assistant/tool-registry':registry,
- '../../ui/shell/shell':{shell:{isScreenOn:()=>screenOn,foregroundWindow:()=>({windowId:foreground}),getWindows:()=>[],openNotificationModal:key=>opened.push(key),getBatteryLevels:()=>({})}},
+ '../../ui/shell/shell':{shell:{isScreenOn:()=>screenOn,foregroundWindow:()=>({windowId:foreground}),getWindows:()=>[{windowId:'prior-app'}],focusWindow:id=>opened.push(`focus:${id}`),sleepAtAppRoot:()=>opened.push('sleep'),openNotificationModal:key=>opened.push(key),getBatteryLevels:()=>({})}},
  '../../native/notification-icons':{readActiveNotifications:()=>sources,dismissNotification:(key)=>{dismissed.push(key);return key!=='apk:secret';}},
  '../../native/external-notifications':{invokeExternalNotification:key=>{opened.push(key);return true;}},
  '../../native/notification-apps':{readNotificationApps:()=>catalog},
@@ -16,7 +16,7 @@ function harness(registry = {}) {
  };
  vm.runInNewContext(ts.transpileModule(fs.readFileSync('app/apps/external/extension-platform.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText,{module,exports:module.exports,require:name=>imports[name]||{},java:{util:{UUID:{randomUUID:()=>({toString:()=>`id-${++seq}`})}}}});
  const platform=Object.create(module.exports.ExtensionPlatform.prototype);
- Object.assign(platform,{generation:3,ownNotifications:new Map(),conversationIds:new Map(),notificationRevision:0,notificationAppsAt:0,notificationApps:[],isLocked:()=>locked,native:{isExtensionGranted:()=>allowed,send:(owner,type,json)=>sent.push({owner,type,data:JSON.parse(json)})}});
+ Object.assign(platform,{generation:3,features:[],ownNotifications:new Map(),conversationIds:new Map(),notificationRevision:0,notificationAppsAt:0,notificationApps:[],isLocked:()=>locked,isProtected:()=>false,native:{isExtensionGranted:()=>allowed,send:(owner,type,json)=>sent.push({owner,type,data:JSON.parse(json)}),sendExtension:(owner,feature,type,json)=>{sent.push({owner,feature,type,data:JSON.parse(json)});return true;}}});
  return {catalog:v=>{catalog=v;platform.notificationAppsAt=0;},platform,sent,dismissed,opened,allowed:v=>allowed=v,locked:v=>locked=v,screen:v=>screenOn=v,foreground:v=>foreground=v,sources:v=>sources=v,snapshot:()=>JSON.parse(sent.map(x=>x.data.json).join(''))};
 }
 test('own inbox needs explicit content grant and sanitizes foreign capabilities',()=>{
@@ -46,6 +46,67 @@ test('launcher uninstall requires fresh winning-surface input and current uninst
  h.platform.lastGesture.set('ui.launcher',Date.now());await h.platform.action('owner','ui.launcher',3,'uninstall-app',{callId:'call',appId:'builtin'});assert.equal(uninstalled.length,0);
  h.platform.lastGesture.set('ui.launcher',Date.now());await h.platform.action('owner','ui.launcher',3,'uninstall-app',{callId:'call',appId:'evenhub:example'});assert.deepEqual(uninstalled,['evenhub:example']);
  await h.platform.action('owner','ui.launcher',3,'uninstall-app',{callId:'call',appId:'evenhub:example'});assert.equal(uninstalled.length,1);
+});
+
+test('notification visit return uses the host-captured origin instead of launcher authority', async () => {
+ const h=harness(); h.platform.controls=()=>true; h.platform.lastGesture=new Map(); h.platform.lastTapGesture=new Map();
+ h.platform.notificationVisit={presentationId:'lease-1',component:'owner',generation:3,originWindowId:'prior-app',wokeScreen:false,handedOff:true};
+ await h.platform.action('owner','ui.notifications',3,'notification-return',{callId:'return',presentationId:'lease-1'});
+ assert.deepEqual(h.opened,['focus:prior-app']);
+ assert.equal(h.platform.notificationVisit,null);
+ assert.equal(h.platform.lastGesture.has('ui.notifications'),false);
+});
+
+test('stale notification visit return cannot focus a client-supplied window', async () => {
+ const h=harness(); h.platform.controls=()=>true; h.platform.lastTapGesture=new Map([['ui.notifications',Date.now()]]); h.platform.lastGesture=new Map([['ui.notifications',Date.now()]]);
+ h.platform.notificationVisit={presentationId:'lease-1',component:'owner',generation:3,originWindowId:'prior-app',wokeScreen:false,handedOff:true};
+ await h.platform.action('owner','ui.notifications',3,'notification-return',{callId:'return',presentationId:'wrong',windowId:'attacker'});
+ assert.deepEqual(h.opened,[]);
+ assert.notEqual(h.platform.notificationVisit,null);
+});
+
+test('host surface cleanup preserves the source lease across a successful handoff', () => {
+ const h=harness();
+ h.platform.lastGesture=new Map(); h.platform.lastTapGesture=new Map();
+ h.platform.notificationPresentation={id:'lease-1',key:'native-secret',postTime:5};
+ h.platform.notificationVisit={presentationId:'lease-1',component:'owner',generation:3,originWindowId:'prior-app',wokeScreen:false,handedOff:true,reopenCount:0};
+ h.platform.closeSurface('ui.notifications','lease-1');
+ assert.deepEqual(h.platform.notificationPresentation,{id:'lease-1',key:'native-secret',postTime:5});
+ assert.equal(h.platform.notificationVisit.handedOff,true);
+});
+
+test('a reviewed visit return is authorized for a bounded automatic reply close', async () => {
+ const h=harness(); h.platform.controls=()=>true; h.platform.lastGesture=new Map(); h.platform.lastTapGesture=new Map();
+ h.platform.isProtected=()=>true;
+ h.platform.notificationVisit={presentationId:'lease-1',component:'owner',generation:3,originWindowId:'prior-app',wokeScreen:false,handedOff:true,reviewed:true,reviewedAt:Date.now(),reopenCount:0};
+ await h.platform.action('owner','ui.notifications',3,'notification-return',{callId:'return',presentationId:'lease-1'});
+ assert.deepEqual(h.opened,['focus:prior-app']);
+});
+
+test('an expired reviewed visit cannot bypass a protected flow', async () => {
+ const h=harness(); h.platform.controls=()=>true; h.platform.lastGesture=new Map(); h.platform.lastTapGesture=new Map(); h.platform.isProtected=()=>true;
+ h.platform.notificationVisit={presentationId:'lease-1',component:'owner',generation:3,originWindowId:'prior-app',wokeScreen:false,handedOff:true,reviewed:true,reviewedAt:Date.now()-5001,reopenCount:0};
+ await h.platform.action('owner','ui.notifications',3,'notification-return',{callId:'return',presentationId:'lease-1'});
+ assert.deepEqual(h.opened,[]);
+ assert.notEqual(h.platform.notificationVisit,null);
+});
+
+test('abandoning a failed wake-origin launch restores its captured origin and sleep', async () => {
+ const h=harness(); h.platform.controls=()=>true; h.platform.lastGesture=new Map(); h.platform.lastTapGesture=new Map();
+ h.platform.notificationPresentation={id:'lease-1',key:'native-secret',postTime:5};
+ h.platform.notificationVisit={presentationId:'lease-1',component:'owner',generation:3,originWindowId:'prior-app',wokeScreen:true,handedOff:true,handedOffAt:Date.now(),reopenCount:0};
+ await h.platform.action('owner','ui.notifications',3,'notification-abandon',{callId:'abandon',presentationId:'lease-1'});
+ assert.deepEqual(h.opened,['focus:prior-app','sleep']);
+ assert.equal(h.platform.notificationVisit,null);
+ assert.equal(h.platform.notificationPresentation,null);
+});
+
+test('a stale failed-launch cleanup cannot focus or sleep the host', async () => {
+ const h=harness(); h.platform.controls=()=>true; h.platform.lastGesture=new Map(); h.platform.lastTapGesture=new Map();
+ h.platform.notificationVisit={presentationId:'lease-1',component:'owner',generation:3,originWindowId:'prior-app',wokeScreen:true,handedOff:true,handedOffAt:Date.now()-15001,reopenCount:0};
+ await h.platform.action('owner','ui.notifications',3,'notification-abandon',{callId:'abandon',presentationId:'lease-1'});
+ assert.deepEqual(h.opened,[]);
+ assert.notEqual(h.platform.notificationVisit,null);
 });
 
 test('pointer bounds and native visible-viewport acceptance gate fresh action authority',()=>{

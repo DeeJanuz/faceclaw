@@ -688,11 +688,23 @@ class Shell {
     if (this.screenOn && previous && isWatchInput(previous) !== isWatchInput(event)) {
       this.foregroundWindow()?.requestRender();
     }
+    const notificationPreviewOnTop = () => this.stack.topMatches((layer) =>
+      typeof (layer as ExtensionLayer).claimsNotificationDismissGesture === "function" &&
+      (layer as ExtensionLayer).claimsNotificationDismissGesture(),
+    );
+
     // The stock lifecycle has already interpreted the physical double tap as
     // "wake". Keep that directionality if delivery is delayed or duplicated.
+    // A notification preview is different: when the display was dark, the
+    // lifecycle wake is the user's first tap on the visible card. Forward it
+    // as the preview's ordinary click so the provider can open its reader.
     if (event.type === "display-wake") {
       this.lastInputAtMs = Date.now();
       const wokeScreen = !this.screenOn && this.wake(navigationPolicy().wakeFocus);
+      if (notificationPreviewOnTop()) {
+        await this.stack.handleInput({ type: "click", source: "ring", timestampMs: event.timestampMs });
+        return { shell: true, window: false };
+      }
       return { shell: wokeScreen, window: false };
     }
 
@@ -742,6 +754,15 @@ class Shell {
     }
 
     if (!this.screenOn) {
+      // A wake and its first card tap can race across the firmware and host
+      // lifecycle callbacks. Keep the exact notification layer interactive if
+      // it is still present instead of dropping the gesture at the generic
+      // screen-off guard.
+      if (notificationPreviewOnTop() && ["click", "pointer-click", "double-click"].includes(event.type)) {
+        this.wake("window");
+        await this.stack.handleInput(event);
+        return { shell: true, window: false };
+      }
       if (event.type === "short-then-long-press" && navigationPolicy().tapHold === "switcher") {
         this.wake("sidebar");
         this.yieldFocusToSidebar();
@@ -760,6 +781,18 @@ class Shell {
     // also expose the switcher. Directional watch back is translated later.
     if (event.type === "double-click" && navigationPolicy().doubleTap === "sleep") {
       this.sleep();
+      return { shell: true, window: false };
+    }
+
+    // An arrival preview is the only shell extension allowed to consume a
+    // plain long press. Route it before the normal App actions menu so the
+    // interruption can be dismissed without changing the meaning of holds
+    // for ordinary apps, games, dictation, or protected overlays.
+    if (
+      event.type === "long-press" &&
+      notificationPreviewOnTop()
+    ) {
+      await this.stack.handleInput(event);
       return { shell: true, window: false };
     }
 

@@ -17,9 +17,17 @@ function harness(external = false) {
   { module, exports: module.exports, require: name => imports[name] || {}, setTimeout: fn => timers.push(fn) });
  const platform = Object.create(module.exports.ExtensionPlatform.prototype);
  Object.assign(platform, { controls: () => true, isLocked: () => false, event: (_component, _feature, result) => results.push(result), lastGesture: new Map([['ui.notifications', Date.now()]]), reviews: new Map(), uiNotifications: { resolve: () => source }, hooks: { closeSurface(_feature, restoreSleep) { assert.equal(restoreSleep, false); }, notificationReplyReturn: () => () => restored++ } });
- return { results, dismissed, start: () => platform.action('owner', 'ui.notifications', 1, 'notification-review-reply', { callId: 'review', actionIndex: 0 }),
+ return { platform, results, dismissed, start: () => platform.action('owner', 'ui.notifications', 1, 'notification-review-reply', { callId: 'review', actionIndex: 0 }),
   target: () => target, current: () => isCurrent(), accept: value => nativeAccepted = value, remove: () => sourcePresent = false, sends: () => sends, finish: status => finish(status), flush: () => { while (timers.length) timers.shift()(); }, restored: () => restored };
 }
+test('review cancellation acknowledges its own request while targeting the original review', async () => {
+ const h = harness(); let cancelled = 0;
+ h.platform.reviews.set('owner\nreview', { cancel: () => cancelled++, current: () => true });
+ await h.platform.action('owner', 'ui.notifications', 1, 'notification-cancel-review', { callId: 'cancel', reviewCallId: 'review' });
+ assert.equal(cancelled, 1);
+ assert.equal(h.results.at(-1).callId, 'cancel');
+ assert.equal(h.results.at(-1).ok, true);
+});
 test('confirmed native reply dismisses only its bound version and restores the visit once', async () => {
  const h = harness(); await h.start(); assert.equal(h.target().concealUnderlay, true); assert.equal(h.sends(), 0); assert.deepEqual(h.dismissed, []);
  h.target().onSend('Reviewed fixture'); h.target().onSend('Duplicate'); h.flush();

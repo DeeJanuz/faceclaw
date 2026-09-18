@@ -97,6 +97,9 @@ type ConnectionPhase = "disconnected" | "connecting" | "connected" | "charging" 
 // does not, retire the presentation so a logical wake cannot strand the
 // display in a pending state indefinitely.
 const NOTIFICATION_FIRST_FRAME_TIMEOUT_MS = 2000;
+// Let an input event already crossing the shell boundary win over the expiry
+// callback when both land in the same event-loop turn.
+const NOTIFICATION_INPUT_GRACE_MS = 150;
 
 export type DashboardSnapshot = {
   phase: ConnectionPhase;
@@ -330,7 +333,7 @@ class DashboardController {
   private unpairedDisconnectPending = false;
 
   private pendingNotificationWake: ExtensionLayer | null = null;
-  private extensionSurfaces = new Map<string, { component: string; layer: ExtensionLayer; timer?: ReturnType<typeof setTimeout>; frameTimer?: ReturnType<typeof setTimeout>; wokeScreen: boolean; interacted: boolean; revealed: boolean; presentationId?: string; durationMs?: number }>();
+  private extensionSurfaces = new Map<string, { component: string; layer: ExtensionLayer; timer?: ReturnType<typeof setTimeout>; frameTimer?: ReturnType<typeof setTimeout>; wokeScreen: boolean; interacted: boolean; revealed: boolean; presentationId?: string; durationMs?: number; deadlineMs?: number }>();
   private externalApps: ExternalAppPlatform;
 
   constructor() {
@@ -2663,9 +2666,12 @@ class DashboardController {
       if (notificationRevealState.frameTimer) clearTimeout(notificationRevealState.frameTimer);
       notificationRevealState.frameTimer = undefined;
       if (!notificationRevealState.interacted) {
+        const expiresAtMs = Date.now() + (notificationRevealState.durationMs ?? 5000);
+        notificationRevealState.deadlineMs = expiresAtMs;
+        this.externalApps?.extensions?.notificationPreviewRevealed?.(notificationRevealState.presentationId, expiresAtMs);
         notificationRevealState.timer = setTimeout(() => this.closeExtensionSurface(
           "ui.notifications", true, notificationRevealState.presentationId,
-        ), notificationRevealState.durationMs ?? 5000);
+        ), Math.max(0, expiresAtMs - Date.now()) + NOTIFICATION_INPUT_GRACE_MS);
       }
     }
     if (this.pendingNotificationWake) {
@@ -2704,10 +2710,11 @@ class DashboardController {
       if (prior.timer) clearTimeout(prior.timer);
       if (prior.frameTimer) clearTimeout(prior.frameTimer);
       prior.durationMs = durationMs;
+      prior.deadlineMs = undefined;
       prior.timer = undefined;
       if (replacement) prior.revealed = false;
       if (prior.revealed) {
-        prior.timer = setTimeout(() => this.closeExtensionSurface(feature, true, target), durationMs);
+        prior.timer = setTimeout(() => this.closeExtensionSurface(feature, true, target), durationMs + NOTIFICATION_INPUT_GRACE_MS);
       } else {
         prior.frameTimer = setTimeout(() => this.closeExtensionSurface(feature, true, target), NOTIFICATION_FIRST_FRAME_TIMEOUT_MS);
       }
@@ -2718,6 +2725,11 @@ class DashboardController {
     const wokeScreen = prior?.wokeScreen || !shell.isScreenOn();
     const layer = new ExtensionLayer(event => {
       const state = this.extensionSurfaces.get(feature);
+      const delivered = this.externalApps.extensions.surfaceInput(feature, event);
+      if (!delivered) {
+        if (feature === "ui.notifications") console.warn(`[NotificationInput] preview-retained presentation=${Boolean(state?.presentationId)}`);
+        return;
+      }
       if (state) {
         if (feature !== "ui.notifications" || event.type === "click") state.interacted = true;
         // Keep an arrival preview's geometry and backdrop until the provider
@@ -2740,7 +2752,6 @@ class DashboardController {
         state.timer = undefined;
         state.frameTimer = undefined;
       }
-      this.externalApps.extensions.surfaceInput(feature, event);
     }, (width, height) => {
       this.externalApps.extensions.openSurface(feature, width, height);
       this.externalApps.extensions.setSurfaceVisibility(feature, true, shell.isScreenOn());
@@ -2765,6 +2776,7 @@ class DashboardController {
       revealed: target === "inbox",
       presentationId,
       durationMs: feature === "ui.notifications" && target !== "inbox" ? durationMs : undefined,
+      deadlineMs: undefined as number | undefined,
       timer: undefined as ReturnType<typeof setTimeout> | undefined,
       frameTimer: undefined as ReturnType<typeof setTimeout> | undefined,
     };
@@ -2795,6 +2807,10 @@ class DashboardController {
     return () => {
       // A delayed external send must not interrupt a newer app or overlay.
       const current = this.extensionSurfaces.get("ui.notifications");
+      // A reader handoff has a stronger return lease. Let the provider finish
+      // that lease so it can restore the host-captured origin before sleeping
+      // a display that was originally off.
+      if (this.externalApps.extensions.notificationVisitActive?.() === true) return;
       if (wokeScreen && !shell.hasOverlay() && shell.foregroundWindow()?.windowId === previousWindow &&
           (!presentationId || !current || current.presentationId === presentationId)) shell.sleepAtAppRoot();
     };
@@ -2809,6 +2825,17 @@ class DashboardController {
     state.timer = undefined;
     state.frameTimer = undefined;
     shell.closeExtensionOverlay(state.layer);
+    if (feature === "ui.notifications" && restoreSleep === false) {
+      // The reader changes state while the provider popup still owns the top
+      // surface. Refresh its already-foreground window after that overlay has
+      // actually left the shell; otherwise the compositor can keep the old
+      // cached app frame even though subsequent input reaches the reader.
+      const ownerWindowId = `apk:${state.component}`;
+      setTimeout(() => {
+        const foreground = shell.foregroundWindow();
+        if (shell.isScreenOn() && foreground?.windowId === ownerWindowId) foreground.requestRender();
+      }, 0);
+    }
     if (restoreSleep && state.wokeScreen && !shell.hasOverlay()) shell.sleep();
     return true;
   }

@@ -17,6 +17,7 @@ export class ExtensionLayer implements Layer {
     private readonly heightMode: WindowHeightMode = "min",
     opaque = true,
     public alignTop = false,
+    private readonly notificationDismissGesture = false,
   ) { this.opaque = opaque; }
   private presentationId: string | undefined;
   /** Bind lifecycle cleanup to the logical presentation using this layer. */
@@ -44,5 +45,7 @@ export class ExtensionLayer implements Layer {
     return image;
   }
   handleInput(event: InputEvent): void { this.input(event); }
+  /** Only the host-owned arrival preview may reserve a plain long press. */
+  claimsNotificationDismissGesture(): boolean { return this.notificationDismissGesture; }
   onRemoved(): void { const presentationId = this.presentationId; this.frame = undefined; this.closed(presentationId); }
 }

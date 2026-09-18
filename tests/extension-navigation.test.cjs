@@ -149,6 +149,37 @@ test('single hold requests App actions even when an app claims hold; text captur
  }
 });
 
+test('a notification preview owns plain hold without opening the app menu', async () => {
+ const h = harness(); let held = 0;
+ const layer = { claimsNotificationDismissGesture: () => true, handleInput: event => { if (event.type === 'long-press') held++; } };
+ h.shell.stack.push(layer);
+ await h.send('long-press');
+ assert.equal(held, 1);
+ assert.equal(h.delivered.length, 0);
+ h.shell.stack.layers.pop();
+});
+
+test('a notification preview turns a lifecycle wake into its first tap', async () => {
+ const h = harness(); const received = [];
+ const layer = { claimsNotificationDismissGesture: () => true, handleInput: event => received.push(event) };
+ h.shell.stack.push(layer);
+ await h.shell.receiveInput({ type: 'display-wake', timestampMs: Date.now() });
+ assert.deepEqual(received.map(event => event.type), ['click']);
+ assert.equal(h.shell.isScreenOn(), true);
+ assert.deepEqual(h.delivered, []);
+ h.shell.stack.layers.pop();
+});
+
+test('a notification preview keeps a tap when screen-off state races its wake', async () => {
+ const h = harness(); const received = [];
+ const layer = { claimsNotificationDismissGesture: () => true, handleInput: event => received.push(event) };
+ h.shell.stack.push(layer); h.shell.sleep(); h.shell.stack.push(layer);
+ await h.shell.receiveInput({ type: 'click', source: 'ring', timestampMs: Date.now() });
+ assert.deepEqual(received.map(event => event.type), ['click']);
+ assert.equal(h.shell.isScreenOn(), true);
+ h.shell.stack.layers.pop();
+});
+
 test('T3 hold reaches only allowlisted games while their gameplay claim is active', async () => {
  for (const appId of ['blocks', 'minesweeper', 'pinball']) {
   for (const source of ['ring', 'watch', 'left-arm', 'right-arm']) {

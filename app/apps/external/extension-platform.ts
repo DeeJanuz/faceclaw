@@ -23,6 +23,18 @@ export type ExtensionHooks = {
   onFrame?: (component: string, feature: string, generation: number, width: number, height: number, pixels: Uint8Array) => void;
 };
 type Pending = { component: string; feature: string; generation: number; own?: boolean; resolve: (data: any) => void; reject: (error: Error) => void; progress?: (data: any) => void };
+type NotificationVisit = {
+  presentationId: string;
+  component: string;
+  generation: number;
+  originWindowId?: string;
+  wokeScreen: boolean;
+  handedOff: boolean;
+  reviewed?: boolean;
+  reviewedAt?: number;
+  handedOffAt?: number;
+  reopenCount: number;
+};
 export type ProviderRequest = { requestId: string; promise: Promise<any>; cancel: () => void; event: (data: unknown) => boolean };
 let active: ExtensionPlatform | null = null;
 export function extensionPlatform(): ExtensionPlatform | null { return active; }
@@ -46,6 +58,12 @@ export class ExtensionPlatform {
    * observed repeatedly without replacing the pixels the wearer is reading.
    */
   private notificationPresentation: { id: string; key: string; postTime: number } | null = null;
+  /**
+   * The preview surface is short lived, but its reader/session visit may outlive
+   * that surface. Keep the host-captured origin separately so a provider cannot
+   * turn a generic launcher action into an arbitrary focus request.
+   */
+  private notificationVisit: NotificationVisit | null = null;
   private notificationAppsAt = 0;
   private notificationApps: { packageName: string; name: string }[] = [];
   private lastNotificationSnapshot = "";
@@ -98,6 +116,15 @@ export class ExtensionPlatform {
     return true;
   }
   handlesNotifications(): boolean { return !!this.feature("ui.notifications") && !this.isLocked(); }
+  /** True while a notification reader/session still owns an admitted visit. */
+  notificationVisitActive(): boolean { return Boolean(this.notificationVisit?.handedOff); }
+  /** Publish the exact host-owned expiry after the first valid frame is admitted. */
+  notificationPreviewRevealed(presentationId: string, expiresAtMs: number): boolean {
+    const visit = this.notificationVisit;
+    if (!visit || visit.handedOff || visit.presentationId !== presentationId || !Number.isFinite(expiresAtMs) ||
+        !this.controls(visit.component, "ui.notifications", visit.generation)) return false;
+    return this.event(visit.component, "ui.notifications", { event: "notification-deadline", presentationId, expiresAtMs });
+  }
   private refresh(): void {
     let snapshot: any;
     try { snapshot = JSON.parse(String(this.native.extensionsJson())); } catch { snapshot = {}; }
@@ -117,7 +144,7 @@ export class ExtensionPlatform {
     }
     if (changed.has("ui.notifications")) {
       for (const review of this.reviews.values()) review.cancel(); this.reviews.clear();
-      this.uiNotifications.clear(); this.lastNotificationSnapshot = ""; this.notificationPresentation = null;
+      this.uiNotifications.clear(); this.lastNotificationSnapshot = ""; this.notificationPresentation = null; this.notificationVisit = null;
     }
     if (changed.has("device-tools")) { this.toolNotifications.clear(); this.messaging?.invalidate(); }
     if (changed.has("ui.app-menu")) this.closeMenu();
@@ -187,7 +214,15 @@ export class ExtensionPlatform {
   }
   closeSurface(feature: string, presentationId?: string): void {
     if (feature === "ui.app-menu") this.closeMenu();
-    if (feature === "ui.notifications") this.notificationPresentation = null;
+    if (feature === "ui.notifications") {
+      const preserveVisit = Boolean(this.notificationVisit?.handedOff &&
+        (presentationId === undefined || presentationId === this.notificationVisit?.presentationId));
+      if (!preserveVisit) this.notificationPresentation = null;
+      // A successful reader handoff deliberately outlives the extension
+      // surface. Ordinary expiry, replacement, revocation, and teardown must
+      // invalidate the visit instead.
+      if (!preserveVisit) this.notificationVisit = null;
+    }
     const selected = this.feature(feature); if (selected) this.native.closeExtensionSurface(selected.component, feature, presentationId ?? null);
     this.lastGesture.delete(feature); this.lastTapGesture.delete(feature);
   }
@@ -199,15 +234,29 @@ export class ExtensionPlatform {
         shell.foregroundWindow()?.windowId !== `apk:${component}` || !record(input)) return;
     if (["click", "double-click", "pointer-click", "long-press", "short-then-long-press", "back", "swipe-left"].includes(String(input.type))) this.lastGesture.set("ui.notifications", Date.now());
   }
-  surfaceInput(feature: string, input: unknown): void {
-    const selected = this.feature(feature); if (!selected || this.isLocked() || !shell.isScreenOn() || !record(input)) return;
+  surfaceInput(feature: string, input: unknown): boolean {
+    const selected = this.feature(feature);
+    const reject = (reason: string): false => {
+      if (feature === "ui.notifications") console.warn(`[NotificationInput] rejected reason=${reason}`);
+      return false;
+    };
+    if (!selected) return reject("provider-unavailable");
+    if (this.isLocked()) return reject("locked");
+    if (!shell.isScreenOn()) return reject("screen-off");
+    if (!record(input)) return reject("invalid-input");
+    const traceId = newId();
+    const delivered = Boolean(this.native.sendExtension(selected.component, feature, "input", JSON.stringify({
+      event: "input", traceId, input: { ...input, traceId },
+    })));
+    if (!delivered) return reject("transport-unavailable");
     if (["click", "double-click", "scroll-up", "scroll-down", "back", "long-press", "short-then-long-press"].includes(String(input.type))) this.lastGesture.set(feature, Date.now());
     // The selected provider may map a wake-origin double click to "open" while
     // keeping an awake double click as dismissal. Record both as physical tap
     // evidence; the provider action and presentation identity still determine
     // whether the gesture can release the preview without restoring sleep.
     if (feature === "ui.notifications" && (input.type === "click" || input.type === "double-click")) this.lastTapGesture.set(feature, Date.now());
-    this.native.sendExtension(selected.component, feature, "input", JSON.stringify({ event: "input", input }));
+    if (feature === "ui.notifications") console.info(`[NotificationInput] dispatched trace=${traceId} type=${String(input.type).slice(0, 32)}`);
+    return true;
   }
   surfacePointer(feature: string, x: number, y: number, width: number, height: number): boolean {
     const selected = this.feature(feature);
@@ -226,7 +275,7 @@ export class ExtensionPlatform {
     if (this.isLocked()) {
       for (const review of this.reviews.values()) review.cancel(); this.reviews.clear();
       for (const feature of ["ui.launcher", "ui.app-menu", "ui.notifications"]) { this.setSurfaceVisibility(feature, false, false); this.hooks.closeSurface?.(feature); }
-      this.lastGesture.clear(); this.lastTapGesture.clear(); this.uiNotifications.clear(); this.ownNotifications.clear(); this.lastNotificationSnapshot = ""; this.notificationPresentation = null;
+      this.lastGesture.clear(); this.lastTapGesture.clear(); this.uiNotifications.clear(); this.ownNotifications.clear(); this.lastNotificationSnapshot = ""; this.notificationPresentation = null; this.notificationVisit = null;
     }
     this.lastState = ""; this.publishState();
   }
@@ -294,18 +343,29 @@ export class ExtensionPlatform {
       if (delivered) this.lastNotificationSnapshot = serialized;
     }
     const item = arrival && leased.find(entry => entry.source.key === arrival);
-    // Android emits group summaries alongside their children. T3 deliberately
-    // ignores summaries, so presenting one would replace a valid preview with
-    // an empty surface. A provider's own APK notification still needs a host
-    // surface when no preview exists; T3 already owns its local completion
-    // card, and the shared layer lets that card render without replacing an
-    // existing presentation.
+    // Android emits group summaries alongside their children, and apps create
+    // short-lived ongoing/foreground-service notifications while completing
+    // work such as a quick reply. Those entries remain available in the inbox
+    // snapshot, but they must never open a glasses preview. The provider has no
+    // arrival card for them and would otherwise paint its current app frame
+    // into a seven-second notification overlay.
     const samePresentation = item && this.notificationPresentation?.key === item.source.key &&
       this.notificationPresentation.postTime === item.source.postTime;
-    if (item && !item.source.isGroupSummary && !samePresentation && !this.isProtected()) {
+    if (item && !item.source.isGroupSummary && !item.source.isForegroundService &&
+        !item.source.isOngoing && !samePresentation && !this.isProtected()) {
       const wokeScreen = !shell.isScreenOn();
+      const originWindowId = shell.foregroundWindow()?.windowId;
       if (this.hooks.showSurface?.("ui.notifications", selected.component, item.id) !== true) return;
       this.notificationPresentation = { id: item.id, key: item.source.key, postTime: item.source.postTime };
+      this.notificationVisit = {
+        presentationId: item.id,
+        component: selected.component,
+        generation: selected.generation,
+        originWindowId,
+        wokeScreen,
+        handedOff: false,
+        reopenCount: 0,
+      };
       const configuredSeconds = Number(selected.configuration?.previewSeconds);
       const durationMs = [3, 5, 7, 10].includes(configuredSeconds) ? configuredSeconds * 1000 : 5000;
       this.event(selected.component, "ui.notifications", { event: "notification-arrived", key: item.id, postTime: item.source.postTime, presentationId: item.id, wokeScreen, durationMs });
@@ -372,8 +432,88 @@ export class ExtensionPlatform {
       if (this.controls(component, feature, generation)) this.event(component, feature, { event: "tool-result", callId, result: output }); return;
     }
     if (feature === "ui.notifications" && action === "notification-cancel-review") {
-      const reviewKey = `${component}\n${callId}`, review = this.reviews.get(reviewKey);
+      // Cancellation has its own transport callId. `reviewCallId` names the
+      // pending review without letting this acknowledgement race and consume
+      // the reviewed-send result on the provider side.
+      const reviewCallId = boundedToken(data.reviewCallId) ? data.reviewCallId : callId;
+      const reviewKey = `${component}\n${reviewCallId}`, review = this.reviews.get(reviewKey);
       if (review) { this.reviews.delete(reviewKey); review.cancel(); } result(true); return;
+    }
+    if (feature === "ui.notifications" && action === "notification-return") {
+      const visit = this.notificationVisit;
+      const presentationId = boundedToken(data.presentationId) ? data.presentationId : "";
+      const reviewedAge = visit?.reviewedAt === undefined ? Number.POSITIVE_INFINITY : Date.now() - visit.reviewedAt;
+      const reviewedReturn = visit?.reviewed === true && reviewedAge >= 0 && reviewedAge <= 5000;
+      if (!visit || !presentationId || presentationId !== visit.presentationId ||
+          visit.component !== component || visit.generation !== generation ||
+          !visit.handedOff || !shell.isScreenOn() ||
+          shell.foregroundWindow()?.windowId !== `apk:${component}` || (this.isProtected() && !reviewedReturn)) {
+        console.warn(`[NotificationReturn] rejected visit=${Boolean(visit)} presentation=${Boolean(visit && presentationId === visit.presentationId)} component=${Boolean(visit?.component === component)} generation=${Boolean(visit?.generation === generation)} handedOff=${Boolean(visit?.handedOff)} screenOn=${shell.isScreenOn()} foreground=${shell.foregroundWindow()?.windowId ?? "none"} protected=${this.isProtected()} reviewed=${reviewedReturn}`);
+        result(false, "Notification visit is stale"); return;
+      }
+      const origin = visit.originWindowId;
+      const exists = origin && shell.getWindows().some(window => window.windowId === origin);
+      if (origin && !exists) { result(false, "Notification origin is unavailable"); return; }
+      this.lastGesture.delete(feature); this.lastTapGesture.delete(feature);
+      const restoreSleep = visit.wokeScreen;
+      this.notificationVisit = null;
+      this.notificationPresentation = null;
+      // Resolve the provider's request while its IPC path is still awake, then
+      // perform the host focus/sleep side effects. This prevents the display
+      // sleep from racing the action-result delivery that clears the reader's
+      // opaque visit token.
+      result(true);
+      if (origin) shell.focusWindow(origin);
+      if (restoreSleep) shell.sleepAtAppRoot();
+      return;
+    }
+    if (feature === "ui.notifications" && action === "notification-reopen") {
+      const visit = this.notificationVisit;
+      const presentationId = boundedToken(data.presentationId) ? data.presentationId : "";
+      const source = visit && this.notificationPresentation?.id === presentationId
+        ? readActiveNotifications(50, true).find(item => item.key === this.notificationPresentation?.key && item.postTime === this.notificationPresentation?.postTime)
+        : undefined;
+      if (!visit || !presentationId || presentationId !== visit.presentationId || visit.component !== component ||
+          visit.generation !== generation || !visit.handedOff || visit.reopenCount >= 3 ||
+          (visit.handedOffAt !== undefined && Date.now() - visit.handedOffAt > 10000) || !source ||
+          !shell.isScreenOn() || this.isProtected()) {
+        result(false, "Notification visit cannot be reopened"); return;
+      }
+      if (this.hooks.showSurface?.("ui.notifications", component, presentationId) !== true) {
+        result(false, "Notification surface unavailable"); return;
+      }
+      visit.handedOff = false;
+      visit.reviewed = false;
+      visit.reviewedAt = undefined;
+      visit.handedOffAt = undefined;
+      visit.reopenCount++;
+      const configuredSeconds = Number(this.feature("ui.notifications")?.configuration?.previewSeconds);
+      const durationMs = [3, 5, 7, 10].includes(configuredSeconds) ? configuredSeconds * 1000 : 5000;
+      this.event(component, "ui.notifications", {
+        event: "notification-arrived", key: this.notificationPresentation?.id ?? presentationId,
+        postTime: source.postTime, presentationId, wokeScreen: visit.wokeScreen, durationMs,
+      });
+      result(true); return;
+    }
+    if (feature === "ui.notifications" && action === "notification-abandon") {
+      const visit = this.notificationVisit;
+      const presentationId = boundedToken(data.presentationId) ? data.presentationId : "";
+      if (!visit || !presentationId || presentationId !== visit.presentationId || visit.component !== component ||
+          visit.generation !== generation || !visit.handedOff || visit.handedOffAt === undefined ||
+          Date.now() - visit.handedOffAt > 15000 || !shell.isScreenOn() || this.isProtected()) {
+        result(false, "Notification visit cannot be abandoned"); return;
+      }
+      const origin = visit.originWindowId;
+      const originExists = origin && shell.getWindows().some(window => window.windowId === origin);
+      const restoreSleep = visit.wokeScreen;
+      this.notificationVisit = null;
+      this.notificationPresentation = null;
+      // A failed launch must not strand the display in the temporary wake
+      // state created for its preview. Resolve IPC before focus/sleep changes.
+      result(true);
+      if (originExists) shell.focusWindow(origin!);
+      if (restoreSleep) shell.sleepAtAppRoot();
+      return;
     }
     if (action === "close-surface") {
       const hasPresentationId = feature === "ui.notifications" && Object.prototype.hasOwnProperty.call(data, "presentationId");
@@ -391,6 +531,10 @@ export class ExtensionPlatform {
           result(false, "A fresh feature gesture is required"); return;
         }
         console.info(`[NotificationHandoff] accepted gestureAgeMs=${Date.now() - gesture}`);
+        if (feature === "ui.notifications" && this.notificationVisit && this.notificationVisit.presentationId === presentationId) {
+          this.notificationVisit.handedOff = true;
+          this.notificationVisit.handedOffAt = Date.now();
+        }
         this.lastGesture.delete(feature); this.lastTapGesture.delete(feature);
       }
       const closed = this.hooks.closeSurface?.(feature, keepAwake ? false : undefined, presentationId);
@@ -438,12 +582,18 @@ export class ExtensionPlatform {
         let completed = false;
         const complete = (status: string) => {
           if (completed) return; completed = true;
-          result(status === "sent" || status === "draft-saved", undefined, status);
           if (status === "sent" && this.controls(component, feature, generation) && !this.isLocked()) {
             // A reviewed send authorizes dismissal of only the bound version.
+            if (this.notificationVisit?.component === component && this.notificationVisit.handedOff) {
+              this.notificationVisit.reviewed = true;
+              this.notificationVisit.reviewedAt = Date.now();
+            }
             dismissNotification(source.key, source.postTime);
             setTimeout(() => restoreVisit?.(), 0);
           }
+          // Publish the result only after recording the reviewed return lease.
+          // The provider can immediately close its reader when this resolves.
+          result(status === "sent" || status === "draft-saved", undefined, status);
         };
         this.hooks.closeSurface?.(feature, false);
         const cancel = shell.openReviewedVoiceInput({ id: "extension-notification", captureTitle: "Reply", concealUnderlay: true, capturePrompt: "Speak your reply...", label: `Send reply via ${source.appName}: ${source.title}`.slice(0, 200), onSend: text => {

@@ -25,7 +25,14 @@ public final class RenderSurface implements AutoCloseable {
  private Bitmap canvasBitmap;
  private int[] canvasPixels;
  private RenderCredit credit;
+ private long authorityEpoch=1;
  private InvalidateReason pendingReason=InvalidateReason.STATE;
+
+ static final class CreditReservation {
+  final RenderCredit credit;
+  final long authorityEpoch;
+  CreditReservation(RenderCredit credit,long authorityEpoch){this.credit=credit;this.authorityEpoch=authorityEpoch;}
+ }
 
  private static final class Slot {
   final long generation;
@@ -42,6 +49,7 @@ public final class RenderSurface implements AutoCloseable {
  public synchronized int width(){return width;}
  public synchronized int height(){return height;}
  public synchronized long generation(){return generation;}
+ synchronized long authorityEpoch(){return authorityEpoch;}
  public synchronized boolean visible(){return visible&&screenOn&&!closed;}
  FaceclawSession session(){return session;}
  public SceneController scene(){return scene;}
@@ -59,7 +67,7 @@ public final class RenderSurface implements AutoCloseable {
  synchronized boolean hasRenderer(){return rasterRenderer!=null||canvasRenderer!=null;}
 
  /** Explicit recovery after a renderer/executor failure. */
- public void recoverRenderer(){renderGate.recover();invalidate(InvalidateReason.RECOVERY);}
+ public void recoverRenderer(){renderGate.recover();invalidate(InvalidateReason.RECOVERY);dispatchIfReady();}
  public boolean rendererSuspended(){return renderGate.suspended();}
  public void invalidate(InvalidateReason reason){
   InvalidateReason next;
@@ -82,18 +90,21 @@ public final class RenderSurface implements AutoCloseable {
    // opened. Keep that surface disconnected until an open/resize supplies
    // real bounds; never ask Protocol.frameSize to allocate a zero-sized pool.
    if(nextWidth<1||nextHeight<1||nextWidth>Protocol.MAX_WIDTH||nextHeight>Protocol.MAX_HEIGHT){
-    width=0;height=0;generation=nextGeneration;visible=false;screenOn=nextScreenOn;credit=null;retirePoolLocked();poolDeferred=false;return;
+    width=0;height=0;generation=nextGeneration;visible=false;screenOn=nextScreenOn;credit=null;authorityEpoch++;retirePoolLocked();poolDeferred=false;return;
    }
    boolean replace=width!=nextWidth||height!=nextHeight||generation!=nextGeneration||slots.length==0;
-   width=nextWidth;height=nextHeight;generation=nextGeneration;visible=nextVisible;screenOn=nextScreenOn;credit=null;
+   boolean visibilityChanged=visible!=nextVisible||screenOn!=nextScreenOn;
+   width=nextWidth;height=nextHeight;generation=nextGeneration;
+   if(replace||visibilityChanged){credit=null;authorityEpoch++;}
+   visible=nextVisible;screenOn=nextScreenOn;
    if(replace){retirePoolLocked();if(retiredSlots.size()<MAX_RETIRED_WRITER_SLOTS)memories=openPoolLocked();else poolDeferred=true;}
   }
   if(memories!=null)session.registerSurface(this,nextGeneration,nextWidth,nextHeight,memories);
-  if(nextVisible&&nextScreenOn)invalidate(InvalidateReason.RECOVERY);
+  if(nextVisible&&nextScreenOn&&credit==null)invalidate(InvalidateReason.RECOVERY);
  }
  void setVisibility(boolean nextVisible,boolean nextScreenOn){
   boolean wake;
-  synchronized(this){visible=nextVisible;screenOn=nextScreenOn;if(!visible||!screenOn)credit=null;wake=visible&&screenOn&&!closed;}
+  synchronized(this){boolean changed=visible!=nextVisible||screenOn!=nextScreenOn;visible=nextVisible;screenOn=nextScreenOn;if(changed){credit=null;authorityEpoch++;}wake=visible&&screenOn&&!closed;}
   if(wake)invalidate(InvalidateReason.STATE);
  }
 
@@ -130,7 +141,7 @@ public final class RenderSurface implements AutoCloseable {
    lease=leaseLocked();if(lease==null)return;
    target=executor;raster=rasterRenderer;canvas=canvasRenderer;request=new RenderRequest(this,lease.credit,pendingReason);
   }
-  renderGate.dispatch(target,()->{if(raster!=null)raster.render(lease,request);else renderCanvas(canvas,lease,request);},lease::close,
+  renderGate.dispatch(target,()->{if(raster!=null)raster.render(lease,request);else renderCanvas(canvas,lease,request);},lease::closeFromRendererFailure,
    rejected->session.reportDiagnostic(rejected?SdkDiagnostic.Category.EXECUTOR_REJECTED:SdkDiagnostic.Category.RENDERER_FAILURE,"render",this,lease.generation,true));
  }
  private void renderCanvas(CanvasRenderer renderer,FrameLease lease,RenderRequest request)throws Exception{
@@ -146,45 +157,75 @@ public final class RenderSurface implements AutoCloseable {
   FrameLease lease;
   synchronized(this){lease=leaseLocked();}
   if(lease==null){session.reportDiagnostic(SdkDiagnostic.Category.LOCAL_VALIDATION,"submit-gray8",this,generation,false);invalidate(InvalidateReason.STATE);return false;}
-  if(source==null||source.remaining()!=lease.width*lease.height){lease.close();session.reportDiagnostic(SdkDiagnostic.Category.LOCAL_VALIDATION,"submit-gray8",this,lease.generation,false);return false;}
-  lease.gray8().put(source.duplicate());lease.submit(metadata);return true;
+  if(source==null||source.remaining()!=lease.width*lease.height){lease.closeFromRendererFailure();session.reportDiagnostic(SdkDiagnostic.Category.LOCAL_VALIDATION,"submit-gray8",this,lease.generation,false);return false;}
+  try{lease.gray8().put(source.duplicate());return lease.submitInternal(metadata);}
+  catch(RuntimeException error){
+   // FrameLease is already terminal when owner.submit() is entered. If local
+   // validation/serialization fails before Binder dispatch, close the writer
+   // slot and return the same authority instead of stranding the surface.
+   failLocalSubmit(lease);
+   session.reportDiagnostic(SdkDiagnostic.Category.LOCAL_VALIDATION,"submit-gray8",this,lease.generation,false);
+   return false;
+  }
  }
  private FrameLease leaseLocked(){
   if(credit==null||!visible())return null;
   for(Slot slot:slots)if(!slot.busy){
-   slot.busy=true;RenderCredit used=credit;credit=null;long sequence=nextSequence++;slot.sequence=sequence;
+   slot.busy=true;RenderCredit used=credit;credit=null;long leaseEpoch=authorityEpoch;long sequence=nextSequence++;slot.sequence=sequence;
    FrameWire.begin(slot.mapping,writeEpoch);ByteBuffer pixels=FrameWire.pixels(slot.mapping,width*height);pixels.clear();
-   return new FrameLease(this,generation,slot.id,sequence,width,height,used,pixels);
+   return new FrameLease(this,generation,slot.id,sequence,leaseEpoch,width,height,used,pixels);
   }
   return null;
  }
- void submit(FrameLease lease,FrameMetadata metadata){
-  FrameMetadata wire=metadata;
-  if(wire==null)wire=FrameMetadata.builder(session.nextClientFrameId(),session.nextContentVersion()).fullDamage(lease.width,lease.height).build();
-  boolean currentLease;
-  synchronized(this){
-   Slot slot=findLeaseSlotLocked(lease.generation,lease.slotId,lease.sequence);
-   if(slot==null)return;
-   currentLease=!closed&&lease.generation==generation;
-   if(!currentLease){releaseSlotLocked(slot);}
-   else{writeEpoch+=2;FrameWire.finish(slot.mapping,lease.generation,lease.sequence,wire.contentVersion,lease.width*lease.height,writeEpoch);slot.submitted=true;}
+ boolean submit(FrameLease lease,FrameMetadata metadata){
+  try{
+   FrameMetadata wire=metadata;
+   if(wire==null)wire=FrameMetadata.builder(session.nextClientFrameId(),session.nextContentVersion()).fullDamage(lease.width,lease.height).build();
+   boolean currentLease;
+   synchronized(this){
+    Slot slot=findLeaseSlotLocked(lease.generation,lease.slotId,lease.sequence);
+    if(slot==null)return false;
+    currentLease=!closed&&lease.generation==generation;
+    if(!currentLease){releaseSlotLocked(slot);}
+    else{writeEpoch+=2;FrameWire.finish(slot.mapping,lease.generation,lease.sequence,wire.contentVersion,lease.width*lease.height,writeEpoch);slot.submitted=true;}
+   }
+   if(!currentLease){maybeOpenDeferredPool();return false;}
+   return session.submitFrame(this,lease,wire);
+  }catch(RuntimeException error){
+   // FrameWire and metadata construction happen before the host call. This
+   // is a definite local failure, so the lease may safely return its credit.
+   failLocalSubmit(lease);
+   session.reportDiagnostic(SdkDiagnostic.Category.LOCAL_VALIDATION,"submit-frame",this,lease.generation,false);
+   return false;
   }
-  if(!currentLease){maybeOpenDeferredPool();return;}
-  session.submitFrame(this,lease,wire);
  }
- void cancel(FrameLease lease){
+ void failLocalSubmit(FrameLease lease){cancel(lease,false);}
+ void cancel(FrameLease lease,boolean dispatch){
   boolean retry=false;
-  synchronized(this){Slot slot=findLeaseSlotLocked(lease.generation,lease.slotId,lease.sequence);if(slot!=null){releaseSlotLocked(slot);retry=!closed&&lease.generation==generation&&visible&&screenOn;}}
+  synchronized(this){Slot slot=findLeaseSlotLocked(lease.generation,lease.slotId,lease.sequence);if(slot!=null){releaseSlotLocked(slot);retry=!closed&&lease.generation==generation&&lease.authorityEpoch==authorityEpoch&&visible&&screenOn;if(retry&&credit==null)credit=lease.credit;}}
   maybeOpenDeferredPool();
-  if(retry)invalidate(InvalidateReason.STATE);
+  if(retry){invalidate(InvalidateReason.STATE);if(dispatch)dispatchIfReady();}
  }
  void release(long releasedGeneration,int slotId,long sequence){
   synchronized(this){Slot slot=findLeaseSlotLocked(releasedGeneration,slotId,sequence);if(slot!=null)releaseSlotLocked(slot);}
   maybeOpenDeferredPool();
   dispatchIfReady();
  }
- synchronized void suspend(){credit=null;retirePoolLocked();}
- synchronized void consumeSceneCredit(){credit=null;}
+ synchronized void suspend(){credit=null;authorityEpoch++;retirePoolLocked();}
+ synchronized CreditReservation reserveSceneCredit(){
+  if(credit==null)return null;
+  CreditReservation reservation=new CreditReservation(credit,authorityEpoch);
+  credit=null;
+  return reservation;
+ }
+ synchronized boolean commitReservedSceneCredit(CreditReservation reservation){
+  return reservation!=null&&!closed&&reservation.authorityEpoch==authorityEpoch;
+ }
+ synchronized boolean restoreSceneCredit(CreditReservation reservation){
+  if(reservation==null||closed||reservation.authorityEpoch!=authorityEpoch||credit!=null||!visible())return false;
+  credit=reservation.credit;
+  return true;
+ }
  void replayScene(){synchronized(this){if(!closed)sceneReplayPending=true;}}
 
  private Slot findLeaseSlotLocked(long leaseGeneration,int slotId,long sequence){

@@ -9,6 +9,7 @@ import { isValidMacAddress, loadDeviceAddresses } from "./device-addresses";
 import {
   ensureBlePermissions,
   ensureVoicePermissions,
+  hasBlePermissions,
   hasMicrophonePermission,
   requestMicrophonePermission,
 } from "./android-permissions";
@@ -23,6 +24,7 @@ import { grayImageToPreviewSource } from "../native/gray-image-preview";
 import { firmwareIncompatibilityMessage } from "./firmware-compat";
 import { hasExtractedEvenHubFonts } from "./firmware-builder";
 import { resumeAutoReconnect, suppressAutoReconnect } from "./reconnect-policy";
+import { backgroundSessionRestoreRequested, setBackgroundSessionRestoreRequested } from "./background-session";
 import { WearRemote, type WearRemoteInputKind } from "./wear-remote";
 
 /** Who a synthetic (non-firmware) input stands for. */
@@ -1354,14 +1356,19 @@ class DashboardController {
     this.appendLog("Preview-only display released.");
   }
 
-  async connect(): Promise<void> {
+  async connect(options?: { preserveBackgroundRestoreIntent?: boolean }): Promise<void> {
     if (this.phase !== "disconnected") return;
+    const preserveBackgroundRestoreIntent = options?.preserveBackgroundRestoreIntent === true;
     // Connecting is the explicit way out of the manual-disconnected state.
     resumeAutoReconnect();
+    // A new attempt supersedes any previous restore intent. It is set again
+    // only after already-granted prerequisites are confirmed.
+    if (!preserveBackgroundRestoreIntent) setBackgroundSessionRestoreRequested(false);
 
     const addresses = loadDeviceAddresses();
     if (!addresses.right || !addresses.left) {
       const message = "Configure both left and right arm MAC addresses before connecting.";
+      if (preserveBackgroundRestoreIntent) setBackgroundSessionRestoreRequested(false);
       this.setPhase("disconnected");
       this.setStatus(`Failed: ${message}`);
       this.appendLog(`error: ${message}`);
@@ -1401,6 +1408,7 @@ class DashboardController {
 
     try {
       await ensureBlePermissions();
+      setBackgroundSessionRestoreRequested(true);
       startForegroundNotification("Connecting to the glasses");
       communicator = new FaceclawCommunicatorBridge({
         right: addresses.right,
@@ -1663,6 +1671,9 @@ class DashboardController {
       this.setPhase("disconnected");
       this.setStatus(`Failed: ${message}`);
       this.appendLog(`error: ${message}`);
+      if (!preserveBackgroundRestoreIntent || message.startsWith("Configure both left and right arm")) {
+        setBackgroundSessionRestoreRequested(false);
+      }
       throw error;
     } finally {
       this.connectRunning = false;
@@ -1679,6 +1690,9 @@ class DashboardController {
   private scheduleIncompatibleFirmwareDisconnect(): void {
     if (this.incompatibleDisconnectPending) return;
     this.incompatibleDisconnectPending = true;
+    // Safety state is known before the asynchronous teardown runs. Prevent a
+    // sticky service restart from reconnecting into firmware we must not drive.
+    setBackgroundSessionRestoreRequested(false);
     const attempt = () => {
       // Firmware info can arrive while connect() is still mid-flight; let it
       // finish so the teardown doesn't race its surface setup.
@@ -1714,6 +1728,8 @@ class DashboardController {
   private scheduleUnpairedDisconnect(message: string): void {
     if (this.unpairedDisconnectPending) return;
     this.unpairedDisconnectPending = true;
+    // The bond loss is a permanent setup failure until the user re-pairs.
+    setBackgroundSessionRestoreRequested(false);
     const attempt = () => {
       // The unpaired report can arrive while connect() is still mid-flight;
       // let it finish so the teardown doesn't race its surface setup.
@@ -1750,6 +1766,7 @@ class DashboardController {
    */
   async disconnect(options?: { skipFirmwareCleanup?: boolean }): Promise<void> {
     suppressAutoReconnect();
+    setBackgroundSessionRestoreRequested(false);
     // The phone menu offers Disconnect during the connecting phase (it is the
     // only way out of a reconnection-attempt loop), so a call can land while
     // connect() is still mid-flight; let it finish so the teardown doesn't
@@ -1855,6 +1872,25 @@ class DashboardController {
       this.setPhase("disconnected");
       this.setStatus("Disconnected.");
       this.appendLog("Disconnected from the glasses.");
+    }
+  }
+
+  /**
+   * Reconcile a persisted active-session intent after Android recreates the
+   * application process for the foreground service. This path is deliberately
+   * non-interactive: missing runtime permissions wait for the next visible UI.
+   */
+  async restoreBackgroundSessionIfRequested(): Promise<void> {
+    if (!global.isAndroid || !backgroundSessionRestoreRequested() || this.phase !== "disconnected") return;
+    try {
+      // Android application context is normally ready before app.ts runs, but
+      // a service-only process can deliver this hook during startup. Treat a
+      // transient context/permission lookup failure as a blocked restore and
+      // leave the intent for the next process or visible UI to reconcile.
+      if (!hasBlePermissions()) return;
+      await this.connect({ preserveBackgroundRestoreIntent: true });
+    } catch (error) {
+      this.appendLog(`background restore failed: ${this.formatError(error)}`);
     }
   }
 

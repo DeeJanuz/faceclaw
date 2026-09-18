@@ -38,6 +38,12 @@ public class FaceclawForegroundService extends Service {
         String text = intent != null ? intent.getStringExtra(EXTRA_TEXT) : null;
 
         if (ACTION_STOP.equals(action)) {
+            try {
+                FaceclawSettings.getInstance(this).setBooleanSync("g2.backgroundRestoreIntent", false);
+            } catch (RuntimeException ignored) {
+                // The JavaScript controller normally clears this first. Keep
+                // the service stop path safe if it is invoked independently.
+            }
             stopForeground(STOP_FOREGROUND_REMOVE);
             currentText = null;
             foregroundStarted = false;

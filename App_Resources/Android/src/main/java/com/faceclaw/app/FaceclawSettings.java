@@ -88,6 +88,13 @@ public final class FaceclawSettings {
         notifyChanged(key);
     }
 
+    /** Persist a lifecycle-critical flag before a service/process boundary. */
+    public boolean setBooleanSync(String key, boolean value) {
+        boolean committed = prefs.edit().putBoolean(key, value).commit();
+        if (committed) notifyChanged(key);
+        return committed;
+    }
+
     /**
      * Register a change listener. Must be called from the thread whose
      * isolate owns the listener; that thread's Looper is captured for

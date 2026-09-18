@@ -40,6 +40,11 @@ export function setBooleanSetting(key: string, value: boolean): void {
   getJava().setBoolean(key, value);
 }
 
+/** Synchronous variant for lifecycle intent flags crossing a process boundary. */
+export function setBooleanSettingSync(key: string, value: boolean): boolean {
+  return Boolean(getJava().setBooleanSync(key, value));
+}
+
 /**
  * Subscribe to setting changes from any isolate (including this one). The
  * callback runs on this isolate's own thread, one message-loop tick after the

@@ -20,6 +20,7 @@ import {
   FlashPromptState,
 } from "../native/flash-prompt-communicator";
 import { resumeAutoReconnect, suppressAutoReconnect } from "../g2/reconnect-policy";
+import { setBackgroundSessionRestoreRequested } from "../g2/background-session";
 import { setOnboardingCompleted, setPreviewOnlyMode } from "./onboarding-state";
 import { formatErrorMessage } from "../util/format-error";
 
@@ -59,6 +60,7 @@ export class OnboardingFlashViewModel extends Observable {
     // page must not auto-reconnect, until an install succeeds (below) or
     // the user connects explicitly.
     suppressAutoReconnect();
+    setBackgroundSessionRestoreRequested(false);
     this.mode = options?.mode ?? "install";
     this.fromOnboarding = options?.fromOnboarding ?? true;
     this._headline = this.mode === "uninstall" ? "Uninstall Custom Firmware" : "Flash Custom Firmware";

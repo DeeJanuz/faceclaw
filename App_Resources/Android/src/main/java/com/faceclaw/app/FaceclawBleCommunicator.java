@@ -40,6 +40,10 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         new BleProtocol.ImageTileOptions("img00", 10, 0, 0, 576, 288);
 
     private static final String G2_SCREEN_WAKE_LOCK_TAG = "Faceclaw:G2Screen";
+    private static final String TRANSITION_WAKE_LOCK_TAG = "Faceclaw:G2Transition";
+    // Covers the five-second JS suspend grace plus BLE queue/ACK work. This is
+    // a transition lease only; steady display-on ownership remains separate.
+    private static final long TRANSITION_WAKE_TIMEOUT_MS = 7_000L;
     private static final long FACECLAW_WAKE_LEASE_RENEW_MS = 45_000;
     private static final long FACECLAW_WAKE_CONTROL_WAIT_MS = 1_500;
     private static final long CFW_CLEANUP_WAIT_MS = 4_000;
@@ -176,6 +180,8 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     private boolean chargingMode;
     private volatile FaceclawAudioPacketListener audioPacketListener;
     private PowerManager.WakeLock g2ScreenWakeLock;
+    private PowerManager.WakeLock transitionWakeLock;
+    private long transitionWakeEpoch;
 
     private final BroadcastReceiver phoneLockReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
@@ -340,6 +346,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             bleManager.disconnect(ringAddress);
         }
         bleManager.close();
+        releaseTransitionWakeLock("disconnect");
         releaseG2ScreenWakeLock();
         setStateDisplay("disconnected", "Disconnected.");
     }
@@ -356,6 +363,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     }
 
     public void setG2ScreenOn(boolean screenOn) {
+        acquireTransitionWakeLock(screenOn ? "screen-wake" : "screen-sleep");
         mainHandler.post(() -> updateG2ScreenWakeLock(screenOn));
     }
 
@@ -3683,6 +3691,10 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             FrameTimings.getInstance().finishFrame(frameId, "discarded: no listener attached");
             return;
         }
+        // Native BLE receipt is the first reliable wake point. Keep the CPU
+        // alive while the callback reaches JS and posts the steady screen wake
+        // or resume path; the epoch and timeout make this self-releasing.
+        acquireTransitionWakeLock("input:" + (kind == null ? "unknown" : kind));
         final String containerNameSnapshot = containerName == null ? "" : containerName;
         mainHandler.post(() -> {
             FrameTimings.getInstance().log(frameId, "dispatching input event on main thread");
@@ -3916,6 +3928,46 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             return;
         }
         releaseG2ScreenWakeLock();
+    }
+
+    private void acquireTransitionWakeLock(String reason) {
+        final long epoch;
+        synchronized (lock) {
+            if (!running) return;
+            epoch = ++transitionWakeEpoch;
+            if (transitionWakeLock == null) {
+                transitionWakeLock = powerManager.newWakeLock(
+                    PowerManager.PARTIAL_WAKE_LOCK, TRANSITION_WAKE_LOCK_TAG);
+                transitionWakeLock.setReferenceCounted(false);
+            }
+            if (!transitionWakeLock.isHeld()) {
+                transitionWakeLock.acquire(TRANSITION_WAKE_TIMEOUT_MS);
+            }
+        }
+        logLine("transition wake lease acquired: " + reason);
+        mainHandler.postDelayed(() -> {
+            boolean released = false;
+            synchronized (lock) {
+                if (epoch != transitionWakeEpoch) return;
+                if (transitionWakeLock != null && transitionWakeLock.isHeld()) {
+                    transitionWakeLock.release();
+                    released = true;
+                }
+            }
+            if (released) logLine("transition wake lease expired");
+        }, TRANSITION_WAKE_TIMEOUT_MS);
+    }
+
+    private void releaseTransitionWakeLock(String reason) {
+        boolean released = false;
+        synchronized (lock) {
+            transitionWakeEpoch++;
+            if (transitionWakeLock != null && transitionWakeLock.isHeld()) {
+                transitionWakeLock.release();
+                released = true;
+            }
+        }
+        if (released) logLine("transition wake lease released: " + reason);
     }
 
     private void releaseG2ScreenWakeLock() {

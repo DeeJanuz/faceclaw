@@ -65,10 +65,14 @@ async function ensurePermissions(
 ): Promise<void> {
   if (!global.isAndroid) return;
 
-  const activity = getActivity();
   const missing = permissions.filter((permission) => !isPermissionGranted(permission));
 
   if (missing.length === 0) return;
+
+  // A service-owned reconnect may run while the Activity is gone. Existing
+  // grants are sufficient for that path; only a real user-facing request
+  // needs an Activity to host the permission dialog.
+  const activity = getActivity();
 
   await new Promise<void>((resolve, reject) => {
     const callback = (args: {

@@ -15,7 +15,7 @@ public final class ExtensionContract {
  public static boolean action(String feature,String action) {
   if(!known(feature)||action==null) return false;
   if(feature.equals("device-tools")) return action.equals("tool-call")||action.equals("messaging-session");
-  if(feature.equals("ui.notifications")) return Arrays.asList("notification-open","notification-dismiss","notification-dismiss-group","notification-review-reply","notification-cancel-review","notification-action","close-surface","sleep").contains(action);
+  if(feature.equals("ui.notifications")) return Arrays.asList("notification-open","notification-dismiss","notification-dismiss-group","notification-review-reply","notification-cancel-review","notification-return","notification-reopen","notification-abandon","notification-action","close-surface","sleep").contains(action);
   if(feature.equals("ui.launcher")&&action.equals("uninstall-app")) return true;
   return (feature.equals("ui.launcher")||feature.equals("ui.app-menu"))&&Arrays.asList("open-app","close-app","focus-app","show-app-menu","request-dictation","close-surface","sleep","menu-select").contains(action);
  }

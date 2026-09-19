@@ -327,7 +327,11 @@ export class ExtensionPlatform {
   }
   private notificationsChanged(arrival = ""): void {
     for (const [key, review] of this.reviews) if (!review.current()) { review.cancel(); this.reviews.delete(key); }
-    const selected = this.feature("ui.notifications"); if (!selected || this.isLocked()) return;
+    const selected = this.feature("ui.notifications");
+    if (!selected || this.isLocked()) {
+      if (arrival) console.info(`[NotificationArrival] blocked provider=${Boolean(selected)} locked=${this.isLocked()} screenOn=${shell.isScreenOn()}`);
+      return;
+    }
     const sources = readActiveNotifications(50, true), leased = this.uiNotifications.update(selected.component, selected.generation, sources);
     let notifications = leased.map(({ id, source }) => this.snapshot(source, id));
     while (notifications.length && JSON.stringify(notifications).length + JSON.stringify(this.notificationAppCatalog()).length > 2000000) notifications.pop();
@@ -351,13 +355,15 @@ export class ExtensionPlatform {
     // into a seven-second notification overlay.
     const samePresentation = item && this.notificationPresentation?.key === item.source.key &&
       this.notificationPresentation.postTime === item.source.postTime;
+    if (arrival) console.info(`[NotificationArrival] source=${Boolean(item)} screenOn=${shell.isScreenOn()} summary=${Boolean(item && item.source.isGroupSummary)} foregroundService=${Boolean(item && item.source.isForegroundService)} ongoing=${Boolean(item && item.source.isOngoing)} duplicate=${Boolean(samePresentation)} visit=${Boolean(this.notificationVisit?.handedOff)} protected=${this.isProtected()}`);
     if (item && !item.source.isGroupSummary && !item.source.isForegroundService &&
         !item.source.isOngoing && !samePresentation && !this.notificationVisit?.handedOff && !this.isProtected()) {
       // Replacement cards belong to the same interruption, including its
       // original power state. The first card has already woken the display.
       const wokeScreen = this.notificationVisit?.wokeScreen ?? !shell.isScreenOn();
       const originWindowId = this.notificationVisit?.originWindowId ?? shell.foregroundWindow()?.windowId;
-      if (this.hooks.showSurface?.("ui.notifications", selected.component, item.id) !== true) return;
+      if (this.hooks.showSurface?.("ui.notifications", selected.component, item.id) !== true) { console.info("[NotificationArrival] surface-rejected"); return; }
+      console.info(`[NotificationArrival] admitted wokeScreen=${wokeScreen}`);
       this.notificationPresentation = { id: item.id, key: item.source.key, postTime: item.source.postTime };
       this.notificationVisit = {
         presentationId: item.id,
@@ -458,6 +464,7 @@ export class ExtensionPlatform {
       if (origin && !exists) { result(false, "Notification origin is unavailable"); return; }
       this.lastGesture.delete(feature); this.lastTapGesture.delete(feature);
       const restoreSleep = visit.wokeScreen;
+      console.info(`[NotificationReturn] accepted restoreSleep=${restoreSleep}`);
       this.notificationVisit = null;
       this.notificationPresentation = null;
       // Resolve the provider's request while its IPC path is still awake, then

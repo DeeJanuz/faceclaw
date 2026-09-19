@@ -52,4 +52,13 @@ public final class ExtensionContractTest {
   ExtensionContract.declarations(legacy);
   ExtensionContract.declarations(current);
  }
+ @Test public void notificationVisitActionsCrossTheNativeBoundaryOnlyUnderNotificationAuthority() {
+  for(String action:new String[]{"notification-return","notification-reopen","notification-abandon"}) {
+   assertTrue(action,ExtensionContract.action("ui.notifications",action));
+   for(String feature:ExtensionContract.FEATURES) {
+    if(!feature.equals("ui.notifications")) assertFalse(feature+":"+action,ExtensionContract.action(feature,action));
+   }
+  }
+  assertFalse(ExtensionContract.action("ui.notifications","notification-return-any-window"));
+ }
 }

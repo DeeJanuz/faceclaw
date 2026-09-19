@@ -2694,6 +2694,7 @@ class DashboardController {
   }
 
   private showExtensionSurface(feature: string, component: string, target?: string): boolean {
+    if (feature === "ui.notifications") console.info(`[NotificationSurface] requested screenOn=${shell.isScreenOn()} locked=${this.glassesLocked} charging=${this.phase === "charging"} overlayAllowed=${shell.canShowExtensionOverlay()}`);
     if (this.glassesLocked || this.phase === "charging") return false;
     const prior = this.extensionSurfaces.get(feature);
     if (prior && feature === "ui.notifications" && target !== "inbox" && prior.interacted) return false;

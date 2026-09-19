@@ -60,15 +60,24 @@ public class FaceclawBleManager {
     private static final AtomicLong outboundMessages = new AtomicLong();
     private static final AtomicLong outboundBytes = new AtomicLong();
     private static final AtomicLong displayFramesSent = new AtomicLong();
+    private static final AtomicLong outboundWriteRetries = new AtomicLong();
+    private static final AtomicLong connectionPriorityRequests = new AtomicLong();
+    private static final AtomicLong connectionPriorityAccepted = new AtomicLong();
 
     /** Called by the communicator when a display frame's last message is acked. */
     public static void recordDisplayFrameSent() {
         displayFramesSent.incrementAndGet();
     }
 
-    /** Running totals of outbound BLE traffic since process start: [messages, bytes, display frames]. */
+    /**
+     * Running process totals: messages, bytes, display frames, write retries,
+     * connection-priority requests, and accepted priority requests.
+     */
     public static long[] sampleOutboundTraffic() {
-        return new long[] { outboundMessages.get(), outboundBytes.get(), displayFramesSent.get() };
+        return new long[] {
+            outboundMessages.get(), outboundBytes.get(), displayFramesSent.get(),
+            outboundWriteRetries.get(), connectionPriorityRequests.get(), connectionPriorityAccepted.get()
+        };
     }
 
     public FaceclawBleManager(Context context) {
@@ -164,7 +173,10 @@ public class FaceclawBleManager {
     public boolean requestConnectionPriority(String address, int priority) {
         synchronized (gattLock(address)) {
             BluetoothGatt gatt = requireGatt(address);
-            return gatt.requestConnectionPriority(priority);
+            connectionPriorityRequests.incrementAndGet();
+            boolean accepted = gatt.requestConnectionPriority(priority);
+            if (accepted) connectionPriorityAccepted.incrementAndGet();
+            return accepted;
         }
     }
 
@@ -344,6 +356,7 @@ public class FaceclawBleManager {
             return false;
         }
         int delayMs = WRITE_RETRY_DELAYS_MS[retryIndex];
+        outboundWriteRetries.incrementAndGet();
         logWarn("writeCharacteristic retry: address=" + address + " reason=" + reason + " delayMs=" + delayMs);
         try {
             Thread.sleep(delayMs);

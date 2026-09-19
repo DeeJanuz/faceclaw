@@ -57,6 +57,8 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     private final PowerManager powerManager;
     private final KeyguardManager keyguardManager;
     private final FaceclawBleManager bleManager;
+    private final GlassesActivityStats batteryActivity =
+        new GlassesActivityStats(SystemClock.elapsedRealtime());
     private final InterruptibleSleep interruptibleSleep = new InterruptibleSleep();
     private final Object lock = new Object();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -178,6 +180,8 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     private long lastPhoneLockCheckAtMs;
     private boolean phoneLockReceiverRegistered;
     private boolean audioCaptureActive;
+    private boolean imuReportRequested;
+    private boolean ambientLightPollingRequested;
     private boolean firmwareInfoQueried;
     // Glasses are in the charging case: nobody is wearing them, so display
     // communication pauses and only battery polls flow (see driveSession).
@@ -281,6 +285,11 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         this.rightAddress = requireAddress("rightAddress", rightAddress);
         this.leftAddress = requireAddress("leftAddress", leftAddress);
         this.ringAddress = ringAddress == null ? "" : ringAddress.trim();
+        long now = SystemClock.elapsedRealtime();
+        batteryActivity.transition("sessionActive", false, now);
+        batteryActivity.transition("sessionSuspended", false, now);
+        batteryActivity.transition("capture", false, now);
+        batteryActivity.transition("sensorRequested", false, now);
         IntentFilter phoneLockFilter = new IntentFilter();
         phoneLockFilter.addAction(Intent.ACTION_SCREEN_ON);
         phoneLockFilter.addAction(Intent.ACTION_SCREEN_OFF);
@@ -420,6 +429,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     }
 
     public void setG2ScreenOn(boolean screenOn) {
+        batteryActivity.transition("displayOn", screenOn, SystemClock.elapsedRealtime());
         acquireTransitionWakeLock(screenOn ? "screen-wake" : "screen-sleep");
         mainHandler.post(() -> updateG2ScreenWakeLock(screenOn));
     }
@@ -454,6 +464,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         synchronized (lock) {
             audioPacketListener = null;
             audioCaptureActive = false;
+            batteryActivity.transition("capture", false, SystemClock.elapsedRealtime());
             clearMessagesOfKindLocked("audio-control");
             if (running && sessionReady) {
                 OutboundMessage message = createAudioControlMessageLocked(false);
@@ -471,6 +482,14 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         synchronized (lock) {
             return running && sessionReady;
         }
+    }
+
+    /** Content-free diagnostic snapshot for controlled glasses battery tests. */
+    public String getBatteryActivitySnapshotJson() {
+        return batteryActivity.snapshotJson(
+            SystemClock.elapsedRealtime(),
+            FaceclawBleManager.sampleOutboundTraffic()
+        );
     }
 
     /**
@@ -578,6 +597,8 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             OutboundMessage message = messageBuilder.enableOrDisableImu(enable, reportFrq);
             message.onTimeout = () -> logLine("IMU control ack timeout");
             pendingMessages.addFirst(message);
+            imuReportRequested = enable;
+            updateSensorRequestedActivityLocked();
             logLine("queue IMU " + (enable ? "enable freq=" + reportFrq : "disable"));
         }
         interruptibleSleep.interrupt();
@@ -606,6 +627,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 compassOwners.remove(owner);
             }
             boolean wanted = !compassOwners.isEmpty();
+            updateSensorRequestedActivityLocked();
             if (wanted == before && compassControlLastSent == (wanted ? 1 : 0)) {
                 logLine("compass " + (enable ? "enable" : "disable") + " by " + owner
                     + "; state unchanged (owners=" + compassOwners + ")");
@@ -756,6 +778,8 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             }
             : new byte[] { (byte) 16, (byte) 2 };
         synchronized (lock) {
+            ambientLightPollingRequested = enable;
+            updateSensorRequestedActivityLocked();
             clearMessagesOfKindLocked("als-control");
             enqueueAmbientLightControlLocked(payload, "als polling " + (enable ? "start" : "stop"), true);
         }
@@ -1458,13 +1482,22 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             textureCache.reset();
         }
         if (sendShutdownInternal(0, false)) {
+            batteryActivity.transition("sessionActive", false, SystemClock.elapsedRealtime());
+            batteryActivity.transition("sessionSuspended", true, SystemClock.elapsedRealtime());
+            batteryActivity.transition("capture", false, SystemClock.elapsedRealtime());
             return true;
         }
         synchronized (lock) {
             // A shutdown ACK can be lost even though the command took effect.
             // If the transport remains intentionally quiesced, callers still
             // need to remember to run the resume path on the next wake.
-            return running && sessionReady && shutdownRequested;
+            boolean suspended = running && sessionReady && shutdownRequested;
+            if (suspended) {
+                batteryActivity.transition("sessionActive", false, SystemClock.elapsedRealtime());
+                batteryActivity.transition("sessionSuspended", true, SystemClock.elapsedRealtime());
+                batteryActivity.transition("capture", false, SystemClock.elapsedRealtime());
+            }
+            return suspended;
         }
     }
 
@@ -1526,6 +1559,8 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             lastHeartbeatAckedAtMs = 0;
             logLine("EvenHub session resume requested");
         }
+        batteryActivity.transition("sessionSuspended", false, SystemClock.elapsedRealtime());
+        batteryActivity.transition("sessionActive", true, SystemClock.elapsedRealtime());
         interruptibleSleep.interrupt();
         return true;
     }
@@ -1988,6 +2023,8 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 }
             }
             setStateDisplay("connected", "Connected.");
+            batteryActivity.transition("sessionSuspended", false, SystemClock.elapsedRealtime());
+            batteryActivity.transition("sessionActive", true, SystemClock.elapsedRealtime());
             logLine("session ready");
             synchronized (lock) {
                 // Query settings promptly on the first session so firmware
@@ -2534,6 +2571,14 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 message.onSent.run();
                 lock.notifyAll();
             }
+        }
+
+        if (result) {
+            batteryActivity.recordLogicalWrite(
+                message.kind,
+                message.isLeftArmMessage ? "left" : "right",
+                message.message.length
+            );
         }
 
         return result;
@@ -3091,6 +3136,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             }
             lastAudioControlAckMagic = message.magic;
             audioCaptureActive = enable;
+            batteryActivity.transition("capture", enable, SystemClock.elapsedRealtime());
             logLine(audioCaptureActive ? "G2 mic enabled" : "G2 mic disabled");
         };
         message.onTimeout = () -> {
@@ -3106,6 +3152,14 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 && inFlightMessages.isEmpty()
                 && now - lastConnectionOrInputAtMs >= ConnectionOptions.BATTERY_INPUT_QUIET_MS
                 && (lastBatteryRefreshAtMs == 0 || now - lastBatteryRefreshAtMs >= ConnectionOptions.BATTERY_REFRESH_INTERVAL_MS);
+    }
+
+    private void updateSensorRequestedActivityLocked() {
+        batteryActivity.transition(
+            "sensorRequested",
+            imuReportRequested || ambientLightPollingRequested || !compassOwners.isEmpty(),
+            SystemClock.elapsedRealtime()
+        );
     }
 
     private OutboundMessage createBatteryQueryMessageLocked() {
@@ -3353,6 +3407,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     }
 
     private void handleAckTimeoutLocked(OutboundMessage message) {
+        batteryActivity.recordAckTimeout();
         consecutiveAckTimeouts += 1;
 
         if (message.onTimeout != null) {
@@ -3676,6 +3731,10 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
 
     private void handleTransportFailure(String reason) {
         logError("Transport failure: "+reason);
+        batteryActivity.recordTransportFailure();
+        batteryActivity.transition("sessionActive", false, SystemClock.elapsedRealtime());
+        batteryActivity.transition("sessionSuspended", false, SystemClock.elapsedRealtime());
+        batteryActivity.transition("capture", false, SystemClock.elapsedRealtime());
         synchronized (lock) {
             maybeEmitEvenAppConflictLocked(reason);
             sessionReady = false;
@@ -3719,6 +3778,12 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         lastAudioControlAckMagic = 0;
         audioControlGeneration++;
         audioCaptureActive = false;
+        imuReportRequested = false;
+        ambientLightPollingRequested = false;
+        batteryActivity.transition("sessionActive", false, SystemClock.elapsedRealtime());
+        batteryActivity.transition("sessionSuspended", false, SystemClock.elapsedRealtime());
+        batteryActivity.transition("capture", false, SystemClock.elapsedRealtime());
+        updateSensorRequestedActivityLocked();
         audioPacketListener = null;
         compassControlLastSent = -1;
         // A dead transport orphans any glasses-side compass state; the fresh

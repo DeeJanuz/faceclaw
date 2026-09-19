@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const ts = require('typescript');
 
-function harness({ component = 'com.faceclaw.t3/Service', sources = [], previewSeconds, inputAccepted = true } = {}) {
+function harness({ component = 'com.faceclaw.t3/Service', sources = [], previewSeconds, inputAccepted = true, screenOn = true } = {}) {
   let sequence = 0;
   const sent = [], shown = [], closed = [], nativeClosed = [];
   const imports = {
@@ -12,7 +12,7 @@ function harness({ component = 'com.faceclaw.t3/Service', sources = [], previewS
     '../../assistant/messaging': { messagingTools: [] },
     '../../ui/shell/shell': { shell: {
       canShowExtensionOverlay: () => true,
-      isScreenOn: () => true,
+      isScreenOn: () => screenOn,
       getBatteryLevels: () => ({}),
       getWindows: () => [],
       foregroundWindow: () => undefined,
@@ -57,6 +57,7 @@ function harness({ component = 'com.faceclaw.t3/Service', sources = [], previewS
   }, () => false);
   return {
     platform, sent, shown, closed, nativeClosed,
+    setScreenOn: value => { screenOn = value; },
     arrive: key => platform.notificationsChanged(key),
     arrivals: () => sent.filter(item => item.data.event === 'notification-arrived'),
     source: value => { sources.splice(0, sources.length, ...value); },
@@ -249,4 +250,24 @@ test('arrival events carry only the supported preview duration and fall back to 
  const h = harness({ previewSeconds: 6, sources: [notification('invalid-duration')] });
  h.arrive('invalid-duration');
  assert.equal(h.arrivals()[0].data.durationMs, 5000);
+});
+
+test('replacement preview preserves the original sleeping display state', () => {
+  const h = harness({ sources: [notification('first')], screenOn: false });
+  h.arrive('first'); h.setScreenOn(true);
+  h.source([notification('second')]); h.arrive('second');
+  assert.equal(h.arrivals().length, 2);
+  assert.equal(h.arrivals()[1].data.wokeScreen, true);
+  assert.equal(h.platform.notificationVisit.wokeScreen, true);
+});
+
+test('arrivals during an expanded visit update the inbox without replacing its return lease', () => {
+  const h = harness({ sources: [notification('first')] }); h.arrive('first');
+  const visit = h.platform.notificationVisit; visit.handedOff = true;
+  h.source([notification('first'), notification('second')]); h.arrive('second');
+  assert.equal(h.platform.notificationVisit, visit);
+  assert.equal(h.arrivals().length, 1);
+  assert.equal(h.shown.length, 1);
+  const fragments = h.sent.filter(item => item.data.event === 'notification-snapshot-fragment');
+  assert.ok(fragments.length >= 2);
 });

@@ -352,9 +352,11 @@ export class ExtensionPlatform {
     const samePresentation = item && this.notificationPresentation?.key === item.source.key &&
       this.notificationPresentation.postTime === item.source.postTime;
     if (item && !item.source.isGroupSummary && !item.source.isForegroundService &&
-        !item.source.isOngoing && !samePresentation && !this.isProtected()) {
-      const wokeScreen = !shell.isScreenOn();
-      const originWindowId = shell.foregroundWindow()?.windowId;
+        !item.source.isOngoing && !samePresentation && !this.notificationVisit?.handedOff && !this.isProtected()) {
+      // Replacement cards belong to the same interruption, including its
+      // original power state. The first card has already woken the display.
+      const wokeScreen = this.notificationVisit?.wokeScreen ?? !shell.isScreenOn();
+      const originWindowId = this.notificationVisit?.originWindowId ?? shell.foregroundWindow()?.windowId;
       if (this.hooks.showSurface?.("ui.notifications", selected.component, item.id) !== true) return;
       this.notificationPresentation = { id: item.id, key: item.source.key, postTime: item.source.postTime };
       this.notificationVisit = {

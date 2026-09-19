@@ -33,7 +33,10 @@ final class Pcm16StreamAdapter {
             inputBytes[i * 2 + 1] = (byte) ((sample >> 8) & 0xff);
         }
 
-        byte[] outputBytes = processor.process(inputBytes);
+        return decode(processor.process(inputBytes));
+    }
+
+    static short[] decode(byte[] outputBytes) {
         if (outputBytes == null) {
             throw new IllegalStateException("PCM processor returned null");
         }

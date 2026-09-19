@@ -104,6 +104,13 @@ export class FaceclawVoiceControlBridge {
   private captureEndpointing = false;
   // Non-null while a cloud provider owns the transcript; Java only decodes PCM.
   private cloudClient: CloudSttClient | null = null;
+  // Native stop is asynchronous when accepted audio still needs decoding.
+  // A replacement capture waits for onCaptureStopped so an old worker cannot
+  // write into the new session's recognizer or cloud client.
+  private nativeStopPending = false;
+  private pendingCaptureOptions: PushToTalkOptions | null = null;
+  private pendingRawCommunicator: any | null = null;
+  private pendingCloudStop: { client: CloudSttClient; finish: boolean } | null = null;
   // Raw-PCM tap (EvenHub mic apps): when active, the controller runs in the
   // decode-only "cloud" mode and every decoded PCM frame is broadcast to these
   // listeners. STT capture preempts it — a live assistant/transcribe session
@@ -189,11 +196,24 @@ export class FaceclawVoiceControlBridge {
     // An STT holder owns the mic even while its stream waits on a new glasses
     // session; the tap re-tries when the app's eligibility is re-evaluated.
     if (this.captureHolders.size > 0 || this.suspendedHolders.size > 0) return false;
+    if (this.nativeStopPending) {
+      this.pendingRawCommunicator = options.communicator;
+      return true;
+    }
     // A tap left over from a dead session is not something to share.
-    if (this.started || this.rawActive) this.teardownCapture();
+    if (this.started || this.rawActive) {
+      this.pendingRawCommunicator = options.communicator;
+      this.teardownCapture({ preservePendingStart: true });
+      return true;
+    }
+    this.beginRawCapture(options.communicator);
+    return true;
+  }
+
+  private beginRawCapture(communicator: any): void {
     this.suspendedRaw = false;
     this.ensureController();
-    this.controller?.setCommunicator(options.communicator);
+    this.controller?.setCommunicator(communicator);
     // The raw tap is strictly the G2 stream; clear any phone-mic flag a
     // preview-mode capture may have left on the shared controller.
     this.controller?.setUsePhoneMic(false);
@@ -210,15 +230,14 @@ export class FaceclawVoiceControlBridge {
     // "cloud" mode decodes LC3 to PCM and emits it via onPcm without loading
     // any recognizer; with no cloudClient the frames reach only the raw tap.
     this.controller?.start("cloud");
-    return true;
   }
 
   stopRawCapture(): void {
     this.suspendedRaw = false;
-    if (!this.rawActive) return;
+    this.pendingRawCommunicator = null;
+    if (!this.rawActive && !this.started) return;
     this.rawActive = false;
-    this.started = false;
-    if (global.isAndroid) this.controller?.stop();
+    this.requestNativeStop(true, null);
   }
 
   private acquireCapture(holder: CaptureHolder, options: PushToTalkOptions): void {
@@ -239,8 +258,22 @@ export class FaceclawVoiceControlBridge {
       // (transcripts are already broadcast to its listeners).
       return;
     }
+    this.pendingRawCommunicator = null;
+    if (this.nativeStopPending) {
+      this.pendingCaptureOptions = options;
+      return;
+    }
     // Any leftover capture is dead; drop it before starting the new one.
-    if (this.started) this.teardownCapture();
+    if (this.started) {
+      this.pendingCaptureOptions = options;
+      this.teardownCapture({ preservePendingStart: true });
+      return;
+    }
+    this.beginCapture(options);
+  }
+
+  private beginCapture(options: PushToTalkOptions): void {
+    this.pendingCaptureOptions = null;
     this.ensureController();
     this.controller?.setCommunicator(options.communicator);
     this.controller?.setUsePhoneMic(Boolean(options.usePhoneMic));
@@ -338,27 +371,26 @@ export class FaceclawVoiceControlBridge {
     this.suspendedHolders.delete(holder);
     if (!this.captureHolders.delete(holder)) {
       // Never held; still finish a dangling cloud commit if one is pending.
-      if (commit) this.cloudClient?.finish();
+      if (commit && !this.nativeStopPending) this.cloudClient?.finish();
       return;
     }
     if (this.captureHolders.size > 0) {
       // Another holder still wants the mic; keep it running.
       return;
     }
+    if (this.nativeStopPending) {
+      // This holder was queued behind an older session and never started.
+      this.pendingCaptureOptions = null;
+      return;
+    }
     if (!this.started) {
       this.cloudClient?.finish();
       return;
     }
-    // Order matters for cloud: stopping the Java controller flushes any final
-    // decode/PCM; then commit so the provider finalizes the transcript.
-    this.controller?.stop();
-    this.started = false;
-    if (commit) {
-      this.cloudClient?.finish();
-    } else {
-      this.cloudClient?.stop();
-      this.cloudClient = null;
-    }
+    // The native completion callback is queued after final PCM. Finalize the
+    // provider there so its commit cannot overtake the last audio callback.
+    const cloudStop = this.cloudClient ? { client: this.cloudClient, finish: commit } : null;
+    this.requestNativeStop(false, cloudStop);
   }
 
   stop(): void {
@@ -430,15 +462,65 @@ export class FaceclawVoiceControlBridge {
     return Boolean(this.controller?.isCapturing());
   }
 
-  /** Stop the native capture and any cloud client; leaves holders alone. */
-  private teardownCapture(): void {
+  /** Abort native capture and cloud work; leaves holders alone. */
+  private teardownCapture(options: { preservePendingStart?: boolean } = {}): void {
     this.rawActive = false;
-    if (global.isAndroid) {
-      this.controller?.stop();
+    if (!options.preservePendingStart) {
+      this.pendingCaptureOptions = null;
+      this.pendingRawCommunicator = null;
     }
-    this.started = false;
     this.cloudClient?.stop();
     this.cloudClient = null;
+    this.pendingCloudStop = null;
+    this.requestNativeStop(true, null);
+  }
+
+  private requestNativeStop(
+    abort: boolean,
+    cloudStop: { client: CloudSttClient; finish: boolean } | null,
+  ): void {
+    const hadNativeCapture = this.started || this.nativeStopPending;
+    if (cloudStop) this.pendingCloudStop = cloudStop;
+    this.started = false;
+    if (!hadNativeCapture || !global.isAndroid || !this.controller) {
+      this.completeNativeStop();
+      return;
+    }
+    if (this.nativeStopPending) {
+      if (abort) this.controller.abort();
+      return;
+    }
+    this.nativeStopPending = true;
+    if (abort) this.controller.abort();
+    else this.controller.stop();
+  }
+
+  private completeNativeStop(): void {
+    this.nativeStopPending = false;
+    this.started = false;
+    const cloudStop = this.pendingCloudStop;
+    this.pendingCloudStop = null;
+    if (cloudStop) {
+      if (cloudStop.finish) cloudStop.client.finish();
+      else cloudStop.client.stop();
+      if (!cloudStop.finish && this.cloudClient === cloudStop.client) this.cloudClient = null;
+    } else if (this.cloudClient) {
+      // Native capture ended on its own or was aborted.
+      this.cloudClient.stop();
+      this.cloudClient = null;
+    }
+
+    const captureOptions = this.pendingCaptureOptions;
+    this.pendingCaptureOptions = null;
+    if (captureOptions && this.captureHolders.size > 0) {
+      this.beginCapture(captureOptions);
+      return;
+    }
+    const rawCommunicator = this.pendingRawCommunicator;
+    this.pendingRawCommunicator = null;
+    if (rawCommunicator && this.captureHolders.size === 0 && this.suspendedHolders.size === 0) {
+      this.beginRawCapture(rawCommunicator);
+    }
   }
 
   private ensureController(): void {
@@ -488,6 +570,7 @@ export class FaceclawVoiceControlBridge {
           );
         }
       },
+      onCaptureStopped: () => this.completeNativeStop(),
     });
     this.controller.setListener(this.listenerProxy);
   }

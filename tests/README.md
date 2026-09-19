@@ -11,6 +11,6 @@ Run with:
     npm test
 
 That compiles the pure modules with the project's TypeScript into
-`.test-build/` (git-ignored) and runs `node --test tests/`. No extra
-dependencies are needed — the tests are plain `.test.cjs` files that use
-`node:test` and `node:assert`.
+`.test-build/` (git-ignored) and runs `node --test tests/`. Most tests are
+plain `.test.cjs` files. Tests for the small Java-native helpers also invoke
+`javac` and `java`, so a JDK must be on `PATH` for the complete suite.

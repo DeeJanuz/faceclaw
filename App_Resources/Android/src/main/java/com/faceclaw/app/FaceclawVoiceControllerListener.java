@@ -41,4 +41,10 @@ public interface FaceclawVoiceControllerListener {
      * speaker model could not be loaded.
      */
     void onSpeakerVerified(boolean isWearer, float similarity);
+
+    /**
+     * All accepted PCM, verification, and final local transcript events have
+     * been posted to the main thread. Cloud clients may now finalize.
+     */
+    default void onCaptureStopped() {}
 }

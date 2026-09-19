@@ -16,7 +16,6 @@ import com.k2fsa.sherpa.onnx.OfflineStream;
 
 import java.io.File;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayDeque;
 import java.util.Arrays;
 
 public class FaceclawVoiceController {
@@ -70,12 +69,14 @@ public class FaceclawVoiceController {
     private final Context appContext;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final Object lock = new Object();
-    private final Object audioQueueLock = new Object();
-    private final ArrayDeque<AudioPacket> audioQueue = new ArrayDeque<>();
+    private final DrainableAudioQueue<AudioPacket> audioQueue =
+            new DrainableAudioQueue<>(MAX_AUDIO_QUEUE_PACKETS);
     private volatile FaceclawVoiceControllerListener listener;
     private volatile FaceclawBleCommunicator communicator;
     private Thread workerThread;
     private volatile boolean started;
+    private volatile boolean stopRequested;
+    private volatile boolean abortRequested;
     // Set once the worker has the glasses mic enabled for this session.
     // Read and written under `lock`, so it flips with `started` atomically.
     private boolean audioStarted;
@@ -223,10 +224,13 @@ public class FaceclawVoiceController {
             }
             if (!usePhoneMic && (communicator == null || !communicator.isSessionReady())) {
                 emitStatus("Voice control needs an active G2 connection.");
+                emitCaptureStopped();
                 return;
             }
             mode = parseMode(requestedMode);
             activePhoneMic = usePhoneMic;
+            stopRequested = false;
+            abortRequested = false;
             started = true;
             audioStarted = false;
             workerThread = new Thread(this::runLoop, "FaceclawVoiceController");
@@ -245,7 +249,7 @@ public class FaceclawVoiceController {
         boolean audioUp;
         boolean phoneMic;
         synchronized (lock) {
-            if (!started) {
+            if (!started || stopRequested) {
                 return false;
             }
             audioUp = audioStarted;
@@ -265,28 +269,28 @@ public class FaceclawVoiceController {
     }
 
     public void stop() {
-        Thread threadToJoin;
+        requestStop(false);
+    }
+
+    /** Abandon queued audio and final callbacks, e.g. after transport loss. */
+    public void abort() {
+        requestStop(true);
+    }
+
+    private void requestStop(boolean abort) {
+        Thread threadToStop;
         synchronized (lock) {
             if (!started) {
                 return;
             }
-            started = false;
-            threadToJoin = workerThread;
+            stopRequested = true;
+            if (abort) abortRequested = true;
+            threadToStop = workerThread;
         }
+        if (abort) audioQueue.abort();
+        else audioQueue.closeForDrain();
         stopG2Audio();
-        synchronized (audioQueueLock) {
-            audioQueueLock.notifyAll();
-        }
-        if (threadToJoin != null) {
-            threadToJoin.interrupt();
-            if (Thread.currentThread() != threadToJoin) {
-                try {
-                    threadToJoin.join(1500);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-            }
-        }
+        if (abort && threadToStop != null) threadToStop.interrupt();
     }
 
     public void close() {
@@ -304,6 +308,7 @@ public class FaceclawVoiceController {
     private void runLoop() {
         try {
             deleteLegacyKwsFiles();
+            if (stopRequested) return;
             VoiceInputMode currentMode = mode;
             if (currentMode != VoiceInputMode.CLOUD) {
                 File modelDir = findAsrModelDir();
@@ -322,6 +327,7 @@ public class FaceclawVoiceController {
                 resetTranscriptState();
                 lastTranscript = "";
             }
+            if (stopRequested) return;
             endpointDetector.reset();
             if (suppressor != null) {
                 suppressor.reset();
@@ -355,7 +361,7 @@ public class FaceclawVoiceController {
             } else {
                 lc3Decoder = new FaceclawLc3Decoder();
                 if (!startG2Audio()) {
-                    emitStatus("Could not start G2 microphone input.");
+                    if (!stopRequested) emitStatus("Could not start G2 microphone input.");
                     return;
                 }
                 synchronized (lock) {
@@ -366,6 +372,8 @@ public class FaceclawVoiceController {
                         : "Listening...");
                 processG2Audio();
             }
+            if (abortRequested) return;
+            flushSuppression();
             // Verification result must precede the final transcript so the
             // TS bridge can suppress a non-wearer command before it is acted
             // on (the callbacks are posted in order to the main handler).
@@ -388,6 +396,7 @@ public class FaceclawVoiceController {
                 audioStarted = false;
                 workerThread = null;
             }
+            emitCaptureStopped();
         }
     }
 
@@ -511,19 +520,27 @@ public class FaceclawVoiceController {
 
     private boolean startG2Audio() {
         FaceclawBleCommunicator currentCommunicator = communicator;
-        if (currentCommunicator == null) {
+        if (currentCommunicator == null || stopRequested) {
             return false;
         }
         resetAudioStats();
-        synchronized (audioQueueLock) {
-            audioQueue.clear();
+        audioQueue.open();
+        if (stopRequested) {
+            audioQueue.closeForDrain();
+            return false;
         }
-        return currentCommunicator.startG2AudioCapture(this::queueAudioPacket);
+        boolean startedCapture = currentCommunicator.startG2AudioCapture(this::queueAudioPacket);
+        if (!startedCapture) audioQueue.abort();
+        if (stopRequested) {
+            audioQueue.closeForDrain();
+            currentCommunicator.stopG2AudioCapture();
+        }
+        return startedCapture;
     }
 
     private void processG2Audio() {
         short[] pcm = new short[FaceclawLc3Decoder.SAMPLES_PER_PACKET];
-        while (started && !Thread.currentThread().isInterrupted()) {
+        while (!audioQueue.isAborted()) {
             FaceclawLc3Decoder currentDecoder = lc3Decoder;
             if (currentDecoder == null) {
                 return;
@@ -531,7 +548,7 @@ public class FaceclawVoiceController {
 
             AudioPacket packet = takeAudioPacket();
             if (packet == null) {
-                continue;
+                return;
             }
 
             int count = currentDecoder.decodePacket(packet.data, pcm);
@@ -568,6 +585,15 @@ public class FaceclawVoiceController {
             pcm = applySuppression(pcm, count);
             count = pcm.length;
         }
+        deliverPcmChunk(pcm, count);
+        // Direction data describes the source packet rather than an exact
+        // processed sample range, so preserve it even when DSP buffers audio.
+        if (hasFrameMeta) {
+            emitFrameMeta(angleDegrees, ssr);
+        }
+    }
+
+    private void deliverPcmChunk(short[] pcm, int count) {
         if (count > 0) {
             if (recordingPcm != null) {
                 appendRecording(pcm, count);
@@ -591,10 +617,16 @@ public class FaceclawVoiceController {
                 processRecognizer(samples);
             }
         }
-        // Direction data describes the source packet rather than an exact
-        // processed sample range, so preserve it even when DSP buffers audio.
-        if (hasFrameMeta) {
-            emitFrameMeta(angleDegrees, ssr);
+    }
+
+    private void flushSuppression() {
+        if (!suppressionEnabled || suppressor == null) return;
+        try {
+            short[] tail = Pcm16StreamAdapter.decode(suppressor.finish());
+            deliverPcmChunk(tail, tail.length);
+        } catch (Throwable t) {
+            Log.w(TAG, "noise suppression flush failed", t);
+            suppressionEnabled = false;
         }
     }
 
@@ -643,12 +675,12 @@ public class FaceclawVoiceController {
     /**
      * Phone-mic capture loop: no LC3 decode, no arm bookkeeping, no frame
      * metadata — AudioRecord already delivers the pipeline's PCM format. The
-     * blocking read returns every chunk (50 ms), which bounds how long a
-     * stop() waits for the loop to notice `started` dropped.
+     * blocking read returns every chunk (50 ms), so asynchronous stop
+     * completion notices the request promptly.
      */
     private void processPhoneAudio(android.media.AudioRecord record) {
         short[] pcm = new short[PHONE_MIC_CHUNK_SAMPLES];
-        while (started && !Thread.currentThread().isInterrupted()) {
+        while (!stopRequested && !Thread.currentThread().isInterrupted()) {
             int read = record.read(pcm, 0, pcm.length);
             if (read < 0) {
                 Log.w(TAG, "phone mic read failed: " + read);
@@ -1062,18 +1094,13 @@ public class FaceclawVoiceController {
     }
 
     private void queueAudioPacket(byte[] data, String arm, long arrivalMs) {
-        if (!started || data == null) {
+        if (!started || stopRequested || data == null) {
             return;
         }
         if (!"L".equals(arm)) {
             wrongArmPackets++;
         }
-        synchronized (audioQueueLock) {
-            if (audioQueue.size() >= MAX_AUDIO_QUEUE_PACKETS) {
-                audioQueue.removeFirst();
-                queueDroppedPackets++;
-            }
-            audioQueue.addLast(new AudioPacket(data, arm, arrivalMs));
+        if (audioQueue.offer(new AudioPacket(data, arm, arrivalMs))) {
             queuedPackets++;
             if (lastPacketArrivalMs > 0) {
                 long delta = arrivalMs - lastPacketArrivalMs;
@@ -1085,22 +1112,17 @@ public class FaceclawVoiceController {
                 }
             }
             lastPacketArrivalMs = arrivalMs;
-            audioQueueLock.notifyAll();
         }
     }
 
     private AudioPacket takeAudioPacket() {
-        synchronized (audioQueueLock) {
-            while (started && audioQueue.isEmpty()) {
-                try {
-                    audioQueueLock.wait(250);
-                    maybeEmitAudioStats(false);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    return null;
-                }
-            }
-            return audioQueue.pollFirst();
+        try {
+            AudioPacket packet = audioQueue.take();
+            maybeEmitAudioStats(false);
+            return packet;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
         }
     }
 
@@ -1126,6 +1148,7 @@ public class FaceclawVoiceController {
         long duplicate = currentDecoder == null ? 0 : currentDecoder.getDuplicatePackets();
         long missing = currentDecoder == null ? 0 : currentDecoder.getMissingPackets();
         long decodeErrors = currentDecoder == null ? 0 : currentDecoder.getDecodeErrors();
+        queueDroppedPackets = audioQueue.droppedCount();
         String status = "G2 mic packets=" + queuedPackets
                 + " decoded=" + real
                 + " missing=" + missing
@@ -1157,6 +1180,12 @@ public class FaceclawVoiceController {
         }
         Log.i(TAG, "Emit transcript final=" + isFinal + " textLen=" + (text == null ? 0 : text.trim().length()));
         mainHandler.post(() -> currentListener.onTranscript(text, isFinal));
+    }
+
+    private void emitCaptureStopped() {
+        FaceclawVoiceControllerListener currentListener = listener;
+        if (currentListener == null) return;
+        mainHandler.post(currentListener::onCaptureStopped);
     }
 
     private static final class AudioPacket {

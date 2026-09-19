@@ -48,6 +48,7 @@ public final class FaceclawNoiseSuppressor {
     private final short[] pending = new short[HOP];
     private int pendingCount = 0;
     private int warmupFrames = 0;
+    private boolean streamStarted = false;
 
     public FaceclawNoiseSuppressor(int sampleRate) {
         this.sampleRate = sampleRate;
@@ -70,6 +71,7 @@ public final class FaceclawNoiseSuppressor {
         Arrays.fill(gain, 1f);
         pendingCount = 0;
         warmupFrames = 0;
+        streamStarted = false;
     }
 
     /**
@@ -83,6 +85,7 @@ public final class FaceclawNoiseSuppressor {
             return pcm16le;
         }
         int sampleCount = pcm16le.length / 2;
+        streamStarted = sampleCount > 0 || streamStarted;
         int hops = (pendingCount + sampleCount) / HOP;
         byte[] out = new byte[hops * HOP * 2];
         int outPos = 0;
@@ -102,6 +105,34 @@ public final class FaceclawNoiseSuppressor {
             }
         }
         return out;
+    }
+
+    /**
+     * Finish the current stream and return its delayed tail exactly once.
+     *
+     * <p>The overlap-add pipeline has one hop of algorithmic latency. A full
+     * zero hop releases the last completed input hop; when a partial hop is
+     * pending, a second zero hop releases that partial input. Only its valid
+     * samples are returned. The resulting stream is the input duration plus
+     * one 8 ms latency hop.</p>
+     */
+    public byte[] finish() {
+        if (!streamStarted) return new byte[0];
+
+        int partialSamples = pendingCount;
+        byte[] output = new byte[(HOP + partialSamples) * 2];
+        Arrays.fill(pending, pendingCount, HOP, (short) 0);
+        processHop(output, 0);
+
+        if (partialSamples > 0) {
+            Arrays.fill(pending, (short) 0);
+            byte[] finalHop = new byte[HOP * 2];
+            processHop(finalHop, 0);
+            System.arraycopy(finalHop, 0, output, HOP * 2, partialSamples * 2);
+        }
+
+        reset();
+        return output;
     }
 
     private int processHop(byte[] out, int outPos) {

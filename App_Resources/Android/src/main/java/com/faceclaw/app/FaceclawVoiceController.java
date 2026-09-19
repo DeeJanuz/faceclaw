@@ -200,24 +200,16 @@ public class FaceclawVoiceController {
         return Math.abs(delta) <= beamHalfWidthDeg;
     }
 
-    private void applySuppression(short[] pcm, int count) {
+    private short[] applySuppression(short[] pcm, int count) {
         try {
             if (suppressor == null) {
                 suppressor = new FaceclawNoiseSuppressor(SAMPLE_RATE);
             }
-            byte[] le = new byte[count * 2];
-            for (int i = 0; i < count; i++) {
-                le[i * 2] = (byte) (pcm[i] & 0xff);
-                le[i * 2 + 1] = (byte) ((pcm[i] >> 8) & 0xff);
-            }
-            byte[] cleaned = suppressor.process(le);
-            int cleanedCount = Math.min(count, cleaned.length / 2);
-            for (int i = 0; i < cleanedCount; i++) {
-                pcm[i] = (short) ((cleaned[i * 2] & 0xff) | (cleaned[i * 2 + 1] << 8));
-            }
+            return Pcm16StreamAdapter.process(pcm, count, suppressor::process);
         } catch (Throwable t) {
             Log.w(TAG, "noise suppression failed; passing audio through", t);
             suppressionEnabled = false;
+            return count == pcm.length ? pcm : Arrays.copyOf(pcm, count);
         }
     }
 
@@ -573,31 +565,36 @@ public class FaceclawVoiceController {
      */
     private void processPcmChunk(short[] pcm, int count, int angleDegrees, int ssr, boolean hasFrameMeta) {
         if (suppressionEnabled) {
-            applySuppression(pcm, count);
+            pcm = applySuppression(pcm, count);
+            count = pcm.length;
         }
-        if (recordingPcm != null) {
-            appendRecording(pcm, count);
+        if (count > 0) {
+            if (recordingPcm != null) {
+                appendRecording(pcm, count);
+            }
+            if (verifyBuffer != null && verifyCount < VERIFY_MAX_SAMPLES) {
+                int copied = Math.min(count, VERIFY_MAX_SAMPLES - verifyCount);
+                System.arraycopy(pcm, 0, verifyBuffer, verifyCount, copied);
+                verifyCount += copied;
+            }
+            if (endpointing && endpointDetector.accept(pcm, count)) {
+                emitSpeechEnd();
+            }
+            // PCM flows in every mode so levels and cloud recognition receive
+            // the same complete processed stream as onboard recognition.
+            emitPcm(pcm, count);
+            if (mode != VoiceInputMode.CLOUD && recognizer != null) {
+                float[] samples = new float[count];
+                for (int i = 0; i < count; i++) {
+                    samples[i] = pcm[i] / 32768.0f;
+                }
+                processRecognizer(samples);
+            }
         }
-        if (verifyBuffer != null && verifyCount < VERIFY_MAX_SAMPLES) {
-            int copied = Math.min(count, VERIFY_MAX_SAMPLES - verifyCount);
-            System.arraycopy(pcm, 0, verifyBuffer, verifyCount, copied);
-            verifyCount += copied;
-        }
-        if (endpointing && endpointDetector.accept(pcm, count)) {
-            emitSpeechEnd();
-        }
-        // PCM and frame metadata flow in every mode so levels, recording,
-        // and the Microphones radar keep working alongside onboard ASR.
-        emitPcm(pcm, count);
+        // Direction data describes the source packet rather than an exact
+        // processed sample range, so preserve it even when DSP buffers audio.
         if (hasFrameMeta) {
             emitFrameMeta(angleDegrees, ssr);
-        }
-        if (mode != VoiceInputMode.CLOUD && recognizer != null) {
-            float[] samples = new float[count];
-            for (int i = 0; i < count; i++) {
-                samples[i] = pcm[i] / 32768.0f;
-            }
-            processRecognizer(samples);
         }
     }
 

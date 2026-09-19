@@ -21,9 +21,15 @@ import java.util.List;
  * Android cannot produce a new location before the timeout.
  */
 public final class FaceclawLocationProvider implements LocationListener {
+    private static final String CACHE_NAME = "faceclaw_weather_location";
+    private static final String CACHE_LATITUDE = "latitude";
+    private static final String CACHE_LONGITUDE = "longitude";
+    private static final String CACHE_TIMESTAMP = "timestamp";
+    private static final String CACHE_PROVIDER = "faceclaw-weather-cache";
     private static final long FRESH_CACHE_MS = 10L * 60L * 1000L;
     private static final long MAX_CACHE_MS = 24L * 60L * 60L * 1000L;
     private static final long TIMEOUT_MS = 15L * 1000L;
+    private static final double WEATHER_COORDINATE_SCALE = 100.0;
 
     private final Context context;
     private final LocationManager locationManager;
@@ -109,7 +115,7 @@ public final class FaceclawLocationProvider implements LocationListener {
     }
 
     private Location newestCachedLocation() {
-        Location newest = null;
+        Location newest = savedWeatherLocation();
         try {
             List<String> providers = locationManager.getProviders(true);
             for (String provider : providers) {
@@ -127,9 +133,11 @@ public final class FaceclawLocationProvider implements LocationListener {
     }
 
     private static boolean isRecent(Location location, long maximumAgeMs) {
-        return location != null
-                && location.getTime() > 0L
-                && System.currentTimeMillis() - location.getTime() <= maximumAgeMs;
+        if (location == null || location.getTime() <= 0L) {
+            return false;
+        }
+        long ageMs = System.currentTimeMillis() - location.getTime();
+        return ageMs >= 0L && ageMs <= maximumAgeMs;
     }
 
     private void onTimeout() {
@@ -179,12 +187,64 @@ public final class FaceclawLocationProvider implements LocationListener {
     private void deliverLocation(Location location) {
         FaceclawLocationListener current = listener;
         if (current != null && location != null) {
+            saveWeatherLocation(location);
             current.onLocation(
                     location.getLatitude(),
                     location.getLongitude(),
                     location.hasAccuracy() ? location.getAccuracy() : -1f,
                     location.getTime());
         }
+    }
+
+    /**
+     * Android hides provider caches and suppresses new fixes when the app only
+     * has while-in-use permission and its Activity is in the background. Keep
+     * the last successful weather fix in the app sandbox so a glasses dashboard
+     * can refresh without requesting permanent background-location access.
+     * Two decimal places are ample for an NWS forecast grid and avoid retaining
+     * the precise coordinate delivered for navigation or another foreground use.
+     */
+    private void saveWeatherLocation(Location location) {
+        if (CACHE_PROVIDER.equals(location.getProvider()) || !isValidLocation(location)) {
+            return;
+        }
+        double latitude = roundWeatherCoordinate(location.getLatitude());
+        double longitude = roundWeatherCoordinate(location.getLongitude());
+        context.getSharedPreferences(CACHE_NAME, Context.MODE_PRIVATE).edit()
+                .putLong(CACHE_LATITUDE, Double.doubleToRawLongBits(latitude))
+                .putLong(CACHE_LONGITUDE, Double.doubleToRawLongBits(longitude))
+                .putLong(CACHE_TIMESTAMP, location.getTime())
+                .apply();
+    }
+
+    private Location savedWeatherLocation() {
+        android.content.SharedPreferences preferences =
+                context.getSharedPreferences(CACHE_NAME, Context.MODE_PRIVATE);
+        if (!preferences.contains(CACHE_LATITUDE)
+                || !preferences.contains(CACHE_LONGITUDE)
+                || !preferences.contains(CACHE_TIMESTAMP)) {
+            return null;
+        }
+        Location location = new Location(CACHE_PROVIDER);
+        location.setLatitude(Double.longBitsToDouble(preferences.getLong(CACHE_LATITUDE, 0L)));
+        location.setLongitude(Double.longBitsToDouble(preferences.getLong(CACHE_LONGITUDE, 0L)));
+        location.setTime(preferences.getLong(CACHE_TIMESTAMP, 0L));
+        if (!isValidLocation(location) || !isRecent(location, MAX_CACHE_MS)) {
+            preferences.edit().clear().apply();
+            return null;
+        }
+        return location;
+    }
+
+    private static boolean isValidLocation(Location location) {
+        double latitude = location.getLatitude();
+        double longitude = location.getLongitude();
+        return Double.isFinite(latitude) && latitude >= -90.0 && latitude <= 90.0
+                && Double.isFinite(longitude) && longitude >= -180.0 && longitude <= 180.0;
+    }
+
+    private static double roundWeatherCoordinate(double value) {
+        return Math.round(value * WEATHER_COORDINATE_SCALE) / WEATHER_COORDINATE_SCALE;
     }
 
     private void deliverError(String message) {

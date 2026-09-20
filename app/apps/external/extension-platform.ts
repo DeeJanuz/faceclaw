@@ -36,6 +36,13 @@ type NotificationVisit = {
   reopenCount: number;
 };
 export type ProviderRequest = { requestId: string; promise: Promise<any>; cancel: () => void; event: (data: unknown) => boolean };
+type ComposerPhase = "opening" | "capturing" | "finalizing" | "review" | "editing" | "finalizing-edit" | "edit-ready" | "refining";
+type ComposerState = {
+  caller: string; id: string; purpose: "generic" | "message"; target: string; label: string; maxText: number;
+  provider: string; providerGeneration: number; originWindowId: string; phase: ComposerPhase; draft: string; revision: number;
+  editInstruction: string; capture?: { finish: () => void; cancel: () => void }; refinement?: { cancel: () => void };
+  timer: ReturnType<typeof setTimeout>; current: () => boolean; complete: (status: string, text?: string, reason?: string) => void;
+};
 let active: ExtensionPlatform | null = null;
 export function extensionPlatform(): ExtensionPlatform | null { return active; }
 const newId = (): string => String(java.util.UUID.randomUUID().toString());
@@ -72,6 +79,7 @@ export class ExtensionPlatform {
   private readonly conversationIds = new Map<string, string>();
   private lastGesture = new Map<string, number>();
   private lastTapGesture = new Map<string, number>();
+  private composer: ComposerState | null = null;
   constructor(private readonly native: any, private readonly hooks: ExtensionHooks, private readonly isLocked: () => boolean, private readonly isProtected: () => boolean = () => false) {
     active = this;
     this.appCapabilities = new AppCapabilityRegistry((component, type, data) => {
@@ -88,7 +96,10 @@ export class ExtensionPlatform {
     onAndroidNotificationRemoved(() => this.notificationsChanged());
     onAndroidNotificationsChanged(() => this.notificationsChanged());
     toolRegistry.onToolsChanged(() => this.publishTools());
-    setInterval(() => { this.publishState(); this.notificationsChanged(); try { this.messaging?.tick(); } catch { /* Storage failure disables messaging. */ } }, 1000);
+    setInterval(() => {
+      if (this.composer && !this.composerCurrent(this.composer)) this.finishComposer("cancelled", undefined, "origin_changed");
+      this.publishState(); this.notificationsChanged(); try { this.messaging?.tick(); } catch { /* Storage failure disables messaging. */ }
+    }, 1000);
   }
   feature(feature: string): ExtensionFeature | undefined { return this.features.find(item => item.feature === feature && item.component && item.available); }
   controls(component: string, feature: string, generation?: number): boolean {
@@ -101,7 +112,7 @@ export class ExtensionPlatform {
     const provider = this.feature("assistant");
     if (provider?.configuration.invocation !== "app" || !this.hooks.openAssistant) return false;
     if (entryPoint !== "wakeword" && !this.native.supportsContract?.(provider.component, "invocation.lifecycle")) return false;
-    if (this.assistantOpening || this.isLocked() || this.isProtected()) return true;
+    if (this.assistantOpening || this.composer || this.isLocked() || this.isProtected()) return true;
     for (const feature of ["ui.launcher", "ui.app-menu", "ui.notifications"]) this.hooks.closeSurface?.(feature, false);
     if (!shell.canShowExtensionOverlay()) return true;
     const current = () => !this.isLocked() && !this.isProtected() && shell.isScreenOn() &&
@@ -146,12 +157,13 @@ export class ExtensionPlatform {
       for (const review of this.reviews.values()) review.cancel(); this.reviews.clear();
       this.uiNotifications.clear(); this.lastNotificationSnapshot = ""; this.notificationPresentation = null; this.notificationVisit = null;
     }
+    if (changed.has("ui.composer")) this.finishComposer("cancelled", undefined, "provider_changed");
     if (changed.has("device-tools")) { this.toolNotifications.clear(); this.messaging?.invalidate(); }
     if (changed.has("ui.app-menu")) this.closeMenu();
     for (const feature of changed) {
       this.lastGesture.delete(feature);
       this.lastTapGesture.delete(feature);
-      if (["ui.launcher", "ui.app-menu", "ui.notifications"].includes(feature)) this.hooks.closeSurface?.(feature);
+      if (["ui.launcher", "ui.app-menu", "ui.notifications", "ui.composer"].includes(feature)) this.hooks.closeSurface?.(feature);
     }
     if (generation !== this.generation) {
       this.generation = generation;
@@ -213,6 +225,7 @@ export class ExtensionPlatform {
     const selected = this.feature(feature); if (selected) this.native.setExtensionSurfaceVisibility(selected.component, feature, visible, screenOn && !this.isLocked());
   }
   closeSurface(feature: string, presentationId?: string): void {
+    if (feature === "ui.composer" && this.composer) this.finishComposer("cancelled", undefined, "surface_closed");
     if (feature === "ui.app-menu") this.closeMenu();
     if (feature === "ui.notifications") {
       const preserveVisit = Boolean(this.notificationVisit?.handedOff &&
@@ -274,7 +287,8 @@ export class ExtensionPlatform {
     this.messaging?.invalidate();
     if (this.isLocked()) {
       for (const review of this.reviews.values()) review.cancel(); this.reviews.clear();
-      for (const feature of ["ui.launcher", "ui.app-menu", "ui.notifications"]) { this.setSurfaceVisibility(feature, false, false); this.hooks.closeSurface?.(feature); }
+      this.finishComposer("cancelled", undefined, "locked");
+      for (const feature of ["ui.launcher", "ui.app-menu", "ui.notifications", "ui.composer"]) { this.setSurfaceVisibility(feature, false, false); this.hooks.closeSurface?.(feature); }
       this.lastGesture.clear(); this.lastTapGesture.clear(); this.uiNotifications.clear(); this.ownNotifications.clear(); this.lastNotificationSnapshot = ""; this.notificationPresentation = null; this.notificationVisit = null;
     }
     this.lastState = ""; this.publishState();
@@ -300,7 +314,92 @@ export class ExtensionPlatform {
   }
   openNotificationInbox(): boolean {
     const selected = this.feature("ui.notifications"); if (!selected || this.isLocked()) return false;
+    if (this.composer) return false;
     this.notificationsChanged(); if (this.hooks.showSurface?.("ui.notifications", selected.component, "inbox") !== true) return false; this.event(selected.component, "ui.notifications", { event: "notification-inbox" }); return true;
+  }
+  startComposer(request: {
+    caller: string; id: string; purpose: "generic" | "message"; target: string; label: string; initialText: string;
+    maxText: number; originWindowId: string; current?: () => boolean; complete: (status: string, text?: string, reason?: string) => void;
+  }): (() => void) | null {
+    const selected = this.feature("ui.composer");
+    if (!selected || this.composer || this.isLocked() || !shell.isScreenOn() || shell.foregroundWindow()?.windowId !== request.originWindowId ||
+        !boundedToken(request.id) || !["generic", "message"].includes(request.purpose) || !request.target || request.target.length > 512 ||
+        !request.label || request.label.length > 100 || request.maxText < 1 || request.maxText > 20000 || request.initialText.length > request.maxText ||
+        this.hooks.showSurface?.("ui.composer", selected.component, request.id) !== true) return null;
+    let composer!: ComposerState;
+    const timer = setTimeout(() => { if (this.composer === composer) this.finishComposer("expired", undefined, "expired"); }, 300000);
+    composer = {
+      caller: request.caller, id: request.id, purpose: request.purpose, target: request.target, label: request.label,
+      maxText: request.maxText, provider: selected.component, providerGeneration: selected.generation, originWindowId: request.originWindowId,
+      phase: request.initialText.trim() ? "review" : "opening", draft: request.initialText.trim(), revision: request.initialText.trim() ? 1 : 0,
+      editInstruction: "", timer, current: request.current ?? (() => true), complete: request.complete,
+    };
+    this.composer = composer;
+    if (!this.event(selected.component, "ui.composer", { event: "composer-open", sessionId: request.id, purpose: request.purpose,
+        label: request.label, initialText: composer.draft, maxText: request.maxText, revision: composer.revision })) {
+      this.finishComposer("rejected", undefined, "provider_unavailable"); return null;
+    }
+    return () => { if (this.composer === composer) this.finishComposer("cancelled", undefined, "caller_cancelled"); };
+  }
+  /** Host-owned message paths use the same selected provider without granting it destination authority. */
+  startHostComposer(request: {
+    purpose: "generic" | "message"; target: string; label: string; initialText: string; maxText: number;
+    originWindowId: string; current?: () => boolean; complete: (status: string, text?: string, reason?: string) => void;
+  }): (() => void) | null {
+    const id = newId();
+    return this.startComposer({ ...request, caller: `host:${id}`, id });
+  }
+  cancelComposer(caller: string, id: string): boolean {
+    const composer = this.composer;
+    if (!composer || composer.caller !== caller || composer.id !== id) return false;
+    this.finishComposer("cancelled", undefined, "caller_cancelled"); return true;
+  }
+  private composerCurrent(composer: ComposerState): boolean {
+    let callerCurrent = false; try { callerCurrent = composer.current(); } catch { /* Caller authority fails closed. */ }
+    return callerCurrent && this.composer === composer && !this.isLocked() && shell.isScreenOn() &&
+      shell.foregroundWindow()?.windowId === composer.originWindowId && this.controls(composer.provider, "ui.composer", composer.providerGeneration);
+  }
+  private finishComposer(status: string, text?: string, reason?: string): void {
+    const composer = this.composer; if (!composer) return;
+    this.composer = null; clearTimeout(composer.timer); composer.capture?.cancel(); composer.refinement?.cancel();
+    composer.capture = undefined; composer.refinement = undefined; this.lastGesture.delete("ui.composer");
+    this.hooks.closeSurface?.("ui.composer", false, composer.id);
+    composer.complete(status, text, reason);
+  }
+  private startComposerCapture(composer: ComposerState, edit: boolean): boolean {
+    if (!this.composerCurrent(composer) || composer.capture || (edit ? composer.phase !== "review" || !composer.draft : composer.phase !== "opening")) return false;
+    composer.phase = edit ? "editing" : "capturing"; composer.editInstruction = "";
+    // `startExternalAppCapture` performs a synchronous admission check before
+    // it returns the handle that is stored on `composer.capture`. The host
+    // ownership predicate must therefore be independent of that handle during
+    // startup; event delivery below still requires the handle to be present.
+    const canStart = () => this.composerCurrent(composer);
+    const available = () => this.composerCurrent(composer) && !!composer.capture && ["capturing", "finalizing", "editing", "finalizing-edit"].includes(composer.phase);
+    const capture = shell.startExternalAppCapture(composer.originWindowId, event => {
+      if (!available() || typeof event.text !== "string" || event.text.length > composer.maxText) return;
+      const exact = event.text.trim();
+      if (event.isFinal) {
+        if (composer.phase === "finalizing") {
+          if (!exact) { this.finishComposer("rejected", undefined, "empty_transcript"); return; }
+          composer.draft = exact; composer.revision++; composer.phase = "review";
+        } else if (composer.phase === "finalizing-edit") {
+          composer.editInstruction = exact; composer.phase = exact ? "edit-ready" : "review";
+        }
+      }
+      this.event(composer.provider, "ui.composer", { event: "composer-transcript", sessionId: composer.id, text: exact,
+        isFinal: event.isFinal === true, mode: edit ? "edit" : "message", revision: composer.revision });
+    }, status => {
+      if (available()) this.event(composer.provider, "ui.composer", { event: "composer-capture-status", sessionId: composer.id, status });
+    }, reason => {
+      if (this.composer !== composer) return;
+      composer.capture = undefined;
+      if (reason !== "complete") {
+        if (edit) { composer.phase = "review"; composer.editInstruction = ""; this.event(composer.provider, "ui.composer", { event: "composer-capture-status", sessionId: composer.id, status: "Could not start: capture closed" }); }
+        else this.finishComposer("rejected", undefined, reason);
+      }
+    }, canStart);
+    if (this.composer === composer) composer.capture = capture;
+    return this.composer === composer;
   }
   private closeMenu(): void { const menu = this.menu; this.menu = null; menu?.onClosed?.(); }
   openMenu(windowId: string, title: string, items: { label: string; enabled?: boolean; onSelect: () => void }[], onClosed?: () => void): boolean {
@@ -357,7 +456,7 @@ export class ExtensionPlatform {
       this.notificationPresentation.postTime === item.source.postTime;
     if (arrival) console.info(`[NotificationArrival] source=${Boolean(item)} screenOn=${shell.isScreenOn()} summary=${Boolean(item && item.source.isGroupSummary)} foregroundService=${Boolean(item && item.source.isForegroundService)} ongoing=${Boolean(item && item.source.isOngoing)} duplicate=${Boolean(samePresentation)} visit=${Boolean(this.notificationVisit?.handedOff)} protected=${this.isProtected()}`);
     if (item && !item.source.isGroupSummary && !item.source.isForegroundService &&
-        !item.source.isOngoing && !samePresentation && !this.notificationVisit?.handedOff && !this.isProtected()) {
+        !item.source.isOngoing && !samePresentation && !this.notificationVisit?.handedOff && !this.composer && !this.isProtected()) {
       // Replacement cards belong to the same interruption, including its
       // original power state. The first card has already woken the display.
       const wokeScreen = this.notificationVisit?.wokeScreen ?? !shell.isScreenOn();
@@ -428,7 +527,7 @@ export class ExtensionPlatform {
   }
   private async action(component: string, feature: string, generation: number, action: string, data: Record<string, unknown>): Promise<void> {
     const callId = boundedToken(data.callId) ? data.callId : "";
-    const result = (ok: boolean, error?: string, status?: string) => { if (this.controls(component, feature, generation)) this.event(component, feature, { event: "action-result", callId, ok, ...(error ? { error } : {}), ...(status ? { status } : {}) }); };
+    const result = (ok: boolean, error?: string, status?: string, value?: unknown) => { if (this.controls(component, feature, generation)) this.event(component, feature, { event: "action-result", callId, ok, ...(error ? { error } : {}), ...(status ? { status } : {}), ...(value === undefined ? {} : { result: value }) }); };
     if (!callId || this.isLocked()) { result(false, "Action unavailable"); return; }
     if (feature === "device-tools" && action === "messaging-session") {
       const scope = { owner: component, project: String(data.projectId ?? ""), identity: this.messagingIdentity(component, data.pairingFingerprint), session: String(data.bridgeSession ?? "") };
@@ -438,6 +537,49 @@ export class ExtensionPlatform {
       if (!this.calls.admit(component, data)) { result(false, "Stale or duplicate tool call"); return; }
       const output = await this.tool(component, generation, data.name, data.arguments, { owner: component, project: String(data.projectId ?? ""), identity: this.messagingIdentity(component, data.pairingFingerprint), session: String(data.bridgeSession ?? "") });
       if (this.controls(component, feature, generation)) this.event(component, feature, { event: "tool-result", callId, result: output }); return;
+    }
+    if (feature === "ui.composer") {
+      const composer = this.composer;
+      if (!composer || composer.provider !== component || composer.providerGeneration !== generation || data.sessionId !== composer.id || !this.composerCurrent(composer)) { result(false, "Composer session is stale"); return; }
+      const consumeGesture = (): boolean => {
+        const at = this.lastGesture.get(feature) ?? 0;
+        if (at <= 0 || Date.now() - at > 5000) return false;
+        this.lastGesture.delete(feature); return true;
+      };
+      if (action === "composer-start-capture") {
+        const edit = data.mode === "edit";
+        if ((!edit && composer.phase !== "opening") || (edit && !consumeGesture())) { result(false, "Capture requires a current composer action"); return; }
+        const started = this.startComposerCapture(composer, edit); result(started, started ? undefined : "Capture unavailable"); return;
+      }
+      if (action === "composer-finish-capture") {
+        if (!consumeGesture() || !composer.capture || !["capturing", "editing"].includes(composer.phase)) { result(false, "Capture is not active"); return; }
+        composer.phase = composer.phase === "editing" ? "finalizing-edit" : "finalizing"; composer.capture.finish(); result(true); return;
+      }
+      if (action === "composer-cancel") {
+        if (!consumeGesture()) { result(false, "Cancellation requires a current composer action"); return; }
+        result(true); this.finishComposer("cancelled", undefined, "user_cancelled"); return;
+      }
+      if (action === "composer-confirm") {
+        if (!consumeGesture() || composer.phase !== "review" || data.revision !== composer.revision || typeof data.text !== "string" || data.text !== composer.draft || !composer.draft) { result(false, "Reviewed draft is stale"); return; }
+        result(true); this.finishComposer(composer.purpose === "message" ? "confirmed" : "accepted", composer.draft); return;
+      }
+      if (action === "composer-refine") {
+        if (composer.phase !== "edit-ready" || typeof data.original !== "string" || data.original !== composer.draft || typeof data.followup !== "string" || data.followup !== composer.editInstruction || data.revision !== composer.revision) { result(false, "Refinement request is stale"); return; }
+        composer.phase = "refining";
+        const request = this.provider("refinement", { original: composer.draft, followup: composer.editInstruction });
+        if (!request) { composer.phase = "review"; composer.editInstruction = ""; result(false, "Refinement unavailable"); return; }
+        composer.refinement = request;
+        request.promise.then(value => {
+          if (!this.composerCurrent(composer) || composer.refinement !== request || composer.phase !== "refining") return;
+          composer.refinement = undefined;
+          const revised = typeof value?.text === "string" ? value.text.trim() : "";
+          if (!revised || revised.length > composer.maxText || value?.error) { composer.phase = "review"; composer.editInstruction = ""; result(false, "Refinement unavailable"); return; }
+          composer.draft = revised; composer.revision++; composer.phase = "review"; composer.editInstruction = "";
+          result(true, undefined, undefined, { text: revised, revision: composer.revision });
+        }).catch(() => { if (this.composer === composer && composer.refinement === request) { composer.refinement = undefined; composer.phase = "review"; composer.editInstruction = ""; result(false, "Refinement unavailable"); } });
+        return;
+      }
+      result(false, "Unsupported composer action"); return;
     }
     if (feature === "ui.notifications" && action === "notification-cancel-review") {
       // Cancellation has its own transport callId. `reviewCallId` names the

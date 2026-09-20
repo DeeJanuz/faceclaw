@@ -11,6 +11,7 @@ function appControls(service, bridge) {
   };
   let disposed = false;
   const captures = new Set();
+  const composers = new Set();
   const native = () => !disposed && service?.controls?.();
   return {
     supports(feature) { return !!native()?.supports(feature); },
@@ -41,7 +42,20 @@ function appControls(service, bridge) {
       if (!terminal) captures.add(handle);
       return {id: String(handle.id), finish: () => { if (!disposed) handle.finish(); }, cancel: () => { captures.delete(handle); handle.cancel(); }};
     },
-    dispose() { disposed = true; for (const handle of captures) handle.cancel(); captures.clear(); },
+    composer(purpose, target, label, initialText, maxText, listener) {
+      const controls = native();
+      if (!controls) { listener({status: 'rejected', reason: 'host_unavailable', composerId: ''}); return {id: '', cancel() {}}; }
+      let handle, terminal = false;
+      handle = controls.composer(com.faceclaw.sdk.ComposerSession.Purpose.valueOf(purpose.toUpperCase()), target, label, initialText, maxText, b.consumer(value => {
+        if (terminal) return;
+        const event = b.plain(value);
+        if (['confirmed', 'accepted', 'cancelled', 'rejected', 'expired', 'unknown'].includes(event.status)) { terminal = true; composers.delete(handle); }
+        if (!disposed) listener(event);
+      }));
+      if (!terminal) composers.add(handle);
+      return {id: String(handle.id), cancel: () => { composers.delete(handle); handle.cancel(); }};
+    },
+    dispose() { disposed = true; for (const handle of captures) handle.cancel(); captures.clear(); for (const handle of composers) handle.cancel(); composers.clear(); },
   };
 }
 module.exports = { appControls };

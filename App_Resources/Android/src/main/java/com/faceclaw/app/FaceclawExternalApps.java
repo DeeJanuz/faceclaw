@@ -373,7 +373,7 @@ public final class FaceclawExternalApps {
    PendingIntent pi=value==null?null:value.consent;
    if(pi!=null&&pi.getCreatorUid()==uid&&service.packageName.equals(pi.getCreatorPackage())&&(Build.VERSION.SDK_INT<31||pi.isActivity())){consent=pi;emit(component,"consent",new JSONObject());launchRequestedConsent(this,pi);}
   }
-  Set<String> supported(){return listener==null?Collections.emptySet():new HashSet<>(Arrays.asList("control.result","window.policy","capture.session","invocation.lifecycle","resource.release","resource.prefetch",ExtensionContract.NOTIFICATION_PREVIEW_TIMING));}
+  Set<String> supported(){return listener==null?Collections.emptySet():new HashSet<>(Arrays.asList("control.result","window.policy","capture.session","composer.session","invocation.lifecycle","resource.release","resource.prefetch",ExtensionContract.NOTIFICATION_PREVIEW_TIMING));}
   JSONObject catalog(){JSONArray features=new JSONArray();for(String id:supported())features.put(Protocol.object("id",id,"version",1,"limits",Protocol.object("maxPendingControls",32,"maxPolicyBytes",4096)));return Protocol.object("contractVersion",1,"epoch",catalogEpoch,"features",features);}
   void negotiate(JSONObject data)throws RemoteException{
    JSONObject result;
@@ -432,6 +432,11 @@ public final class FaceclawExternalApps {
      catch(IllegalArgumentException invalid){String id=data.optString("captureId");if(id.matches("[A-Za-z0-9_-]{1,128}"))sendControl("capture-status",Protocol.object("captureId",id,"status","rejected","reason",invalid.getMessage()));}return;
     }
     if(type.equals("capture-finish")||type.equals("capture-cancel")){if(negotiated.contains("capture.session")){IndependenceProtocol.keys(data,"captureId");IndependenceProtocol.token(data,"captureId");emit(component,type,data);}return;}
+    if(type.equals("composer-start")){
+     try{IndependenceProtocol.bytes(data,24576);IndependenceProtocol.keys(data,"composerId","purpose","target","label","initialText","maxText","windowGeneration","expiresAtElapsedMs");IndependenceProtocol.token(data,"composerId");String purpose=IndependenceProtocol.text(data,"purpose",16);if(!Arrays.asList("generic","message").contains(purpose))throw new IllegalArgumentException("malformed");IndependenceProtocol.text(data,"target",512);IndependenceProtocol.text(data,"label",100);String initial=IndependenceProtocol.text(data,"initialText",20000);long maxText=IndependenceProtocol.integer(data,"maxText",1,20000);if(initial.length()>maxText)throw new IllegalArgumentException("too_large");long expiry=IndependenceProtocol.integer(data,"expiresAtElapsedMs",1,Long.MAX_VALUE);if(expiry<=now||expiry-now>300000)throw new IllegalArgumentException("expired");if(IndependenceProtocol.integer(data,"windowGeneration",1,Long.MAX_VALUE)!=generation)throw new IllegalArgumentException("stale_window");if(!negotiated.contains("composer.session")||!allows(component,"dictation")||!open||!visible||!screenOn)throw new IllegalArgumentException("not_granted");emit(component,type,data);}
+     catch(IllegalArgumentException invalid){String id=data.optString("composerId");if(id.matches("[A-Za-z0-9_-]{1,128}"))sendControl("composer-status",Protocol.object("composerId",id,"status","rejected","reason",invalid.getMessage()));}return;
+    }
+    if(type.equals("composer-cancel")){if(negotiated.contains("composer.session")){IndependenceProtocol.keys(data,"composerId");IndependenceProtocol.token(data,"composerId");emit(component,type,data);}return;}
     if(type.equals("invocation-result")){String id=data.optString("invocationId");String result=data.optString("state");if(invocations.containsKey(id)&&Arrays.asList("accepted","rejected","completed","cancelled","unknown").contains(result)){if(!result.equals("accepted"))invocations.remove(id);emit(component,type,Protocol.object("invocationId",id,"state",result));}return;}
     if(type.equals("publish-contract")){negotiate(data);return;}
     if(type.equals("control-request")){control(data,now);return;}
@@ -848,6 +853,7 @@ public final class FaceclawExternalApps {
   switch(feature) {
    case "notification-content": return "Own inbox (reads other apps’ notification content; open and dismiss with user input)";
    case "ui.notifications": return "Notification presentation (reads other apps' notification content)";
+   case "ui.composer": return "Message composer (shows and edits drafts from other apps)";
    case "device-tools": return "Device tools (read and act through approved host tools)";
    case "assistant": return "Assistant (receives assistant prompts)";
    case "transcription": return "Transcription (receives microphone audio)";

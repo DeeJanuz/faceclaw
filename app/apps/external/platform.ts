@@ -24,7 +24,7 @@ export function prioritizeExtension(feature: string, component: string): boolean
 
 type Raster = { width: number; height: number; pixels: Uint8Array };
 type LocalWindowPolicy = { preferredHeightMode: WindowHeightMode; preferredWidthMode: "display"; chrome: "host" | "compact"; menuAvailable: boolean; back: "app-then-host" | "host-only"; gestureClaims: string[] };
-type WindowState = { contractCapture?: { id: string; expires: number; timer?: ReturnType<typeof setTimeout> }; policy?: LocalWindowPolicy; claimsActive?: boolean; backPending?: { expires: number; timer: ReturnType<typeof setTimeout> }; window: ShellWindow; ready: boolean; serial: number; visible: boolean; frame: Raster | null; rendering: boolean; target: string; lastInput: number; cancelReview?: () => void; reviewId?: string; reviewPurpose?: "message" | "search" | "capture"; protected?: boolean; menuAvailable?: boolean; finishCapture?: () => void; completedCapture?: { text: string; at: number }; refinement?: { id: string; cancel: () => void } };
+type WindowState = { contractCapture?: { id: string; expires: number; timer?: ReturnType<typeof setTimeout> }; policy?: LocalWindowPolicy; claimsActive?: boolean; backPending?: { expires: number; timer: ReturnType<typeof setTimeout> }; window: ShellWindow; ready: boolean; serial: number; visible: boolean; frame: Raster | null; rendering: boolean; target: string; lastInput: number; cancelReview?: () => void; reviewId?: string; reviewPurpose?: "message" | "search" | "capture" | "composer"; protected?: boolean; menuAvailable?: boolean; finishCapture?: () => void; completedCapture?: { text: string; at: number }; refinement?: { id: string; cancel: () => void } };
 export type ExternalPlatformOptions = {
   extensions?: ExtensionHooks;
   configureSurface: (id: string, visible: boolean, mode: WindowHeightMode) => Promise<void>;
@@ -193,6 +193,36 @@ export class ExternalAppPlatform {
       const capture = { id, expires: Number(data.expiresAtElapsedMs), timer: undefined as ReturnType<typeof setTimeout> | undefined }; state.contractCapture = capture;
       this.startCapture(component, { requestId: id, label: data.label }, state);
       if (state.contractCapture === capture) capture.timer = setTimeout(() => { if (state.contractCapture === capture) state.cancelReview?.(); }, Math.max(0, Math.min(300000, capture.expires - Number(android.os.SystemClock.elapsedRealtime()))));
+      return;
+    }
+    if (type === "composer-start") {
+      const id = typeof data.composerId === "string" ? data.composerId.slice(0, 128) : "";
+      const reject = (reason: string) => this.send(component, "composer-status", { composerId: id, status: "rejected", reason });
+      if (!state?.ready || !state.visible || this.options.isLocked() || !shell.isScreenOn() || !this.granted(component, "dictation") ||
+          !boundedToken(data.composerId) || !["generic", "message"].includes(data.purpose) || typeof data.target !== "string" || !data.target || data.target.length > 512 ||
+          typeof data.label !== "string" || !data.label || data.label.length > 100 || typeof data.initialText !== "string" || !Number.isSafeInteger(data.maxText) ||
+          data.maxText < 1 || data.maxText > 20000 || data.initialText.length > data.maxText || Date.now() - state.lastInput > 5000 || state.cancelReview || state.refinement) {
+        reject("composer_unavailable"); return;
+      }
+      state.lastInput = 0; state.reviewId = id; state.reviewPurpose = "composer";
+      let settled = false;
+      const clear = () => { if (state.reviewId === id && state.reviewPurpose === "composer") { state.cancelReview = undefined; state.reviewId = undefined; state.reviewPurpose = undefined; } };
+      const cancel = this.extensions.startComposer({ caller: component, id, purpose: data.purpose, target: data.target, label: data.label,
+        initialText: data.initialText, maxText: data.maxText, originWindowId: state.window.windowId,
+        complete: (status, text, reason) => {
+          if (settled) return; settled = true; clear();
+          this.send(component, "composer-status", { composerId: id, status, ...(text === undefined ? {} : { text }), ...(reason ? { reason } : {}) });
+        } });
+      if (!cancel) {
+        if (!settled) { clear(); reject("composer_provider_unavailable"); }
+        return;
+      }
+      state.cancelReview = () => { cancel(); if (!settled) { settled = true; clear(); this.send(component, "composer-status", { composerId: id, status: "cancelled", reason: "lifecycle" }); } };
+      return;
+    }
+    if (type === "composer-cancel") {
+      if (state?.reviewPurpose === "composer" && state.reviewId === data.composerId) state.cancelReview?.();
+      else this.extensions.cancelComposer(component, data.composerId);
       return;
     }
     if (type === "capture-finish" || type === "capture-cancel") { if (state?.contractCapture?.id === data.captureId) { if (type === "capture-finish") state.finishCapture?.(); else state.cancelReview?.(); } return; }

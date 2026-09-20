@@ -33,6 +33,13 @@ test('draft and review tools cannot send; only one exact-text confirmation dispa
  f.reviews[0].accept();f.reviews[0].accept();await flush();assert.equal(f.sends.length,1);assert.equal(f.sends[0].text,'Hello Alice');
  assert.equal((await f.call('operation',{draftId:draft.draftId})).status,'sent');
 });
+test('shared composer refinement replaces the saved draft before the one authorized send',async()=>{
+ const f=fixture(),draft=await f.draft();await f.call('review',{draftId:draft.draftId});
+ const review=f.reviews[0];assert.equal(review.composerText,'Hello Alice');assert.equal(review.destination,'sms: Alice');
+ review.acceptText('Hello Alice, I will be there at six.');review.acceptText('Replay');await flush();
+ assert.equal(f.sends.length,1);assert.equal(f.sends[0].text,'Hello Alice, I will be there at six.');
+ assert.equal((await f.call('get_draft',{draftId:draft.draftId})).text,'Hello Alice, I will be there at six.');
+});
 test('bridge loss, expiry, and host revocation invalidate physical review',async()=>{
  for(const invalidate of [f=>f.broker.invalidate(scope.owner),f=>f.advance(16000),f=>f.deny()]) {
   const f=fixture(),d=await f.draft();await f.call('review',{draftId:d.draftId});invalidate(f);f.reviews[0].accept();await flush();assert.equal(f.sends.length,0);

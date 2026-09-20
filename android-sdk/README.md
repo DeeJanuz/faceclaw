@@ -123,12 +123,18 @@ The [app-owned assistant invocation contract](ASSISTANT_INVOCATION.md) defines h
 a selected assistant provider handles "Hey Even" in its own window, including
 declarations, event ordering, permissions, and older-host compatibility limits.
 
+The [shared message composer contract](SHARED-COMPOSER.md) defines the typed
+caller API, `ui.composer` provider surface, exact-text confirmation boundary,
+priority setup, lifecycle, and older-host fallback. New messaging apps should
+reuse this flow and keep only their destination, draft, and send adapters.
+
 The complete application-owned capability contract is in [CAPABILITY-PROTOCOL.md](../docs/CAPABILITY-PROTOCOL.md). Independent extension surfaces use the same render pool, scheduler, outcomes, recovery, and scene/resource APIs as the main window.
 
 ## Examples and verification
 
 - [CanvasAppService.kt](examples/CanvasAppService.kt) demonstrates the pooled Canvas adapter.
 - [AnimatedCardAppService.java](examples/AnimatedCardAppService.java) demonstrates presentation-time animation.
+- [SharedComposerExample.java](standalone-example/src/main/java/com/faceclaw/example/SharedComposerExample.java) demonstrates a destination-bound message request.
 - [animated-card.cjs](examples/animated-card.cjs) demonstrates the same timer-free motion model in JavaScript.
 - `bash scripts/check-animation-examples.sh` verifies the documented animation
   starters, including compilation of the Java example against the SDK.
@@ -147,7 +153,10 @@ node --test javascript/test.cjs javascript/animation-example.test.cjs
 
 ## App-independence candidate
 
-The local `1.1.0-rc.1.9dc05298f50a` candidate adds negotiated controls, window policy,
-draft capture, explicit resource release and phone/host presentation adapters.
-See the [candidate build and migration handoff](../docs/sdk-independence/CANDIDATE-HANDOFF.md)
-and [acceptance status](../docs/sdk-independence/STATUS.md) before consuming it.
+The local `1.1.0-rc.1.9544fd1852be` candidate adds the shared composer to the
+existing negotiated controls, window policy, draft capture, explicit resource
+release, and phone/host presentation adapters. See the
+[shared-composer candidate handoff](../docs/sdk-independence/SHARED-COMPOSER-CANDIDATE.md)
+before consuming it. The older [candidate handoff](../docs/sdk-independence/CANDIDATE-HANDOFF.md)
+and [acceptance status](../docs/sdk-independence/STATUS.md) remain the historical
+record for `1.1.0-rc.1.9dc05298f50a`.

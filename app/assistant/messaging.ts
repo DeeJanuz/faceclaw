@@ -11,7 +11,11 @@ export interface MessagingProvider {
 }
 export interface MessagingStore { read(): MessageDraft[]; write(drafts: MessageDraft[]): void }
 export type MessagingScope = { owner: string; project: string; identity: string; session: string };
-export type MessagingReview = { title: string; text: string; acceptLabel: string; accept: () => void; cancel: () => void; current: () => boolean };
+export type MessagingReview = {
+  title: string; text: string; acceptLabel: string; accept: () => void; cancel: () => void; current: () => boolean;
+  /** Present only for an outgoing-message review. Consent prompts remain read-only. */
+  composerText?: string; destination?: string; acceptText?: (text: string) => void;
+};
 type Review = { id: string; scope: MessagingScope; expires: number; close: () => void; draft?: string; state: string };
 const token = (v: unknown): v is string => typeof v === 'string' && /^[A-Za-z0-9_.:+/@-]{1,512}$/.test(v);
 const text = (v: unknown, max: number): v is string => typeof v === 'string' && v.trim().length > 0 && v.length <= max && !/[\u0000-\u0008\u000b\u000c\u000d\u000e-\u001f\u007f\u202a-\u202e\u2066-\u2069]/.test(v);
@@ -127,8 +131,17 @@ export class Messaging {
     const review: Review = { id: this.id(), scope: copy(scope), expires: Math.min(this.now() + 300000, draft?.expiresAt ?? Infinity), close: () => {}, draft: draft?.id, state: 'pending' };
     this.reviews.set(review.id, review);
     const current = () => review.state === 'pending' && review.expires > this.now() && this.current(scope);
+    const approve = (reviewedText?: string) => {
+      if (!current()) { this.cancelReview(review); return; }
+      if (draft && reviewedText !== undefined) {
+        if (!text(reviewedText, 8000)) { this.cancelReview(review); return; }
+        if (reviewedText !== draft.text) { draft.text = reviewedText; draft.version = this.id(); this.save(); }
+      }
+      review.state = 'accepted'; accept();
+    };
     review.close = this.show({ title, text: body, acceptLabel: label, current,
-      accept: () => { if (!current()) { this.cancelReview(review); return; } review.state = 'accepted'; accept(); },
+      accept: () => approve(),
+      ...(draft ? { composerText: draft.text, destination: `${draft.recipient.channel}: ${draft.recipient.title}`, acceptText: (value: string) => approve(value) } : {}),
       cancel: () => { if (review.state === 'pending') this.cancelReview(review); } });
     return review.id;
   }

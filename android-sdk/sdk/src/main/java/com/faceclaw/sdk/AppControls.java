@@ -15,6 +15,7 @@ public final class AppControls {
  private long windowGeneration,revision,declarationEpoch,connectionEpoch;
  private final Map<String,Long> invocations=new HashMap<>();
  private final Map<String,CaptureSession> captures=new HashMap<>();
+ private final Map<String,ComposerSession> composers=new HashMap<>();
  private JSONObject desiredPolicy;private Runnable ready=()->{};
  public AppControls(Transport transport,LongSupplier clock,Scheduler scheduler){this.transport=transport;this.clock=clock;this.scheduler=scheduler;}
  public boolean supports(String feature){return negotiated.contains(feature);}
@@ -23,13 +24,14 @@ public final class AppControls {
   windowGeneration=generation;
   if(catalog.epoch==next.epoch&&catalog.state==next.state)return;
   disconnect();catalog=next;windowGeneration=generation;if(!next.isSupported())return;
-  JSONArray features=new JSONArray();for(String id:Arrays.asList("control.result","window.policy","capture.session","invocation.lifecycle","resource.release","resource.prefetch",ExtensionContract.NOTIFICATION_PREVIEW_TIMING))if(next.supports(id,1))features.put(Protocol.object("id",id,"minVersion",1,"required",false,"fallback","none"));
+  JSONArray features=new JSONArray();for(String id:Arrays.asList("control.result","window.policy","capture.session","composer.session","invocation.lifecycle","resource.release","resource.prefetch",ExtensionContract.NOTIFICATION_PREVIEW_TIMING))if(next.supports(id,1))features.put(Protocol.object("id",id,"minVersion",1,"required",false,"fallback","none"));
   transport.send("publish-contract",Protocol.object("contractVersion",1,"epoch",++declarationEpoch,"features",features));
  }
  public synchronized void window(long generation){windowGeneration=generation;}
  public synchronized void visible(boolean visible){if(visible&&desiredPolicy!=null&&supports("window.policy"))request("window.policy",desiredPolicy,5000,result->{});}
  public synchronized void receive(String type,JSONObject data){
   if(type.equals("capture-status")||type.equals("capture-transcript")){CaptureSession capture=captures.get(data.optString("captureId"));if(capture!=null){capture.event(type,data);if(capture.terminal())captures.remove(capture.id);}return;}
+  if(type.equals("composer-status")){ComposerSession composer=composers.get(data.optString("composerId"));if(composer!=null){composer.event(data);if(composer.terminal())composers.remove(composer.id);}return;}
   if(type.equals("contract-result")){
    if(data.optLong("catalogEpoch")!=catalog.epoch||data.optLong("epoch")!=declarationEpoch||!data.optString("state").equals("applied"))return;
    negotiated.clear();JSONArray features=data.optJSONArray("features");if(features==null)return;for(int i=0;i<features.length();i++){JSONObject f=features.optJSONObject(i);if(f!=null&&f.optString("state").equals("accepted")&&catalog.supports(f.optString("id"),1))negotiated.add(f.optString("id"));}
@@ -67,8 +69,19 @@ public final class AppControls {
   scheduler.after(300000,()->{synchronized(AppControls.this){if(epoch==connectionEpoch&&captures.remove(id)==capture)capture.cancel();}});
   return capture;
  }
+ public synchronized ComposerSession composer(ComposerSession.Purpose purpose,String target,String label,String initialText,int maxText,java.util.function.Consumer<JSONObject> listener){
+  Objects.requireNonNull(listener);composers.entrySet().removeIf(entry->entry.getValue().terminal());
+  String id=UUID.randomUUID().toString();ComposerSession composer=new ComposerSession(id,transport,listener);
+  String text=initialText==null?"":initialText;
+  if(!supports("composer.session")||composers.size()>=1||purpose==null||target==null||target.isEmpty()||target.length()>512||label==null||label.isEmpty()||label.length()>100||maxText<1||maxText>20000||text.length()>maxText){composer.event(Protocol.object("composerId",id,"status","rejected","reason",supports("composer.session")?"invalid_or_busy":"unsupported"));return composer;}
+  composers.put(id,composer);long epoch=connectionEpoch;
+  JSONObject request=Protocol.object("composerId",id,"purpose",purpose.name().toLowerCase(java.util.Locale.ROOT),"target",target,"label",label,"initialText",text,"maxText",maxText,"windowGeneration",windowGeneration,"expiresAtElapsedMs",clock.getAsLong()+300000);
+  if(!transport.send("composer-start",request)){composers.remove(id);composer.event(Protocol.object("composerId",id,"status","rejected","reason","host_unavailable"));}
+  scheduler.after(300000,()->{synchronized(AppControls.this){if(epoch==connectionEpoch&&composers.remove(id)==composer)composer.event(Protocol.object("composerId",id,"status","expired","reason","expired"));}});
+  return composer;
+ }
  public synchronized void disconnect(){
-  connectionEpoch++;invocations.clear();for(CaptureSession c:new ArrayList<>(captures.values()))c.event("capture-status",Protocol.object("captureId",c.id,"status","cancelled","reason","host_unavailable"));captures.clear();List<Pending> abandoned=new ArrayList<>(pending.values());pending.clear();negotiated.clear();catalog=AppIndependenceCatalog.fromCapabilities(null);windowGeneration=0;
+  connectionEpoch++;invocations.clear();for(CaptureSession c:new ArrayList<>(captures.values()))c.event("capture-status",Protocol.object("captureId",c.id,"status","cancelled","reason","host_unavailable"));captures.clear();for(ComposerSession c:new ArrayList<>(composers.values()))c.event(Protocol.object("composerId",c.id,"status","cancelled","reason","host_unavailable"));composers.clear();List<Pending> abandoned=new ArrayList<>(pending.values());pending.clear();negotiated.clear();catalog=AppIndependenceCatalog.fromCapabilities(null);windowGeneration=0;
   for(Pending p:abandoned)try{p.callback.accept(local(p.request,"unknown","host_unavailable"));}catch(RuntimeException ignored){}
  }
  private JSONObject local(JSONObject request,String state,String reason){JSONObject result=IndependenceProtocol.copy(request);try{result.remove("payload");result.put("state",state);result.put("reason",reason);}catch(JSONException impossible){throw new IllegalStateException(impossible);}return result;}

@@ -5,17 +5,18 @@ import java.util.*;
 
 /** Versioned, bounded extension messages. Keys never name host preferences or native objects. */
 public final class ExtensionContract {
- public static final int VERSION=1, MAX_FEATURES=11, MAX_CONFIG=8192;
+ public static final int VERSION=1, MAX_FEATURES=12, MAX_CONFIG=8192;
  public static final String NOTIFICATION_PREVIEW_TIMING="notifications.preview-timing";
- public static final List<String> FEATURES=Collections.unmodifiableList(Arrays.asList("ui.launcher","ui.navigation","ui.app-menu","ui.window-layout","ui.typography","ui.notifications","assistant","transcription","refinement","device-tools","notification-content"));
+ public static final List<String> FEATURES=Collections.unmodifiableList(Arrays.asList("ui.launcher","ui.navigation","ui.app-menu","ui.window-layout","ui.typography","ui.notifications","ui.composer","assistant","transcription","refinement","device-tools","notification-content"));
  public static boolean known(String feature) { return FEATURES.contains(feature); }
  public static boolean live(String feature) { return known(feature)&&!Arrays.asList("ui.navigation","ui.window-layout","ui.typography").contains(feature); }
- public static boolean surface(String feature) { return Arrays.asList("ui.launcher","ui.app-menu","ui.notifications").contains(feature); }
+ public static boolean surface(String feature) { return Arrays.asList("ui.launcher","ui.app-menu","ui.notifications","ui.composer").contains(feature); }
  public static boolean token(String value) { return value!=null&&value.matches("[A-Za-z0-9_-]{1,128}"); }
  public static boolean action(String feature,String action) {
   if(!known(feature)||action==null) return false;
   if(feature.equals("device-tools")) return action.equals("tool-call")||action.equals("messaging-session");
   if(feature.equals("ui.notifications")) return Arrays.asList("notification-open","notification-dismiss","notification-dismiss-group","notification-review-reply","notification-cancel-review","notification-return","notification-reopen","notification-abandon","notification-action","close-surface","sleep").contains(action);
+  if(feature.equals("ui.composer")) return Arrays.asList("composer-start-capture","composer-finish-capture","composer-cancel","composer-confirm","composer-refine").contains(action);
   if(feature.equals("ui.launcher")&&action.equals("uninstall-app")) return true;
   return (feature.equals("ui.launcher")||feature.equals("ui.app-menu"))&&Arrays.asList("open-app","close-app","focus-app","show-app-menu","request-dictation","close-surface","sleep","menu-select").contains(action);
  }

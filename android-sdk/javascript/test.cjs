@@ -1,5 +1,6 @@
 const test = require('node:test'), assert = require('node:assert/strict'), fs = require('node:fs'), path = require('node:path');
 const { WindowMotion, FrameRequest, DURATION_MS } = require('./index');
+const { appControls } = require('./controls');
 const compact = { x: 259, y: 149, width: 288, height: 44 }, expanded = { x: 0, y: 0, width: 571, height: 447 };
 test('Android and JavaScript share the approved geometry and content timing fixtures', () => {
  const rows = fs.readFileSync(path.join(__dirname, '../sdk/src/test/resources/window-motion-v1.csv'), 'utf8').trim().split('\n').slice(1);
@@ -30,4 +31,17 @@ test('frame requests keep only one callback and render the latest state; cancell
  const frames = new FrameRequest(() => rendered.push(state), callback => { pending.push(callback); return pending.length; }, () => {});
  for (state = 0; state < 40; state++) frames.request(); assert.equal(pending.length, 1);
  pending.shift()(); assert.deepEqual(rendered, [40]); frames.request(); const stale = pending.shift(); frames.cancel(); frames.request(); stale(); assert.deepEqual(rendered, [40]); pending.shift()(); assert.deepEqual(rendered, [40, 40]);
+});
+test('shared composer binding forwards one terminal result and cancels outstanding work on dispose', () => {
+ const oldCom=global.com;let listener,cancelled=0,opened=0;
+ global.com={faceclaw:{sdk:{ComposerSession:{Purpose:{valueOf:value=>value}}}}};
+ const native={supports:feature=>feature==='composer.session',composer:(purpose,target,label,initial,max,consumer)=>{
+  opened++;if(opened===1)assert.deepEqual([purpose,target,label,initial,max],['MESSAGE','thread','Signal message','saved',8000]);listener=consumer;return{id:`composer-${opened}`,cancel(){cancelled++;}};
+ }};
+ const events=[],controls=appControls({controls:()=>native},{consumer:fn=>fn,plain:value=>value});
+ const first=controls.composer('message','thread','Signal message','saved',8000,event=>events.push(event));
+ assert.equal(first.id,'composer-1');listener({composerId:'composer-1',status:'confirmed',text:'exact'});listener({composerId:'composer-1',status:'confirmed',text:'replay'});
+ assert.deepEqual(events,[{composerId:'composer-1',status:'confirmed',text:'exact'}]);
+ controls.composer('generic','field','Use text','',200,event=>events.push(event));controls.dispose();assert.equal(cancelled,1);
+ global.com=oldCom;
 });

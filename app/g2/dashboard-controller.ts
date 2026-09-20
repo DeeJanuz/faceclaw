@@ -2797,8 +2797,9 @@ class DashboardController {
       }
       this.extensionSurfaces.delete(feature);
       this.externalApps.extensions.closeSurface(feature, removedPresentationId);
-    }, feature === "ui.notifications" ? "medium" : "min", feature !== "ui.notifications" || target === "inbox" || wokeScreen, feature === "ui.notifications" && target !== "inbox", feature === "ui.notifications" && target !== "inbox");
-    const presentationId = feature === "ui.notifications" && target !== "inbox" ? target : undefined;
+    }, feature === "ui.notifications" ? "medium" : feature === "ui.composer" ? "max" : "min", feature !== "ui.notifications" || target === "inbox" || wokeScreen, feature === "ui.notifications" && target !== "inbox", feature === "ui.notifications" && target !== "inbox");
+    const presentationId = feature === "ui.composer" ? target
+      : feature === "ui.notifications" && target !== "inbox" ? target : undefined;
     const state = {
       component,
       layer,
@@ -2850,7 +2851,7 @@ class DashboardController {
   private closeExtensionSurface(feature: string, restoreSleep = true, presentationId?: string): boolean {
     if (feature === "ui.launcher") { setTimeout(() => shell.getWindows().find(window => window.appId === "launcher")?.requestRender(), 0); return true; }
     const state = this.extensionSurfaces.get(feature);
-    if (!state || (feature === "ui.notifications" && presentationId !== undefined && state.presentationId !== presentationId)) return false;
+    if (!state || ((feature === "ui.notifications" || feature === "ui.composer") && presentationId !== undefined && state.presentationId !== presentationId)) return false;
     if (state.timer) clearTimeout(state.timer);
     if (state.frameTimer) clearTimeout(state.frameTimer);
     state.timer = undefined;

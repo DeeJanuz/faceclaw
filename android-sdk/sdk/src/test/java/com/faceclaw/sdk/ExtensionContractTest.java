@@ -61,4 +61,13 @@ public final class ExtensionContractTest {
   }
   assertFalse(ExtensionContract.action("ui.notifications","notification-return-any-window"));
  }
+ @Test public void composerActionsAreSurfaceScopedAndCannotBorrowOtherFeatureAuthority() {
+  assertTrue(ExtensionContract.surface("ui.composer"));
+  for(String action:new String[]{"composer-start-capture","composer-finish-capture","composer-cancel","composer-confirm","composer-refine"}) {
+   assertTrue(action,ExtensionContract.action("ui.composer",action));
+   for(String feature:ExtensionContract.FEATURES) if(!feature.equals("ui.composer"))
+    assertFalse(feature+":"+action,ExtensionContract.action(feature,action));
+  }
+  assertFalse(ExtensionContract.action("ui.composer","notification-review-reply"));
+ }
 }

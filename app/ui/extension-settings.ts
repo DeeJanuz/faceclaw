@@ -6,7 +6,7 @@ export const EXTENSIONS_EFFECTIVE_KEY = "apps.extensions.effective";
 
 export type ExtensionFeatureId =
   | "ui.launcher" | "ui.navigation" | "ui.app-menu" | "ui.window-layout"
-  | "ui.typography" | "ui.notifications" | "assistant" | "transcription"
+  | "ui.typography" | "ui.notifications" | "ui.composer" | "assistant" | "transcription"
   | "refinement" | "device-tools" | "notification-content";
 
 export type EffectiveExtension = {

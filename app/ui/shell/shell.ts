@@ -61,6 +61,8 @@ import {
   type WindowHeightMode,
 } from "./geometry";
 
+const currentExtensionPlatform = () => typeof extensionPlatform === "function" ? extensionPlatform() : null;
+
 /**
  * The shell: owns the window registry, focus, screen on/off, and the shell
  * surface (sidebar + top bar + shell overlays such as the escape menu and
@@ -721,7 +723,7 @@ class Shell {
       this.lastInputAtMs = Date.now();
       const wokeScreen = !this.screenOn && this.wake(navigationPolicy().wakeFocus);
       if (action === "voice-input" && !this.activeVoiceLayer && !this.activeKeyboardLayer) {
-        if (extensionPlatform()?.openAssistant()) return { shell: true, window: false };
+        if (currentExtensionPlatform()?.openAssistant()) return { shell: true, window: false };
         if (this.assistantLayer) {
           // The assistant overlay is up; a wakeword continues that conversation.
           this.startAssistantFollowUp(true);
@@ -1060,6 +1062,23 @@ class Shell {
     onUnavailable: () => void = () => {},
     onClosed: () => void = () => {},
   ): () => void {
+    const originWindowId = this.foregroundWindow()?.windowId;
+    const shared = currentExtensionPlatform();
+    if (originWindowId && shared?.feature("ui.composer")) {
+      if (!canStart()) { onUnavailable(); return () => {}; }
+      let completed = false;
+      const cancel = shared.startHostComposer({ purpose: "message", target: target.id.slice(0, 512), label: target.label.slice(0, 100), initialText: "", maxText: 8000, originWindowId, current: canStart,
+        complete: (status, text) => {
+          if (completed) return; completed = true;
+          if (status === "confirmed" && typeof text === "string" && text.trim() && canStart()) target.onSend(text);
+          else if (status === "rejected") onUnavailable();
+          onClosed();
+        },
+      });
+      if (cancel) return () => { if (!completed) cancel(); };
+      if (!completed) onUnavailable();
+      return () => {};
+    }
     let cancelled = false, owned: VoiceInputLayer | null = null;
     this.openVoiceDialog({ finishOnClick: true, defaultTarget: "app", sendTargets: [target], canStart: () => !cancelled && canStart(), onUnavailable, onClosed, onCreated: layer => { owned = layer; } });
     return () => { cancelled = true; if (owned) this.stack.removeLayer(owned); };
@@ -1260,6 +1279,23 @@ class Shell {
 
   /** Host-owned, paginated exact-text confirmation; never starts a microphone or auto-sends. */
   startMessagingReview(review: MessagingReview): () => void {
+    const originWindowId = this.foregroundWindow()?.windowId;
+    const shared = currentExtensionPlatform();
+    if (originWindowId && review.composerText && review.acceptText && shared?.feature("ui.composer")) {
+      let completed = false;
+      const destination = review.destination ?? review.title;
+      const cancel = shared.startHostComposer({ purpose: "message", target: destination.slice(0, 512), label: destination.slice(0, 100),
+        initialText: review.composerText, maxText: 8000, originWindowId, current: review.current,
+        complete: (status, text) => {
+          if (completed) return; completed = true;
+          if (status === "confirmed" && typeof text === "string" && review.current()) review.acceptText!(text);
+          else review.cancel();
+        },
+      });
+      if (cancel) return () => { if (!completed) cancel(); };
+      if (!completed) review.cancel();
+      return () => {};
+    }
     let layer: MessagingReviewLayer | null = null;
     let cancelled = false;
     const windowId = this.foregroundWindow()?.windowId;
@@ -1275,6 +1311,21 @@ class Shell {
 
   /** A capability-scoped app review. It has one explicit target and never auto-sends. */
   startExternalAppReview(windowId: string, label: string, initialText: string, onSend: (text: string) => void, onClosed: () => void): () => void {
+    const shared = currentExtensionPlatform();
+    if (shared?.feature("ui.composer") && this.screenOn && this.foregroundWindow()?.windowId === windowId) {
+      let completed = false;
+      const current = () => this.screenOn && this.foregroundWindow()?.windowId === windowId;
+      const cancel = shared.startHostComposer({ purpose: "message", target: windowId.slice(0, 512), label: label.slice(0, 100), initialText, maxText: 8000, originWindowId: windowId, current,
+        complete: (status, text) => {
+          if (completed) return; completed = true;
+          if (status === "confirmed" && typeof text === "string" && this.screenOn && this.foregroundWindow()?.windowId === windowId) onSend(text);
+          onClosed();
+        },
+      });
+      if (cancel) return () => { if (!completed) cancel(); };
+      if (!completed) onClosed();
+      return () => {};
+    }
     let cancelled = false;
     let layer: VoiceInputLayer | null = null;
     const cancel = () => {
@@ -1331,7 +1382,7 @@ class Shell {
     if (this.activeKeyboardLayer) return this.activeKeyboardLayer;
     if (this.activeVoiceLayer) return null;
     if (!this.screenOn) this.wake("sidebar");
-    if (extensionPlatform()?.openAssistant("text-entry")) return null;
+    if (currentExtensionPlatform()?.openAssistant("text-entry")) return null;
     const assistantLayer = this.assistantLayer;
     const assistantSession = this.assistantSession;
     let targets: VoiceSendTarget[];
@@ -1427,7 +1478,7 @@ class Shell {
   }
 
   private resolveAssistantConfiguration(): AssistantBackendConfig | null {
-    const fallback = this.resolveBaseAssistantConfiguration(), provider = extensionPlatform()?.feature("assistant");
+    const fallback = this.resolveBaseAssistantConfiguration(), provider = currentExtensionPlatform()?.feature("assistant");
     return provider ? { kind: "extension", component: provider.component, generation: provider.generation, fallback } : fallback;
   }
   private resolveBaseAssistantConfiguration(): AssistantBackendConfig | null {

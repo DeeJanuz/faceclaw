@@ -9,10 +9,12 @@ import { acceptExternalNotificationReplyResult, clearExternalNotifications, conf
 import { refineHostDictation } from "../../native/anthropic";
 import { anthropicApiKeySetting } from "../../ui/dashboard-settings";
 import * as frameTimings from "../../native/frame-timings";
+import type { IconName } from "../../graphics/icons";
 
 declare const com: any;
 export type InstalledApk = { component: string; name: string; connected: boolean };
 export const externalAppId = (component: string): string => `apk:${component}`;
+export const externalAppIcon = (component: string): IconName => component.startsWith("com.faceclaw.t3/") ? "t3" : "package";
 function manager(): any { return global.isAndroid ? com.faceclaw.app.FaceclawExternalApps.get(Utils.android.getApplicationContext()) : null; }
 export function installedExternalApps(): InstalledApk[] { try { return JSON.parse(String(manager()?.installedJson() ?? "[]")); } catch { return []; } }
 export function showExternalAppSettings(): void { manager()?.showManager(Application.android.foregroundActivity ?? Application.android.startActivity); }
@@ -118,7 +120,7 @@ export class ExternalAppPlatform {
     const id = externalAppId(component), surfaceId = `window:${id}`, heightMode = this.heightMode(component);
     const state: WindowState = { window: null!, ready: false, serial: 0, visible: false, frame: null, rendering: false, target, lastInput: 0 };
     const window: ShellWindow = {
-      appId: id, windowId: id, title: app.name, surfaceId, closeable: true, heightMode, drawIcon: windowIcon("package", app.name.slice(0, 1)),
+      appId: id, windowId: id, title: app.name, surfaceId, closeable: true, heightMode, drawIcon: windowIcon(externalAppIcon(component), app.name.slice(0, 1)),
       close: () => { state.ready = false; state.frame = null; this.cancelOwnedWork(state); this.hostStateSnapshots.delete(component); this.send(component, "close"); this.windows.delete(component); this.options.removeSurface(surfaceId); },
       hasAppMenu: () => state.menuAvailable === true,
       claimsLongPress: () => state.claimsActive === true && state.policy?.gestureClaims.includes("long-press") === true,

@@ -1,4 +1,4 @@
-import { installedExternalApps, externalAppId } from "../external/platform";
+import { installedExternalApps, externalAppId, externalAppIcon } from "../external/platform";
 import { shell } from "../../ui/shell/shell";
 import { type AppDefinition } from "../app-definition";
 import { createLauncherWindow, LAUNCHER_SURFACE_ID, LAUNCHER_WINDOW_ID } from "./launcher-app";
@@ -24,7 +24,7 @@ const launcherApp: AppDefinition = {
           requestRender: () => shell.foregroundWindow()?.requestRender(),
         },
         apps: () => [
-          ...installedExternalApps().map((app) => ({ appId: externalAppId(app.component), label: app.name, icon: "package" as const })),
+          ...installedExternalApps().map((app) => ({ appId: externalAppId(app.component), label: app.name, icon: externalAppIcon(app.component) })),
           ...ctx.apps
             .filter((app) => app.showInLauncher !== false)
             .map((app) => ({

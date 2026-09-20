@@ -17,6 +17,14 @@ function setup() {
   setLocked: value => locked = value, setScreen: value => screenOn = value, setOverlayAllowed: value => overlayAllowed = value, setForeground: value => foreground = value, advance: value => now += value };
 }
 
+test('external T3 package uses the T3 icon while other APKs retain the package icon', () => {
+ const module = { exports: {} };
+ vm.runInNewContext(ts.transpileModule(fs.readFileSync('app/apps/external/platform.ts', 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS } }).outputText,
+  { module, exports: module.exports, require: () => ({}), global: { isAndroid: false } });
+ assert.equal(module.exports.externalAppIcon('com.faceclaw.t3/com.faceclaw.t3.FaceclawExternalAppService'), 't3');
+ assert.equal(module.exports.externalAppIcon('com.faceclaw.signal/com.faceclaw.signal.ExternalAppService'), 'package');
+});
+
 test('system menu uses only the requesting foreground window and a single fresh gesture', () => {
  const h = setup(); h.request('own-app', { windowId: 'foreign-window', action: 'close' });
  assert.deepEqual(h.opened, ['own-window']); h.request(); assert.equal(h.opened.length, 1);

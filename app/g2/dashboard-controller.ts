@@ -2,7 +2,7 @@ import { configureAppMenuPresenter } from "../ui/window-menu";
 import { ExtensionLayer } from "../ui/shell/extension-layer";
 import { weatherBridge } from "../native/weather";
 import { onEffectiveExtensionsChanged, windowLayoutPolicy, navigationPolicy } from "../ui/extension-settings";
-import { ExternalAppPlatform, externalAppId, installedExternalApps } from "../apps/external/platform";
+import { ExternalAppPlatform, externalAppId, externalAppIcon, installedExternalApps } from "../apps/external/platform";
 import { Application, ImageSource } from "@nativescript/core";
 import { EvenAIStatus, EvenAIStatusName, EventSourceType, EventSourceTypeName, OsEventTypeList, OsEventTypeName, WatchGestureType, WatchGestureTypeName } from "./events";
 import { isValidMacAddress, loadDeviceAddresses } from "./device-addresses";
@@ -409,7 +409,7 @@ class DashboardController {
       extensions: {
         apps: () => [
           ...LAUNCHABLE_APPS.map(app => ({ appId: app.appId, title: app.title, icon: app.icon })),
-          ...installedExternalApps().map(app => ({ appId: externalAppId(app.component), title: app.name, icon: "package" })),
+          ...installedExternalApps().map(app => ({ appId: externalAppId(app.component), title: app.name, icon: externalAppIcon(app.component) })),
           ...getInstalledEvenHubApps().map(app => ({ appId: installedEvenHubAppId(app.packageId), title: app.name, icon: "package", uninstallable: true })),
         ],
         launchApp: appId => { this.closeExtensionSurface("ui.app-menu"); void this.launchApp(appId); },

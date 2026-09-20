@@ -136,6 +136,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     private long lastFaceclawWakeLeaseQueuedAtMs;
     private int faceclawWakeControlGeneration;
     private int faceclawWakeControlSentCount;
+    private int faceclawWakeReadyGeneration;
     private long lastFaceclawFramebufferLeaseQueuedAtMs;
     private int faceclawFramebufferControlGeneration;
     private int faceclawFramebufferControlSentCount;
@@ -156,6 +157,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     private long lastSessionReadyAtMs;
     private long lastEvenAppConflictAtMs;
     private int consecutiveAckTimeouts;
+    private final SessionRecoveryPolicy sessionRecovery = new SessionRecoveryPolicy();
     private int lastAudioControlAckMagic = 0;
     private int audioControlGeneration;
 
@@ -538,29 +540,11 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
      */
     public boolean awaitEvenHubSessionReady(int timeoutMs) {
         long deadline = SystemClock.elapsedRealtime() + Math.max(0, timeoutMs);
-        int readyGeneration = 0;
-        synchronized (lock) {
-            while (running && sessionReady) {
-                boolean frameReady = false;
-                synchronized (desiredTilesLock) {
-                    frameReady = !desiredFingerprint.isEmpty()
-                        && desiredFingerprint.equals(displayedFingerprint);
-                }
-                if (!shutdownRequested && fixedLayoutCreated && frameReady) {
-                    if (faceclawWakePendingNonce >= 0) {
-                        readyGeneration = enqueueFaceclawWakeControlLocked(
-                            BleProtocol.FACECLAW_WAKE_OP_READY,
-                            faceclawWakePendingNonce,
-                            true
-                        );
-                        faceclawWakePendingNonce = -1;
-                    }
-                    break;
-                }
+        while (running && sessionReady) {
+            if (isEvenHubSessionReady()) return true;
+            synchronized (lock) {
                 long remaining = deadline - SystemClock.elapsedRealtime();
-                if (remaining <= 0) {
-                    return false;
-                }
+                if (remaining <= 0) return false;
                 try {
                     lock.wait(Math.min(remaining, 100));
                 } catch (InterruptedException e) {
@@ -568,17 +552,57 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                     return false;
                 }
             }
-            if (!running || !sessionReady) {
+        }
+        return false;
+    }
+
+    /** Session preparation excludes the first visible frame by design. */
+    public boolean isEvenHubSessionPrepared() {
+        synchronized (lock) {
+            return running && sessionReady && !chargingMode && !shutdownRequested
+                && sessionRecovery.layoutCreateAllowed() && fixedLayoutCreated;
+        }
+    }
+
+    /**
+     * Non-blocking visible-frame readiness query. The first successful query
+     * also queues deferred-wake READY; callers poll until both arm writes have
+     * left the host, without holding the NativeScript thread in a Java wait.
+     */
+    public boolean isEvenHubSessionReady() {
+        boolean interruptWorker = false;
+        boolean ready = true;
+        synchronized (lock) {
+            if (!running || !sessionReady || chargingMode || shutdownRequested
+                    || !sessionRecovery.layoutCreateAllowed() || !fixedLayoutCreated) {
                 return false;
             }
-        }
-        if (readyGeneration != 0) {
-            interruptibleSleep.interrupt();
-            if (!waitForFaceclawWakeControlDelivery(readyGeneration, FACECLAW_WAKE_CONTROL_WAIT_MS)) {
-                logLine("wake READY delivery not confirmed before fallback deadline");
+            boolean frameReady;
+            synchronized (desiredTilesLock) {
+                frameReady = !desiredFingerprint.isEmpty()
+                    && desiredFingerprint.equals(displayedFingerprint);
+            }
+            if (!frameReady) return false;
+            if (faceclawWakePendingNonce >= 0 && faceclawWakeReadyGeneration == 0) {
+                faceclawWakeReadyGeneration = enqueueFaceclawWakeControlLocked(
+                    BleProtocol.FACECLAW_WAKE_OP_READY,
+                    faceclawWakePendingNonce,
+                    true
+                );
+                faceclawWakePendingNonce = -1;
+                interruptWorker = true;
+            }
+            if (faceclawWakeReadyGeneration != 0) {
+                if (faceclawWakeControlGeneration == faceclawWakeReadyGeneration
+                        && faceclawWakeControlSentCount < 2) {
+                    ready = false;
+                } else {
+                    faceclawWakeReadyGeneration = 0;
+                }
             }
         }
-        return true;
+        if (interruptWorker) interruptibleSleep.interrupt();
+        return ready;
     }
 
     /**
@@ -1514,7 +1538,16 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 return false;
             }
             if (!shutdownRequested) {
+                if (!sessionRecovery.layoutCreateAllowed()) {
+                    logLine("join EvenHub firmware-exit recovery phase="
+                        + sessionRecovery.phaseName() + " generation=" + sessionRecovery.generation());
+                }
                 return true;
+            }
+            if (!sessionRecovery.layoutCreateAllowed()) {
+                logLine("skip suspended EvenHub resume; firmware-exit recovery phase="
+                    + sessionRecovery.phaseName() + " generation=" + sessionRecovery.generation());
+                return false;
             }
             if (faceclawWakePendingNonce >= 0
                     && hasPendingOrInflightKindLocked("wake-lease-control")) {
@@ -1549,6 +1582,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 return false;
             }
             shutdownRequested = false;
+            sessionRecovery.resetForNewSession();
             fixedLayoutCreated = false;
             startupProbePending = false;
             audioCaptureActive = false;
@@ -1577,6 +1611,8 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 return true;
             }
             shutdownRequested = true;
+            sessionRecovery.resetForNewSession();
+            faceclawWakeReadyGeneration = 0;
             // Magic values wrap, so an ACK from a much older suspend must not
             // satisfy this request after enough sleep/wake cycles.
             lastShutdownAckMagic = 0;
@@ -1741,6 +1777,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             : null;
         boolean emitWearState = false;
         G2Event event = null;
+        String exitTransportFailure = null;
         synchronized (lock) {
             lastIncomingAtMs = SystemClock.elapsedRealtime();
             if (decodedWearState >= 0 && decodedWearState != wearState) {
@@ -1851,18 +1888,52 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                     }
                     if ("sys-event".equals(event.kind)) {
                         if (event.eventType == BleProtocol.EVENT_FOREGROUND_EXIT || event.eventType == BleProtocol.EVENT_ABNORMAL_EXIT || event.eventType == BleProtocol.EVENT_SYSTEM_EXIT) {
+                            long exitAtMs = SystemClock.elapsedRealtime();
                             if (shutdownRequested) {
-                                lastShutdownExitAtMs = SystemClock.elapsedRealtime();
+                                lastShutdownExitAtMs = exitAtMs;
+                                sessionRecovery.resetForNewSession();
+                                fixedLayoutCreated = false;
+                                displayedFingerprint = "";
+                                clearAllMessagesLocked("expected firmware exit event");
+                                logLine("expected firmware exit type=" + event.eventType
+                                    + " reason=" + event.systemExitReasonCode
+                                    + " generation=" + sessionRecovery.generation());
+                            } else {
+                                SessionRecoveryPolicy.ExitAction action = sessionRecovery.onUnexpectedExit(
+                                    exitAtMs,
+                                    event.eventType
+                                );
+                                logLine("unexpected firmware exit type=" + event.eventType
+                                    + " source=" + event.eventSource
+                                    + " reason=" + event.systemExitReasonCode
+                                    + " action=" + action.name().toLowerCase(Locale.US)
+                                    + " phase=" + sessionRecovery.phaseName()
+                                    + " generation=" + sessionRecovery.generation()
+                                    + " attempt=" + sessionRecovery.attempts());
+                                if (action == SessionRecoveryPolicy.ExitAction.START_RELAUNCH) {
+                                    fixedLayoutCreated = false;
+                                    startupProbePending = false;
+                                    displayedFingerprint = "";
+                                    faceclawWakeReadyGeneration = 0;
+                                    clearAllMessagesPreservingWakeLeaseLocked("unexpected firmware exit event");
+                                } else if (action == SessionRecoveryPolicy.ExitAction.RECONNECT) {
+                                    fixedLayoutCreated = false;
+                                    startupProbePending = false;
+                                    displayedFingerprint = "";
+                                    clearAllMessagesLocked("firmware exit during recovery");
+                                    exitTransportFailure = "firmware exited during session recovery";
+                                }
                             }
-                            fixedLayoutCreated = false;
-                            displayedFingerprint = "";
-                            clearAllMessagesLocked("firmware exit event");
                         }
                     }
                 }
             }
         }
-        interruptibleSleep.interrupt();
+        if (exitTransportFailure != null) {
+            handleTransportFailure(exitTransportFailure);
+        } else {
+            interruptibleSleep.interrupt();
+        }
         if (emitWearState) {
             logLine(decodedWearState > 0 ? "wear state ON_HEAD" : "wear state OFF_HEAD");
             emitWearState(decodedWearState > 0);
@@ -1950,6 +2021,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             }
             if (!connected) {
                 sessionReady = false;
+                sessionRecovery.resetForNewSession();
                 fixedLayoutCreated = false;
                 startupProbePending = false;
                 chargingMode = false;
@@ -1958,6 +2030,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 audioPacketListener = null;
                 clearAllMessagesLocked("connection lost");
                 displayedFingerprint = "";
+                faceclawWakeReadyGeneration = 0;
                 if (!reconnectHalted) {
                     reconnectAfterMs = SystemClock.elapsedRealtime() + ConnectionOptions.RECONNECT_DELAY_MS;
                 }
@@ -1990,6 +2063,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 // lifecycle, even if the previous connection dropped while
                 // its page was intentionally suspended.
                 shutdownRequested = false;
+                sessionRecovery.resetForNewSession();
                 fixedLayoutCreated = false;
                 clearAllMessagesLocked("session ready");
                 displayedFingerprint = "";
@@ -2006,6 +2080,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 audioControlGeneration++;
                 audioCaptureActive = false;
                 faceclawWakePendingNonce = -1;
+                faceclawWakeReadyGeneration = 0;
                 cfwCleanupDelivered = false;
                 lastCfwCleanupAckMagic = 0;
                 lastFaceclawWakeLeaseQueuedAtMs = 0;
@@ -2257,7 +2332,61 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         }
     }
 
+    private void recoverEvenHubSessionAfterFirmwareExit(int recoveryGeneration) {
+        logLine("firmware-exit relaunch start generation=" + recoveryGeneration);
+        try {
+            sendPrelude(true);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            synchronized (lock) {
+                if (!running || !sessionReady) return;
+            }
+            handleTransportFailure("firmware-exit relaunch interrupted");
+            return;
+        } catch (Throwable t) {
+            logLine("firmware-exit relaunch failed generation=" + recoveryGeneration
+                + " error=" + safeMessage(t));
+            synchronized (lock) {
+                if (!running || !sessionReady) return;
+            }
+            handleTransportFailure("firmware-exit relaunch failed");
+            return;
+        }
+
+        boolean completed;
+        synchronized (lock) {
+            completed = running && sessionReady && !chargingMode
+                && sessionRecovery.completeRelaunch(recoveryGeneration);
+            if (completed) {
+                shutdownRequested = false;
+                fixedLayoutCreated = false;
+                startupProbePending = false;
+                audioCaptureActive = false;
+                displayedFingerprint = "";
+                imageRetryAfterMs = 0;
+                lastHeartbeatSentAtMs = 0;
+                lastHeartbeatAckedAtMs = 0;
+                logLine("firmware-exit relaunch ready for layout phase="
+                    + sessionRecovery.phaseName() + " generation=" + recoveryGeneration);
+            }
+        }
+        if (!completed) {
+            synchronized (lock) {
+                if (!running || !sessionReady) return;
+            }
+            handleTransportFailure("firmware-exit relaunch superseded");
+        }
+    }
+
     private long driveSession() {
+        int recoveryGeneration;
+        synchronized (lock) {
+            recoveryGeneration = sessionRecovery.claimRelaunch();
+        }
+        if (recoveryGeneration != 0) {
+            recoverEvenHubSessionAfterFirmwareExit(recoveryGeneration);
+            return 0;
+        }
         //logDebug("driveSession called (pendingMessages.size=" + pendingMessages.size() + " inFlightMessages.size=" + inFlightMessages.size() + ")");
         while (true) {
             OutboundMessage messageToWrite = null;
@@ -2284,6 +2413,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 }
                 if (faceclawWakeLeaseEnabled
                         && sessionReady
+                        && faceclawWakeReadyGeneration == 0
                         && now - lastFaceclawWakeLeaseQueuedAtMs >= FACECLAW_WAKE_LEASE_RENEW_MS
                         && !hasPendingOrInflightKindLocked("wake-lease-control")) {
                     enqueueFaceclawWakeControlLocked(
@@ -2332,6 +2462,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 } else {
                     if (messageToPrewrite == null
                             && !shutdownRequested
+                            && sessionRecovery.layoutCreateAllowed()
                             && !fixedLayoutCreated
                             && pendingMessages.isEmpty()
                             && inFlightMessages.isEmpty()) {
@@ -2749,14 +2880,26 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         // New session/container: re-assert the firmware-debug-flags overlay once
         // the layout is ready (the mode-7 send is gated on this having reset).
         firmwareDebugFlagsLastSent = -1;
+        final int layoutGeneration = sessionRecovery.generation();
         OutboundMessage message = messageBuilder.createLayout(DASHBOARD_TILE);
         message.onAck = () -> {
+            if (layoutGeneration != sessionRecovery.generation()
+                    || !sessionRecovery.layoutCreateAllowed()) {
+                logLine("ignore retired create-layout ack generation=" + layoutGeneration
+                    + " current=" + sessionRecovery.generation());
+                return;
+            }
             startupProbePending = false;
             clearMessagesOfKindLocked("startup-text-probe");
             fixedLayoutCreated = true;
             displayedFingerprint = "";
         };
         message.onTimeout = () -> {
+            if (layoutGeneration != sessionRecovery.generation()) {
+                logLine("ignore retired create-layout timeout generation=" + layoutGeneration
+                    + " current=" + sessionRecovery.generation());
+                return;
+            }
             if (startupProbePending) {
                 logLine("create layout timed out while startup text probe is pending");
                 if (hasPendingOrInflightKindLocked("startup-text-probe")) {
@@ -2773,8 +2916,15 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     private void enqueueStartupProbeLocked() {
         enqueueCreateLayoutLocked();
 
+        final int probeGeneration = sessionRecovery.generation();
         OutboundMessage message = messageBuilder.startupTextProbe();
         message.onAck = () -> {
+            if (probeGeneration != sessionRecovery.generation()
+                    || !sessionRecovery.layoutCreateAllowed()) {
+                logLine("ignore retired startup-text-probe ack generation=" + probeGeneration
+                    + " current=" + sessionRecovery.generation());
+                return;
+            }
             startupProbePending = false;
             clearMessagesOfKindLocked("create-layout");
             fixedLayoutCreated = true;
@@ -2782,6 +2932,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             logLine("existing dashboard layout accepted text probe");
         };
         message.onTimeout = () -> {
+            if (probeGeneration != sessionRecovery.generation()) return;
             startupProbePending = false;
             if (hasPendingOrInflightKindLocked("create-layout")) {
                 return;
@@ -3087,9 +3238,15 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         int messageCount,
         boolean requestAck
     ) {
+        final int imageGeneration = sessionRecovery.generation();
         OutboundMessage message = messageBuilder.imageFragment(fragment, plan, requestAck, connectionOptions.sendImagesToLeft);
         message.setImageUpdatePosition(updateId, messageNumber, messageCount);
         message.onAck = () -> {
+            if (imageGeneration != sessionRecovery.generation()) {
+                logLine("ignore retired image ack generation=" + imageGeneration
+                    + " current=" + sessionRecovery.generation());
+                return;
+            }
             imageRetryAfterMs = 0;
             // Firmware >= 2.2.4.34 resets its heartbeat timer when it receives
             // image messages (not just heartbeats), so an acked image fragment
@@ -3114,10 +3271,14 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 }
                 if (!imageStillQueued) {
                     displayedFingerprint = fingerprint;
+                    if (sessionRecovery.completeFrame(imageGeneration)) {
+                        logLine("firmware-exit recovery complete generation=" + imageGeneration);
+                    }
                 }
             }
         };
         message.onTimeout = () -> {
+            if (imageGeneration != sessionRecovery.generation()) return;
             discardImageUpdateStatsLocked(message.imageUpdateId, "image ack timeout (will retry)");
             clearMessagesOfKindLocked("image");
             displayedFingerprint = "";
@@ -3232,6 +3393,8 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         }
         if (charging) {
             chargingMode = true;
+            sessionRecovery.resetForNewSession();
+            faceclawWakeReadyGeneration = 0;
             clearAllMessagesLocked("glasses charging");
             fixedLayoutCreated = false;
             startupProbePending = false;
@@ -3618,7 +3781,24 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 "cleared pending: " + reason
             );
         }
-        clearInFlightMessagesLocked(reason);
+        Iterator<OutboundMessage> inFlightIterator = inFlightMessages.iterator();
+        while (inFlightIterator.hasNext()) {
+            OutboundMessage message = inFlightIterator.next();
+            if ("wake-lease-control".equals(message.kind)) {
+                continue;
+            }
+            inFlightIterator.remove();
+            discardImageUpdateStatsLocked(
+                message.imageUpdateId,
+                "inflight messages cleared: " + reason
+            );
+            magicPool.release(
+                message.sid,
+                message.magic,
+                message.label,
+                "cleared inflight: " + reason
+            );
+        }
         lastEnqueuedPacked = new byte[0];
         lastEnqueuedFingerprint = "";
         textureCache.reset();
@@ -3705,6 +3885,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         synchronized (lock) {
             reconnectHalted = true;
             sessionReady = false;
+            sessionRecovery.resetForNewSession();
             fixedLayoutCreated = false;
             startupProbePending = false;
             shutdownRequested = false;
@@ -3712,6 +3893,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             imageRetryAfterMs = 0;
             displayedFingerprint = "";
             faceclawWakePendingNonce = -1;
+            faceclawWakeReadyGeneration = 0;
             lastFaceclawWakeLeaseQueuedAtMs = 0;
             faceclawWakeControlSentCount = 0;
             clearAllMessagesLocked("arm not paired: " + address);
@@ -3738,6 +3920,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         synchronized (lock) {
             maybeEmitEvenAppConflictLocked(reason);
             sessionReady = false;
+            sessionRecovery.resetForNewSession();
             fixedLayoutCreated = false;
             startupProbePending = false;
             shutdownRequested = false;
@@ -3745,6 +3928,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             imageRetryAfterMs = 0;
             displayedFingerprint = "";
             faceclawWakePendingNonce = -1;
+            faceclawWakeReadyGeneration = 0;
             lastFaceclawWakeLeaseQueuedAtMs = 0;
             faceclawWakeControlSentCount = 0;
             clearAllMessagesLocked("transport failure: " + reason);
@@ -3760,6 +3944,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
 
     private void resetSessionStateLocked() {
         sessionReady = false;
+        sessionRecovery.resetForNewSession();
         shutdownRequested = false;
         fixedLayoutCreated = false;
         chargingMode = false;
@@ -3792,6 +3977,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         faceclawWakePendingNonce = -1;
         lastFaceclawWakeLeaseQueuedAtMs = 0;
         faceclawWakeControlSentCount = 0;
+        faceclawWakeReadyGeneration = 0;
         cfwCleanupDelivered = false;
         lastCfwCleanupAckMagic = 0;
         wearState = -1;

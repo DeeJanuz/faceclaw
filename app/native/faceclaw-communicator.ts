@@ -646,6 +646,26 @@ export class FaceclawCommunicatorBridge {
     return this.enqueueJavaCall(() => Boolean(this.communicator.resumeEvenHubSession()));
   }
 
+  private async pollEvenHubReadiness(operation: () => boolean, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + Math.round(nonNegativeNumber(timeoutMs));
+    do {
+      if (this.closed) return false;
+      if (await this.enqueueJavaCall(operation)) return true;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return false;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(25, remaining)));
+    } while (!this.closed);
+    return false;
+  }
+
+  /** Wait for transport, task and layout readiness without requiring a frame. */
+  async awaitEvenHubSessionPrepared(timeoutMs: number): Promise<boolean> {
+    return this.pollEvenHubReadiness(
+      () => Boolean(this.communicator.isEvenHubSessionPrepared()),
+      timeoutMs,
+    );
+  }
+
   /**
    * Own CFW's fail-open stock-wake policy while Faceclaw handles wakewords or
    * suspends EvenHub with the screen off. Returns after both arm writes complete.
@@ -661,8 +681,9 @@ export class FaceclawCommunicatorBridge {
    * are visible. CFW's deferred-dashboard READY is emitted from this barrier.
    */
   async awaitEvenHubSessionReady(timeoutMs: number): Promise<boolean> {
-    return this.enqueueJavaCall(() =>
-      Boolean(this.communicator.awaitEvenHubSessionReady(Math.round(nonNegativeNumber(timeoutMs)))),
+    return this.pollEvenHubReadiness(
+      () => Boolean(this.communicator.isEvenHubSessionReady()),
+      timeoutMs,
     );
   }
 

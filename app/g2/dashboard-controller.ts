@@ -270,7 +270,9 @@ class DashboardController {
   private evenHubSessionSuspended = false;
   private evenHubResumePromise: Promise<boolean> | null = null;
   private notificationResumePromise: Promise<boolean> | null = null;
+  private notificationResumeWake: ExtensionLayer | null = null;
   private notificationSessionReady = false;
+  private displayWakeGeneration = 0;
   private faceclawWakeLeaseSupported = false;
   private faceclawWakeLeaseState: boolean | null = null;
   private wearNotifySupported = false;
@@ -622,6 +624,7 @@ class DashboardController {
   }
 
   private handleScreenStateChanged(on: boolean): void {
+    this.displayWakeGeneration++;
     if (on) {
       this.cancelEvenHubSuspendTimer();
       void this.ensureEvenHubSessionActive().catch((error) => {
@@ -631,6 +634,8 @@ class DashboardController {
     }
 
     const communicator = this.communicator;
+    this.notificationResumePromise = null;
+    this.notificationResumeWake = null;
     this.notificationSessionReady = false;
     if (communicator) {
       // Blanking is a compositor-level flag so worker-window surfaces go dark
@@ -764,28 +769,43 @@ class DashboardController {
     // G2 power and EvenHub session while the compositor remains blank. The
     // normal barrier below unblanks only after the first valid preview frame.
     if (this.pendingNotificationWake) {
-      if (this.notificationResumePromise) return this.notificationResumePromise;
+      const notificationWake = this.pendingNotificationWake;
+      if (this.notificationResumePromise && this.notificationResumeWake === notificationWake) {
+        return this.notificationResumePromise;
+      }
       const notificationCommunicator = this.communicator;
       if (!notificationCommunicator) return Promise.resolve(Boolean(this.previewTarget));
       if (this.phase === "charging" || this.phase === "disconnected") return Promise.resolve(false);
+      const wakeGeneration = this.displayWakeGeneration;
+      const isCurrentNotificationWake = () => this.communicator === notificationCommunicator
+        && this.pendingNotificationWake === notificationWake
+        && this.displayWakeGeneration === wakeGeneration
+        && this.phase !== "charging" && this.phase !== "disconnected"
+        && shell.isScreenOn() && !this.glassesLocked;
       const notificationOperation = (async () => {
         await frameTimings.spanAsync(frameId, "wake:screen-on", () => notificationCommunicator.setG2ScreenOn(true));
+        if (!isCurrentNotificationWake()) return false;
         const resumed = await frameTimings.spanAsync(frameId, "wake:resume-session", () =>
           notificationCommunicator.resumeEvenHubSession(),
         );
-        if (!resumed) return false;
-        const ready = await frameTimings.spanAsync(frameId, "wake:await-ready", () =>
-          notificationCommunicator.awaitEvenHubSessionReady(EVENHUB_WAKE_READY_TIMEOUT_MS),
+        if (!resumed || !isCurrentNotificationWake()) return false;
+        const ready = await frameTimings.spanAsync(frameId, "wake:await-session", () =>
+          notificationCommunicator.awaitEvenHubSessionPrepared(EVENHUB_WAKE_READY_TIMEOUT_MS),
         );
-        if (ready && this.communicator === notificationCommunicator) {
+        if (ready && isCurrentNotificationWake()) {
           this.notificationSessionReady = true;
           this.evenHubSessionSuspended = false;
+          return true;
         }
-        return ready;
+        return false;
       })();
       this.notificationResumePromise = notificationOperation;
+      this.notificationResumeWake = notificationWake;
       const clearNotificationOperation = () => {
-        if (this.notificationResumePromise === notificationOperation) this.notificationResumePromise = null;
+        if (this.notificationResumePromise === notificationOperation) {
+          this.notificationResumePromise = null;
+          this.notificationResumeWake = null;
+        }
       };
       void notificationOperation.then(clearNotificationOperation, clearNotificationOperation);
       return notificationOperation;
@@ -805,6 +825,11 @@ class DashboardController {
     if (this.phase === "charging" || this.phase === "disconnected") {
       return Promise.resolve(false);
     }
+    const wakeGeneration = this.displayWakeGeneration;
+    const isCurrentWake = () => this.communicator === communicator
+      && this.displayWakeGeneration === wakeGeneration
+      && this.phase !== "charging" && this.phase !== "disconnected"
+      && shell.isScreenOn() && !this.glassesLocked;
 
     const notificationSessionReady = this.notificationSessionReady;
     const notificationResume = this.notificationResumePromise;
@@ -813,24 +838,26 @@ class DashboardController {
       if (notificationResume) resumed = await notificationResume;
       if (!resumed) {
         await frameTimings.spanAsync(frameId, "wake:screen-on", () => communicator.setG2ScreenOn(true));
+        if (!isCurrentWake()) return false;
         resumed = await frameTimings.spanAsync(frameId, "wake:resume-session", () =>
           communicator.resumeEvenHubSession(),
         );
       }
-      if (!resumed) {
+      if (!resumed || !isCurrentWake()) {
         return false;
       }
       // Resume first: setScreenBlanked(false) then recomposites retained state
       // as the desired first frame for the fresh layout.
       await frameTimings.spanAsync(frameId, "wake:unblank", () => communicator.setScreenBlanked(false));
+      if (!isCurrentWake()) return false;
       const ready = await frameTimings.spanAsync(frameId, "wake:await-ready", () =>
         communicator.awaitEvenHubSessionReady(EVENHUB_WAKE_READY_TIMEOUT_MS),
       );
-      if (ready && this.communicator === communicator) {
+      if (ready && isCurrentWake()) {
         this.evenHubSessionSuspended = false;
       }
       this.notificationSessionReady = false;
-      return ready;
+      return ready && isCurrentWake();
     })();
     this.evenHubResumePromise = operation;
     const clearOperation = () => {
@@ -1424,6 +1451,7 @@ class DashboardController {
     this.lockSurfaceConfigured = false;
     this.evenHubResumePromise = null;
     this.notificationResumePromise = null;
+    this.notificationResumeWake = null;
     this.notificationSessionReady = false;
     this.connectRunning = true;
 
@@ -1706,6 +1734,7 @@ class DashboardController {
         this.faceclawWakeLeaseState = null;
         this.evenHubResumePromise = null;
         this.notificationResumePromise = null;
+        this.notificationResumeWake = null;
         this.notificationSessionReady = false;
         this.clearDashboardTimer();
         stopForegroundNotification();
@@ -1854,6 +1883,7 @@ class DashboardController {
     this.evenHubSessionSuspended = false;
     this.evenHubResumePromise = null;
     this.notificationResumePromise = null;
+    this.notificationResumeWake = null;
     this.notificationSessionReady = false;
 
     // The recording's frame store lives in the communicator, so save what has

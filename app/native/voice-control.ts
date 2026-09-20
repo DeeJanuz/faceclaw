@@ -496,6 +496,7 @@ export class FaceclawVoiceControlBridge {
   }
 
   private completeNativeStop(): void {
+    console.info(`[VoiceCapture] native stop acknowledged queuedCapture=${Boolean(this.pendingCaptureOptions)} queuedRaw=${Boolean(this.pendingRawCommunicator)}`);
     this.nativeStopPending = false;
     this.started = false;
     const cloudStop = this.pendingCloudStop;

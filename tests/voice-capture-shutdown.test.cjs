@@ -86,6 +86,15 @@ voiceModule._compile(compiled, sourcePath);
 Module._load = originalLoad;
 const { FaceclawVoiceControlBridge } = voiceModule.exports;
 
+test('Android stop completion is an abstract NativeScript proxy callback', () => {
+  const listenerSource = fs.readFileSync(
+    'App_Resources/Android/src/main/java/com/faceclaw/app/FaceclawVoiceControllerListener.java',
+    'utf8',
+  );
+  assert.match(listenerSource, /\bvoid\s+onCaptureStopped\s*\(\s*\)\s*;/);
+  assert.doesNotMatch(listenerSource, /\bdefault\s+void\s+onCaptureStopped\s*\(/);
+});
+
 const options = {
   communicator: {},
   provider: 'onboard',

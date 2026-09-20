@@ -46,5 +46,9 @@ public interface FaceclawVoiceControllerListener {
      * All accepted PCM, verification, and final local transcript events have
      * been posted to the main thread. Cloud clients may now finalize.
      */
-    default void onCaptureStopped() {}
+    // This must remain abstract. NativeScript only forwards interface methods
+    // implemented by the JavaScript listener proxy; a Java default method can
+    // absorb this callback as a no-op and leave the bridge permanently waiting
+    // for the previous capture to stop.
+    void onCaptureStopped();
 }

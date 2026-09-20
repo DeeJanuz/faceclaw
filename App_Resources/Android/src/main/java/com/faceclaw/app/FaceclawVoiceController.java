@@ -1185,6 +1185,7 @@ public class FaceclawVoiceController {
     private void emitCaptureStopped() {
         FaceclawVoiceControllerListener currentListener = listener;
         if (currentListener == null) return;
+        Log.i(TAG, "Capture worker stopped; notifying bridge");
         mainHandler.post(currentListener::onCaptureStopped);
     }
 

@@ -14,7 +14,13 @@ import type { IconName } from "../../graphics/icons";
 declare const com: any;
 export type InstalledApk = { component: string; name: string; connected: boolean };
 export const externalAppId = (component: string): string => `apk:${component}`;
-export const externalAppIcon = (component: string): IconName => component.startsWith("com.faceclaw.t3/") ? "t3" : "package";
+export const externalAppIcon = (component: string): IconName => {
+  const separator = component.indexOf("/");
+  const packageName = (separator >= 0 ? component.slice(0, separator) : component).trim();
+  if (packageName === "com.faceclaw.t3") return "t3";
+  if (packageName === "com.faceclaw.signal") return "message";
+  return "package";
+};
 function manager(): any { return global.isAndroid ? com.faceclaw.app.FaceclawExternalApps.get(Utils.android.getApplicationContext()) : null; }
 export function installedExternalApps(): InstalledApk[] { try { return JSON.parse(String(manager()?.installedJson() ?? "[]")); } catch { return []; } }
 export function showExternalAppSettings(): void { manager()?.showManager(Application.android.foregroundActivity ?? Application.android.startActivity); }

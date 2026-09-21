@@ -1,7 +1,9 @@
 /**
  * Blocks app worker: a falling-blocks game. One singleton window holds the
  * whole game; a gravity interval drives piece descent while the window is
- * foreground and the screen is on (losing either auto-pauses).
+ * foreground, the screen is on, and the window holds input focus (losing any
+ * of them auto-pauses: backgrounding, screen-off, the system menu or a
+ * notification modal opening over the game, focus going to the sidebar).
  *
  * Controls (in play): scroll moves the piece, click rotates, long-press hard
  * drops, double-click pauses. Watch swipes are spatial: left/right move,
@@ -15,8 +17,10 @@ import { prepareFrameDraws } from "../../graphics/glyph-wire";
 import { getFont } from "../../graphics/bdffont";
 import { getDefaultSmallFont } from "../../graphics/ui-fonts";
 import * as frameTimings from "../../native/frame-timings";
+import { playWorkerBuzzerSequence } from "../../native/worker-buzzer";
 import { getActiveDisplay } from "../../native/active-display";
 import { buildSoundSequencePayload, type Step } from "../../ui/sound-effects";
+import { loadSoundEnabled, saveSoundEnabled } from "../../ui/sound-setting";
 import { type MenuItem } from "../../ui/menu";
 import { WindowMenu, hasSharedAppActions } from "../../ui/window-menu";
 import type { WorkerAppMessage, WorkerAppReply } from "../../ui/shell/worker-window";
@@ -30,7 +34,6 @@ import {
 } from "../../ui/gestures";
 
 declare const global: any;
-declare const com: any;
 
 const largeFont = getFont("terminus32");
 const mediumFont = getFont("terminus24");
@@ -43,11 +46,16 @@ const BOARD_X = 60;
 const BOARD_Y = 10;
 const PANEL_X = 230;
 
-/** Gravity starts here and speeds up with score (see dropIntervalMs). */
-const BASE_DROP_MS = 1200;
-const MIN_DROP_MS = 200;
-/** Every this many points, gravity gets one 12% step faster. */
-const SPEED_STEP_SCORE = 300;
+/**
+ * Gravity starts here and speeds up with score (see dropIntervalMs). Slow
+ * by desktop standards: the glasses round trip is ~250 ms, so a piece must
+ * hang around long enough to be steered through it.
+ */
+const BASE_DROP_MS = 1500;
+const MIN_DROP_MS = 350;
+/** Every this many points, gravity gets one SPEED_STEP_FACTOR step faster. */
+const SPEED_STEP_SCORE = 500;
+const SPEED_STEP_FACTOR = 0.92;
 /** Points per cleared-line count (index = simultaneous lines), times level. */
 const LINE_SCORES = [0, 100, 300, 500, 800];
 const HARD_DROP_POINTS_PER_ROW = 2;
@@ -201,7 +209,7 @@ global.onmessage = (event: { data: WorkerAppMessage }) => {
         lines: 0,
         tickTimer: null,
         tickIntervalMs: BASE_DROP_MS,
-        soundOn: true,
+        soundOn: loadSoundEnabled("blocks"),
         lastSubmittedFingerprint: "",
       };
       windows.set(message.windowId, window);
@@ -248,6 +256,20 @@ global.onmessage = (event: { data: WorkerAppMessage }) => {
       if (window.foreground) renderAndSubmit(window, 0);
       break;
     }
+    case "input-focus": {
+      const window = windows.get(message.windowId);
+      if (!window) break;
+      // Anything that takes input away from the game (the system menu, a
+      // notification modal, the voice dialog, focus back to the sidebar)
+      // pauses it: the player can't steer a piece they aren't in control of.
+      if (!message.focused && window.phase === "playing") {
+        window.phase = "paused";
+        updateTickTimer(window);
+        // Still on screen under a shell overlay, so show the pause.
+        if (window.foreground) renderAndSubmit(window, 0);
+      }
+      break;
+    }
     case "screen":
       screenOn = message.on;
       for (const window of windows.values()) {
@@ -273,16 +295,13 @@ function inferForeground(window: BlocksWindow, focused: boolean): void {
 
 /**
  * Fire a buzzer effect. Non-blocking: the firmware's sequencer plays the
- * steps on its own timer, and the Java call is safe from the worker thread
- * (same path as frame submission). Effects never exceed one message, so no
- * phrase pacing is needed.
+ * steps on its own timer; the platform bridge routes it from the worker.
+ * Effects never exceed one message, so no phrase pacing is needed.
  */
 function playSfx(window: BlocksWindow, steps: Step[]): void {
   if (!window.soundOn || steps.length === 0) return;
   try {
-    const communicator = com.faceclaw.app.FaceclawBleCommunicator.getActive();
-    if (!communicator) return;
-    communicator.playBuzzerSequence(buildSoundSequencePayload(steps).buffer);
+    playWorkerBuzzerSequence(buildSoundSequencePayload(steps));
   } catch (error) {
     console.warn(`blocks sfx failed: ${error}`);
   }
@@ -303,6 +322,7 @@ function windowMenuItems(window: BlocksWindow): MenuItem[] {
       onSelect: (ctx) => {
         ctx.stack.pop();
         window.soundOn = !window.soundOn;
+        saveSoundEnabled("blocks", window.soundOn);
         if (window.soundOn) playSfx(window, SFX_RESUME);
       },
     },
@@ -553,7 +573,7 @@ function level(window: BlocksWindow): number {
 
 function dropIntervalMs(window: BlocksWindow): number {
   const steps = Math.floor(window.score / SPEED_STEP_SCORE);
-  return Math.max(MIN_DROP_MS, Math.round(BASE_DROP_MS * Math.pow(0.88, steps)));
+  return Math.max(MIN_DROP_MS, Math.round(BASE_DROP_MS * Math.pow(SPEED_STEP_FACTOR, steps)));
 }
 
 /** Keep the gravity interval running exactly when the game is live and visible. */

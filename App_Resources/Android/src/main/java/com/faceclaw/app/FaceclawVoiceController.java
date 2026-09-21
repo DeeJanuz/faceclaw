@@ -13,6 +13,7 @@ import com.k2fsa.sherpa.onnx.OfflineRecognizer;
 import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig;
 import com.k2fsa.sherpa.onnx.OfflineRecognizerResult;
 import com.k2fsa.sherpa.onnx.OfflineStream;
+import com.k2fsa.sherpa.onnx.OfflineWhisperModelConfig;
 
 import java.io.File;
 import java.nio.charset.StandardCharsets;
@@ -59,11 +60,42 @@ public class FaceclawVoiceController {
             "decoder_model_merged.ort",
             "tokens.txt"
     };
+    // Second on-device model: sherpa-onnx's offline Whisper backend (base.en,
+    // int8-quantized -- see the model-choice note in asr-model.ts). Directory
+    // shared with the TS-side download flow, same convention as ASR_MODEL_DIR.
+    //
+    // On every call, sherpa-onnx (offline-recognizer-whisper-impl.h, v1.13.0)
+    // runs Whisper's encoder over the whole buffer plus 1000 frames (~10s) of
+    // zero tail padding, capped at 30s. Re-decoding on Moonshine's
+    // TRANSCRIPT_DECODE_INTERVAL_MS live-partial cadence would repeat that
+    // encode, growing with the utterance, roughly 1.4x/second while the user is
+    // still speaking, so onboardModelKind gates that loop off for Whisper --
+    // see processRecognizer(). Whisper is also known to hallucinate text on
+    // near-silent input; recognizeTranscriptSegment() gates that too.
+    private static final String ASR_WHISPER_MODEL_DIR = "sherpa-onnx-whisper-base-en-int8";
+    private static final String[] ASR_WHISPER_MODEL_FILES = {
+            "base.en-encoder.int8.onnx",
+            "base.en-decoder.int8.onnx",
+            "base.en-tokens.txt"
+    };
+    // Below this peak amplitude (pre-normalization, of a full-scale +/-1.0f
+    // buffer) a segment is treated as silence and never reaches the Whisper
+    // recognizer at all, rather than risking a hallucinated non-answer. Picked
+    // conservatively low (well under typical mic noise floor already seen in
+    // this pipeline's normalization target) -- UNTESTED on real hardware, tune
+    // against real glasses captures rather than trusting this number.
+    private static final float WHISPER_SILENCE_PEAK_THRESHOLD = 0.01f;
 
     private enum VoiceInputMode {
-        ONBOARD,  // on-phone Moonshine transcription
+        ONBOARD,  // on-phone transcription (Moonshine or Whisper; see onboardModelKind)
         CLOUD_BACKUP, // Bridge STT with concurrent local fallback; PCM stays memory-only.
         CLOUD     // decode locally, emit PCM for a cloud recognizer on the TS side
+    }
+
+    /** Which on-device model ONBOARD mode uses. Set via setOnboardModelKind() before start(). */
+    private enum OnboardModelKind {
+        MOONSHINE,
+        WHISPER
     }
 
     private final Context appContext;
@@ -87,6 +119,7 @@ public class FaceclawVoiceController {
     private volatile boolean usePhoneMic;
     private boolean activePhoneMic;
     private VoiceInputMode mode = VoiceInputMode.CLOUD;
+    private volatile OnboardModelKind onboardModelKind = OnboardModelKind.MOONSHINE;
     private OfflineRecognizer recognizer;
     private FaceclawLc3Decoder lc3Decoder;
     private final float[] transcriptSamples = new float[TRANSCRIPT_SEGMENT_MAX_SAMPLES];
@@ -98,7 +131,7 @@ public class FaceclawVoiceController {
     private String lastTranscript = "";
     private volatile boolean saveRecordings;
     private volatile boolean endpointing;
-    private final EndpointDetector endpointDetector = new EndpointDetector();
+    private final VoiceEndpointDetector endpointDetector = new VoiceEndpointDetector();
     private java.io.ByteArrayOutputStream recordingPcm;
     // Speaker verification against the enrolled wearer voice-print ("my voice
     // only" command gating). Configured before start(); the utterance PCM is
@@ -149,6 +182,17 @@ public class FaceclawVoiceController {
     /** When true, the decoded mic PCM for each session is saved as a WAV. */
     public void setSaveRecordings(boolean saveRecordings) {
         this.saveRecordings = saveRecordings;
+    }
+
+    /**
+     * Which on-device model {@link #start}("onboard") should load: "whisper"
+     * selects the second on-device model (sherpa-onnx offline Whisper); any
+     * other value (including null/absent) keeps the existing Moonshine model,
+     * so callers that never call this see unchanged behavior. Must be set
+     * before {@link #start}; has no effect in CLOUD mode.
+     */
+    public void setOnboardModelKind(String kind) {
+        this.onboardModelKind = "whisper".equals(kind) ? OnboardModelKind.WHISPER : OnboardModelKind.MOONSHINE;
     }
 
     /**
@@ -214,17 +258,22 @@ public class FaceclawVoiceController {
         }
     }
 
-    public boolean hasOnboardModel() { return findAsrModelDir() != null; }
+    public boolean hasOnboardModel() { return findAsrModelDir(onboardModelKind) != null; }
 
     public void start(String requestedMode) {
+        start(requestedMode, 0);
+    }
+
+    public void start(String requestedMode, int captureId) {
         synchronized (lock) {
             if (started) {
                 emitStatus("Voice control is already listening.");
+                emitStopped(captureId);
                 return;
             }
             if (!usePhoneMic && (communicator == null || !communicator.isSessionReady())) {
                 emitStatus("Voice control needs an active G2 connection.");
-                emitCaptureStopped();
+                emitStopped(captureId);
                 return;
             }
             mode = parseMode(requestedMode);
@@ -233,7 +282,7 @@ public class FaceclawVoiceController {
             abortRequested = false;
             started = true;
             audioStarted = false;
-            workerThread = new Thread(this::runLoop, "FaceclawVoiceController");
+            workerThread = new Thread(() -> runLoop(captureId), "FaceclawVoiceController");
             workerThread.start();
         }
     }
@@ -305,13 +354,14 @@ public class FaceclawVoiceController {
         return VoiceInputMode.ONBOARD;
     }
 
-    private void runLoop() {
+    private void runLoop(int captureId) {
         try {
             deleteLegacyKwsFiles();
             if (stopRequested) return;
             VoiceInputMode currentMode = mode;
+            OnboardModelKind currentOnboardKind = onboardModelKind;
             if (currentMode != VoiceInputMode.CLOUD) {
-                File modelDir = findAsrModelDir();
+                File modelDir = findAsrModelDir(currentOnboardKind);
                 if (modelDir == null) {
                     if (currentMode == VoiceInputMode.ONBOARD) {
                         emitStatus("Voice model not downloaded (see Settings > Voice).");
@@ -322,7 +372,7 @@ public class FaceclawVoiceController {
                     emitStatus("Using cloud transcription without on-device backup.");
                 } else {
                     emitStatus("Loading transcription model...");
-                    recognizer = new OfflineRecognizer(buildRecognizerConfig(modelDir));
+                    recognizer = new OfflineRecognizer(buildRecognizerConfig(modelDir, currentOnboardKind));
                 }
                 resetTranscriptState();
                 lastTranscript = "";
@@ -396,7 +446,7 @@ public class FaceclawVoiceController {
                 audioStarted = false;
                 workerThread = null;
             }
-            emitCaptureStopped();
+            emitStopped(captureId);
         }
     }
 
@@ -463,32 +513,48 @@ public class FaceclawVoiceController {
         return b.array();
     }
 
-    private OfflineRecognizerConfig buildRecognizerConfig(File modelDir) {
+    private OfflineRecognizerConfig buildRecognizerConfig(File modelDir, OnboardModelKind kind) {
+        OfflineModelConfig.Builder modelConfig = OfflineModelConfig.builder()
+                .setNumThreads(1);
+        if (kind == OnboardModelKind.WHISPER) {
+            modelConfig
+                    .setWhisper(OfflineWhisperModelConfig.builder()
+                            .setEncoder(new File(modelDir, "base.en-encoder.int8.onnx").getAbsolutePath())
+                            .setDecoder(new File(modelDir, "base.en-decoder.int8.onnx").getAbsolutePath())
+                            .setLanguage("en")
+                            .setTask("transcribe")
+                            .build())
+                    .setTokens(new File(modelDir, "base.en-tokens.txt").getAbsolutePath());
+        } else {
+            modelConfig
+                    .setMoonshine(OfflineMoonshineModelConfig.builder()
+                            .setEncoder(new File(modelDir, "encoder_model.ort").getAbsolutePath())
+                            .setMergedDecoder(new File(modelDir, "decoder_model_merged.ort").getAbsolutePath())
+                            .build())
+                    .setTokens(new File(modelDir, "tokens.txt").getAbsolutePath());
+        }
         return OfflineRecognizerConfig.builder()
                 .setFeatureConfig(FeatureConfig.builder()
                         .setSampleRate(SAMPLE_RATE)
                         .setFeatureDim(FEATURE_DIM)
                         .build())
-                .setModelConfig(OfflineModelConfig.builder()
-                        .setMoonshine(OfflineMoonshineModelConfig.builder()
-                                .setEncoder(new File(modelDir, "encoder_model.ort").getAbsolutePath())
-                                .setMergedDecoder(new File(modelDir, "decoder_model_merged.ort").getAbsolutePath())
-                                .build())
-                        .setTokens(new File(modelDir, "tokens.txt").getAbsolutePath())
-                        .setNumThreads(1)
-                        .build())
+                .setModelConfig(modelConfig.build())
                 .build();
     }
 
     /**
-     * The Moonshine model directory, populated by the download flow in
-     * asr-model.ts (releases before 0.5.0 copied the same files out of the
-     * APK, so upgraded installs are already complete). Null when any file is
+     * The on-device model directory for the given kind, populated by the
+     * download flow in asr-model.ts (releases before 0.5.0 copied the
+     * Moonshine files out of the APK directly, so upgraded installs are
+     * already complete for that model). Null when any expected file is
      * missing, i.e. the model still needs to be downloaded.
      */
-    private File findAsrModelDir() {
-        File modelDir = new File(appContext.getFilesDir(), ASR_ROOT + File.separator + ASR_MODEL_DIR);
-        for (String fileName : ASR_MODEL_FILES) {
+    private File findAsrModelDir(OnboardModelKind kind) {
+        boolean whisper = kind == OnboardModelKind.WHISPER;
+        String dirName = whisper ? ASR_WHISPER_MODEL_DIR : ASR_MODEL_DIR;
+        String[] fileNames = whisper ? ASR_WHISPER_MODEL_FILES : ASR_MODEL_FILES;
+        File modelDir = new File(appContext.getFilesDir(), ASR_ROOT + File.separator + dirName);
+        for (String fileName : fileNames) {
             File file = new File(modelDir, fileName);
             if (!file.exists() || file.length() == 0) {
                 return null;
@@ -696,6 +762,16 @@ public class FaceclawVoiceController {
 
     private void processRecognizer(float[] samples) {
         appendTranscriptSamples(samples);
+        // Each Whisper call re-encodes the whole buffer plus ~10s of tail
+        // padding (see the ASR_WHISPER_* comment above),
+        // so it skips the live-partial redecode Moonshine does on this
+        // interval and only decodes when a segment commits (8s buffer fill)
+        // or the utterance ends (decodeTranscript(true) in runLoop()). This
+        // means no live preview text while speaking in Whisper mode -- status
+        // stays "Listening..." until release. This is a deliberate tradeoff.
+        if (onboardModelKind == OnboardModelKind.WHISPER) {
+            return;
+        }
         long now = SystemClock.elapsedRealtime();
         if (transcriptSampleCount >= TRANSCRIPT_MIN_SAMPLES
                 && now - lastTranscriptDecodeAtMs >= TRANSCRIPT_DECODE_INTERVAL_MS) {
@@ -805,6 +881,14 @@ public class FaceclawVoiceController {
             return "";
         }
         float[] segment = Arrays.copyOf(transcriptSamples, sampleCount);
+        // Whisper hallucinates text on near-silent input (a known quirk of the
+        // model, not this pipeline); gate it on the PRE-normalization peak, since
+        // normalizePeak() below would otherwise amplify true silence right up to
+        // the target level and hide the very thing being checked for. Moonshine
+        // does not share this failure mode in practice, so it is left unchanged.
+        if (onboardModelKind == OnboardModelKind.WHISPER && peakAmplitude(segment) < WHISPER_SILENCE_PEAK_THRESHOLD) {
+            return "";
+        }
         normalizePeak(segment);
         OfflineStream offlineStream = currentRecognizer.createStream();
         try {
@@ -818,7 +902,7 @@ public class FaceclawVoiceController {
         }
     }
 
-    private static void normalizePeak(float[] samples) {
+    private static float peakAmplitude(float[] samples) {
         float peak = 0f;
         for (float s : samples) {
             float a = Math.abs(s);
@@ -826,6 +910,11 @@ public class FaceclawVoiceController {
                 peak = a;
             }
         }
+        return peak;
+    }
+
+    private static void normalizePeak(float[] samples) {
+        float peak = peakAmplitude(samples);
         if (peak <= 0f) {
             return;
         }
@@ -841,7 +930,7 @@ public class FaceclawVoiceController {
     private void logTranscriptDecode(boolean isFinal, int segmentSampleCount, String text) {
         double totalAudioSec =
                 (committedTranscriptSampleCount + transcriptSampleCount) / (double) SAMPLE_RATE;
-        Log.i(TAG, "Moonshine decode final=" + isFinal
+        Log.i(TAG, (onboardModelKind == OnboardModelKind.WHISPER ? "Whisper" : "Moonshine") + " decode final=" + isFinal
                 + " audioSec=" + String.format(java.util.Locale.US, "%.2f", totalAudioSec)
                 + " segmentAudioSec=" + String.format(java.util.Locale.US, "%.2f", segmentSampleCount / (double) SAMPLE_RATE)
                 + " textLen=" + text.length());
@@ -966,108 +1055,10 @@ public class FaceclawVoiceController {
         mainHandler.post(currentListener::onSpeechEnd);
     }
 
-    /**
-     * Decides when a hands-free utterance is over, so "Hey Even" capture can
-     * stop without a button release.
-     *
-     * Runs on the decoded 16 kHz PCM, so it works the same in every input mode
-     * (the cloud path never sees the samples on this side, and the onboard
-     * recognizer's own endpointing only covers ONBOARD).
-     *
-     * Timing is measured on the sample clock rather than the wall clock: BLE
-     * delivers mic packets in bursts, so elapsed real time badly overestimates
-     * how much audio has actually been heard.
-     *
-     * The threshold is relative to a noise floor measured over the first
-     * {@link #CALIBRATE_MS} of the session, which is roughly the interval where
-     * the user is reacting to the dialog appearing and not yet speaking.
-     */
-    private static final class EndpointDetector {
-        /** Audio used to estimate the room's noise floor. */
-        private static final int CALIBRATE_MS = 300;
-        /** Speech must exceed this multiple of the noise floor to count as onset. */
-        private static final double ONSET_FACTOR = 3.0;
-        /** Below this multiple of the noise floor counts as silence again. */
-        private static final double RELEASE_FACTOR = 1.8;
-        /** Absolute floor, so a silent room can't make the threshold ~0. */
-        private static final double MIN_RMS = 220.0;
-        /** Trailing silence that ends an utterance. */
-        private static final int SILENCE_MS = 900;
-        /** If the user never speaks, give up rather than record forever. */
-        private static final int LEAD_IN_MS = 6000;
-        /** Hard cap on a single utterance. */
-        private static final int MAX_UTTERANCE_MS = 30000;
-
-        private long totalSamples;
-        private double noiseAccum;
-        private int noisePackets;
-        private double threshold;
-        private boolean speechStarted;
-        private long silenceSamples;
-        private boolean fired;
-
-        void reset() {
-            totalSamples = 0;
-            noiseAccum = 0;
-            noisePackets = 0;
-            threshold = 0;
-            speechStarted = false;
-            silenceSamples = 0;
-            fired = false;
-        }
-
-        /** Returns true exactly once, on the packet that ends the utterance. */
-        boolean accept(short[] pcm, int count) {
-            if (fired || count <= 0) {
-                return false;
-            }
-            totalSamples += count;
-            long elapsedMs = totalSamples * 1000L / SAMPLE_RATE;
-
-            double sumSquares = 0;
-            for (int i = 0; i < count; i++) {
-                double s = pcm[i];
-                sumSquares += s * s;
-            }
-            double rms = Math.sqrt(sumSquares / count);
-
-            if (elapsedMs <= CALIBRATE_MS) {
-                noiseAccum += rms;
-                noisePackets++;
-                return false;
-            }
-            if (threshold == 0) {
-                double noiseFloor = noisePackets > 0 ? noiseAccum / noisePackets : 0;
-                threshold = Math.max(noiseFloor, MIN_RMS);
-            }
-
-            if (!speechStarted) {
-                if (rms >= threshold * ONSET_FACTOR) {
-                    speechStarted = true;
-                    silenceSamples = 0;
-                } else if (elapsedMs >= LEAD_IN_MS) {
-                    // Never heard anything; close the dialog rather than hang.
-                    fired = true;
-                    return true;
-                }
-                return false;
-            }
-
-            if (rms < threshold * RELEASE_FACTOR) {
-                silenceSamples += count;
-                if (silenceSamples * 1000L / SAMPLE_RATE >= SILENCE_MS) {
-                    fired = true;
-                    return true;
-                }
-            } else {
-                silenceSamples = 0;
-            }
-
-            if (elapsedMs >= MAX_UTTERANCE_MS) {
-                fired = true;
-                return true;
-            }
-            return false;
+    private void emitStopped(int captureId) {
+        FaceclawVoiceControllerListener currentListener = listener;
+        if (currentListener != null) {
+            mainHandler.post(() -> currentListener.onStopped(captureId));
         }
     }
 
@@ -1180,13 +1171,6 @@ public class FaceclawVoiceController {
         }
         Log.i(TAG, "Emit transcript final=" + isFinal + " textLen=" + (text == null ? 0 : text.trim().length()));
         mainHandler.post(() -> currentListener.onTranscript(text, isFinal));
-    }
-
-    private void emitCaptureStopped() {
-        FaceclawVoiceControllerListener currentListener = listener;
-        if (currentListener == null) return;
-        Log.i(TAG, "Capture worker stopped; notifying bridge");
-        mainHandler.post(currentListener::onCaptureStopped);
     }
 
     private static final class AudioPacket {

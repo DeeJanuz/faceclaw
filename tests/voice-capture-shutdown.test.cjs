@@ -41,6 +41,7 @@ class FakeController {
     this.stopCalls = 0;
     this.abortCalls = 0;
     this.capturing = false;
+    this.captureIds = [];
   }
   setListener(listener) { this.listener = listener; }
   setCommunicator() {}
@@ -49,13 +50,15 @@ class FakeController {
   setEndpointing() {}
   setNoiseSuppression() {}
   setBeamFilter() {}
+  setOnboardModelKind() {}
   clearSpeakerVerification() {}
   setSpeakerVerification() {}
   hasOnboardModel() { return true; }
   isCapturing() { return this.capturing; }
-  start(mode) { this.starts.push(mode); this.capturing = true; }
+  start(mode, captureId = 0) { this.starts.push(mode); this.captureIds.push(captureId); this.capturing = true; }
   stop() { this.stopCalls++; this.capturing = false; }
   abort() { this.abortCalls++; this.capturing = false; }
+  finish() { this.listener.onStopped(this.captureIds.at(-1) ?? 0); }
 }
 
 global.isAndroid = true;
@@ -86,13 +89,13 @@ voiceModule._compile(compiled, sourcePath);
 Module._load = originalLoad;
 const { FaceclawVoiceControlBridge } = voiceModule.exports;
 
-test('Android stop completion is an abstract NativeScript proxy callback', () => {
+test('Android stop completion uses the Kotlin capture-id callback boundary', () => {
   const listenerSource = fs.readFileSync(
-    'App_Resources/Android/src/main/java/com/faceclaw/app/FaceclawVoiceControllerListener.java',
+    'native/kotlin/shared/src/commonMain/kotlin/com/faceclaw/app/callbacks/FaceclawVoiceControllerListener.kt',
     'utf8',
   );
-  assert.match(listenerSource, /\bvoid\s+onCaptureStopped\s*\(\s*\)\s*;/);
-  assert.doesNotMatch(listenerSource, /\bdefault\s+void\s+onCaptureStopped\s*\(/);
+  assert.match(listenerSource, /\bfun\s+onStopped\s*\(\s*captureId:\s*Int\s*\)/);
+  assert.doesNotMatch(listenerSource, /onCaptureStopped/);
 });
 
 const options = {
@@ -123,7 +126,7 @@ test('cloud finalization waits for native final PCM', () => {
 
   controller.listener.onPcm(Uint8Array.from([3, 4, 5, 6]));
   assert.deepEqual(events, ['pcm:2', 'pcm:4']);
-  controller.listener.onCaptureStopped();
+  controller.finish();
   assert.deepEqual(events, ['pcm:2', 'pcm:4', 'finish']);
 });
 
@@ -136,7 +139,7 @@ test('a replacement capture waits for the previous native worker', () => {
 
   assert.equal(controller.starts.length, 1);
   assert.equal(controller.stopCalls, 1);
-  controller.listener.onCaptureStopped();
+  controller.finish();
   assert.equal(controller.starts.length, 2);
 });
 
@@ -148,7 +151,7 @@ test('STT preemption waits for the raw worker to abort', () => {
 
   assert.deepEqual(controller.starts, ['cloud']);
   assert.equal(controller.abortCalls, 1);
-  controller.listener.onCaptureStopped();
+  controller.finish();
   assert.deepEqual(controller.starts, ['cloud', 'onboard']);
 });
 
@@ -159,7 +162,7 @@ test('a queued capture released before completion never starts', () => {
   bridge.stopPushToTalk();
   bridge.startPushToTalk(options);
   bridge.stopPushToTalk();
-  controller.listener.onCaptureStopped();
+  controller.finish();
   assert.equal(controller.starts.length, 1);
 });
 
@@ -175,6 +178,6 @@ test('an abort stops cloud work immediately and cannot restart stale capture', (
   bridge.stop();
   assert.equal(controller.abortCalls, 1);
   assert.equal(cloudStops, 1);
-  controller.listener.onCaptureStopped();
+  controller.finish();
   assert.equal(controller.starts.length, 1);
 });

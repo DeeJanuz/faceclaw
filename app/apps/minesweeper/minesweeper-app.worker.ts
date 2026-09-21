@@ -9,9 +9,13 @@
  * scroll moves along the row, click reveals (or chords a satisfied number),
  * long-press toggles a flag, double-click returns to row-select.
  * Watch swipes skip the two-layer scheme and move the cell cursor in four
- * directions; a watch double-click pauses directly.
+ * directions; a watch double-click pauses directly. Tap-then-hold opens the
+ * window menu in any phase, pausing a live game first.
  * Paused/won/lost: click resumes or starts a new game, double-click yields
- * focus, long-press opens the window menu.
+ * focus. Losing input focus mid-game (a shell overlay such as the system
+ * menu or a notification, focus to the sidebar) pauses, as does
+ * backgrounding or screen-off. The difficulty setting persists across
+ * launches.
  */
 import "@nativescript/core/globals";
 import { GrayImage } from "../../graphics/image";
@@ -19,11 +23,14 @@ import { flattenPlanesWithDraws, planesFingerprint, type Plane } from "../../gra
 import { prepareFrameDraws } from "../../graphics/glyph-wire";
 import { getFont } from "../../graphics/bdffont";
 import { getDefaultSmallFont } from "../../graphics/ui-fonts";
+import { getStringSetting, setStringSetting } from "../../native/settings-store";
 import * as frameTimings from "../../native/frame-timings";
+import { playWorkerBuzzerSequence } from "../../native/worker-buzzer";
 import { getActiveDisplay } from "../../native/active-display";
 import { buildSoundSequencePayload, type Step } from "../../ui/sound-effects";
+import { loadSoundEnabled, saveSoundEnabled } from "../../ui/sound-setting";
 import { type MenuItem } from "../../ui/menu";
-import { WindowMenu, hasSharedAppActions } from "../../ui/window-menu";
+import { WindowMenu } from "../../ui/window-menu";
 import type { WorkerAppMessage, WorkerAppReply } from "../../ui/shell/worker-window";
 import {
   directionalFallback,
@@ -37,7 +44,6 @@ import {
 import { clamp } from "../../util/numeric-util";
 
 declare const global: any;
-declare const com: any;
 
 const largeFont = getFont("terminus32");
 const mediumFont = getFont("terminus24");
@@ -55,6 +61,8 @@ const DIFFICULTIES = [
   { name: "Medium", mines: 20 },
   { name: "Hard", mines: 26 },
 ] as const;
+/** Persisted difficulty, stored by name so a reordering can't misfile it. */
+const DIFFICULTY_KEY = "minesweeper.difficulty";
 
 /** Number glyph shades by adjacent-mine count; higher counts read brighter. */
 const COUNT_SHADES = [0, 140, 170, 200, 220, 235, 245, 250, 250];
@@ -155,7 +163,7 @@ global.onmessage = (event: { data: WorkerAppMessage }) => {
         focused: false,
         menu: null,
         phase: "playing",
-        difficultyIndex: 0,
+        difficultyIndex: loadDifficultyIndex(),
         mines: new Uint8Array(COLS * ROWS),
         counts: new Uint8Array(COLS * ROWS),
         cellState: new Uint8Array(COLS * ROWS),
@@ -169,7 +177,7 @@ global.onmessage = (event: { data: WorkerAppMessage }) => {
         elapsedMs: 0,
         runningSinceMs: null,
         tickTimer: null,
-        soundOn: true,
+        soundOn: loadSoundEnabled("minesweeper"),
         lastSubmittedFingerprint: "",
       };
       windows.set(message.windowId, window);
@@ -215,6 +223,19 @@ global.onmessage = (event: { data: WorkerAppMessage }) => {
       if (window.foreground) renderAndSubmit(window, 0);
       break;
     }
+    case "input-focus": {
+      const window = windows.get(message.windowId);
+      if (!window) break;
+      // Anything that takes input away (the system menu, a notification
+      // modal, the voice dialog, focus back to the sidebar) pauses, so the
+      // clock stops and the board is hidden while the player can't act.
+      if (!message.focused && window.phase === "playing") {
+        window.phase = "paused";
+        syncClock(window);
+        if (window.foreground) renderAndSubmit(window, 0);
+      }
+      break;
+    }
     case "screen":
       screenOn = message.on;
       for (const window of windows.values()) {
@@ -237,22 +258,38 @@ function inferForeground(window: MinesweeperWindow, focused: boolean): void {
   syncClock(window);
 }
 
+function loadDifficultyIndex(): number {
+  try {
+    const name = getStringSetting(DIFFICULTY_KEY, "");
+    const index = DIFFICULTIES.findIndex((difficulty) => difficulty.name === name);
+    return index >= 0 ? index : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function saveDifficultyIndex(window: MinesweeperWindow): void {
+  try {
+    setStringSetting(DIFFICULTY_KEY, DIFFICULTIES[window.difficultyIndex]!.name);
+  } catch (error) {
+    console.warn(`minesweeper difficulty save failed: ${error}`);
+  }
+}
+
 /**
  * Fire a buzzer effect. Non-blocking: the firmware's sequencer plays the
- * steps on its own timer, and the Java call is safe from the worker thread.
+ * steps on its own timer; the platform bridge routes it from the worker.
  */
 function playSfx(window: MinesweeperWindow, steps: Step[]): void {
   if (!window.soundOn || steps.length === 0) return;
   try {
-    const communicator = com.faceclaw.app.FaceclawBleCommunicator.getActive();
-    if (!communicator) return;
-    communicator.playBuzzerSequence(buildSoundSequencePayload(steps).buffer);
+    playWorkerBuzzerSequence(buildSoundSequencePayload(steps));
   } catch (error) {
     console.warn(`minesweeper sfx failed: ${error}`);
   }
 }
 
-/** Game actions are also reachable through the tap-then-hold menu. */
+/** The window's context menu (game actions). Tap-then-hold reaches it in any phase; playing keeps long-press for flagging. */
 function windowMenuItems(window: MinesweeperWindow): MenuItem[] {
   const nextDifficulty = DIFFICULTIES[(window.difficultyIndex + 1) % DIFFICULTIES.length]!;
   return [
@@ -277,6 +314,7 @@ function windowMenuItems(window: MinesweeperWindow): MenuItem[] {
       onSelect: (ctx) => {
         ctx.stack.pop();
         window.difficultyIndex = (window.difficultyIndex + 1) % DIFFICULTIES.length;
+        saveDifficultyIndex(window);
         resetGame(window);
         playSfx(window, SFX_RESUME);
       },
@@ -286,6 +324,7 @@ function windowMenuItems(window: MinesweeperWindow): MenuItem[] {
       onSelect: (ctx) => {
         ctx.stack.pop();
         window.soundOn = !window.soundOn;
+        saveSoundEnabled("minesweeper", window.soundOn);
         if (window.soundOn) playSfx(window, SFX_RESUME);
       },
     },
@@ -298,7 +337,7 @@ function windowMenu(window: MinesweeperWindow): WindowMenu {
       windowId: window.windowId,
       post,
       title: () => window.title,
-      items: () => (window.phase === "playing" && !hasSharedAppActions() ? [] : windowMenuItems(window)),
+      items: () => windowMenuItems(window),
       claimsLongPress: () => window.phase === "playing",
       size: { width: window.viewportWidth, height: window.viewportHeight },
       paintBase: () => paintContent(window),
@@ -375,6 +414,11 @@ function handlePlayingInput(window: MinesweeperWindow, event: InputEvent, frameI
       toggleFlag(window);
       break;
     case "short-then-long-press":
+      // The menu's actions (new game, difficulty) all discard the board, and
+      // the clock must not run under it, so pause first; the board is hidden
+      // while paused, so the menu can't be used to study it off the clock.
+      window.phase = "paused";
+      syncClock(window);
       windowMenu(window).open();
       break;
     case "double-click":

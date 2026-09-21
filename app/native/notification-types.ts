@@ -2,7 +2,8 @@ export type AndroidNotificationAction = {
   index: number;
   title: string;
   enabled: boolean;
-  acceptsText: boolean;
+  /** Android RemoteInput capability; absent for platforms without inline replies. */
+  acceptsText?: boolean;
 };
 
 export type AndroidNotification = {
@@ -27,4 +28,7 @@ export type AndroidNotification = {
   postTime: number;
   when: number;
   actions: AndroidNotificationAction[];
+  dismissLabel?: string;
+  /** Full message size reported by iOS, even when the fetched text is bounded. */
+  messageSize?: number;
 };

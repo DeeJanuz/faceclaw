@@ -621,7 +621,7 @@ function rasterizeGlyph(
     // (integer), skipping only n == 0. Writing 16*level makes the composite
     // quantize (grayToNibble) back to exactly that level, so the
     // texture-cache planner's pixel checks — and the shadow after an
-    // on-glasses mode-14 draw — match this bake bit-for-bit.
+    // on-glasses mode-20 draw — match this bake bit-for-bit.
     const top4 = grayToNibble(value);
     for (let row = 0; row < glyph.bbxHeight; row++) {
       const rowStart = row * glyph.bbxWidth;

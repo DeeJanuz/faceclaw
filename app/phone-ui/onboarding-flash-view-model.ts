@@ -1,6 +1,7 @@
+import { finishOnboardingNavigation } from "./onboarding-navigation";
 import { Frame, Observable } from "@nativescript/core";
 
-import { ensureBlePermissions } from "../g2/android-permissions";
+import { ensureBlePermissions } from "../native/ble-permissions";
 import {
   isValidMacAddress,
   loadDeviceAddresses,
@@ -24,7 +25,7 @@ import { setBackgroundSessionRestoreRequested } from "../g2/background-session";
 import { setOnboardingCompleted, setPreviewOnlyMode } from "./onboarding-state";
 import { formatErrorMessage } from "../util/format-error";
 
-type FlashPhase = "intro" | "prompt" | "building" | "ready" | "flashing" | "flashed" | "error";
+type FlashPhase = "intro" | "prompt" | "building" | "flashing" | "flashed" | "error";
 
 export type FlashMode = "install" | "uninstall";
 
@@ -47,6 +48,9 @@ export class OnboardingFlashViewModel extends Observable {
   private addresses: { right: string; left: string } | null = null;
   private firmwarePath = "";
 
+  private disposed = false;
+  private promptGeneration = 0;
+
   private prompt: FlashPromptCommunicator | null = null;
   private promptUnsubscribers: Array<() => void> = [];
   private promptBattery: FlashPromptBattery | null = null;
@@ -54,7 +58,7 @@ export class OnboardingFlashViewModel extends Observable {
   private flasherUnsubscribers: Array<() => void> = [];
   private retryAction: () => void = () => this.beginPrompt();
 
-  constructor(options?: { mode?: FlashMode; fromOnboarding?: boolean }) {
+  constructor(options?: { mode?: FlashMode; fromOnboarding?: boolean; autoStart?: boolean }) {
     super();
     // The flash flow needs the glasses to itself: from here on the main
     // page must not auto-reconnect, until an install succeeds (below) or
@@ -70,13 +74,19 @@ export class OnboardingFlashViewModel extends Observable {
           "and reflashes the official firmware — removing Faceclaw's custom features."
         : "This connects to your glasses, asks for confirmation on the lens, checks the battery, then downloads, " +
           "verifies, and flashes Faceclaw's custom firmware.";
+    if (options?.autoStart) {
+      // Entered from a page that already explained what's about to happen
+      // (the onboarding firmware check), so the intro/"Connect & Confirm"
+      // step would be redundant: go straight to connecting.
+      void this.beginPrompt();
+    }
   }
 
   // Kept short to fit the glasses' ~50-column text grid.
   private get glassesWarning(): string {
     return this.mode === "uninstall"
       ? "Reinstalling the official firmware removes Faceclaw's custom features. Continue?"
-      : "Flashing custom firmware will void your warranty and carries some risk of bricking the glasses. Continue?";
+      : "Flashing custom firmware will void your warranty. Continue?";
   }
 
   private get noun(): string {
@@ -163,8 +173,6 @@ export class OnboardingFlashViewModel extends Observable {
     switch (this._phase) {
       case "intro":
         return "Connect & Confirm";
-      case "ready":
-        return "Flash Now";
       case "flashed":
         return "Finish";
       case "error":
@@ -178,8 +186,6 @@ export class OnboardingFlashViewModel extends Observable {
     switch (this._phase) {
       case "prompt":
         return "Cancel";
-      case "ready":
-        return "Not Now";
       default:
         return "Back";
     }
@@ -202,9 +208,6 @@ export class OnboardingFlashViewModel extends Observable {
     switch (this._phase) {
       case "intro":
         void this.beginPrompt();
-        return;
-      case "ready":
-        this.startFlashing();
         return;
       case "flashed":
         this.finish();
@@ -231,15 +234,17 @@ export class OnboardingFlashViewModel extends Observable {
   // --- prompt flow -----------------------------------------------------------
 
   /**
-   * Connect to both arms, authenticate (this is where any Android pairing
+   * Connect to both arms, authenticate (this is where any system pairing
    * prompts appear), show the Yes/No confirmation on the lens, then read the
    * battery. With `skipPrompt` (retrying after a low-battery refusal, when
    * the user has already confirmed) the on-glasses confirmation is skipped
    * and only the battery is re-checked.
    */
   private async beginPrompt(options?: { skipPrompt?: boolean }): Promise<void> {
+    if (this.disposed) return;
+    const generation = ++this.promptGeneration;
     const skipPrompt = Boolean(options?.skipPrompt);
-    if (!global.isAndroid) {
+    if (!global.isAndroid && !global.isIOS) {
       this.toError("Flashing is only available on Android.", () => this.beginPrompt(options));
       return;
     }
@@ -252,7 +257,9 @@ export class OnboardingFlashViewModel extends Observable {
 
     try {
       await ensureBlePermissions();
+      if (this.disposed || generation !== this.promptGeneration) return;
       const addresses = await this.resolveAddresses();
+      if (this.disposed || generation !== this.promptGeneration) return;
       if (!addresses) {
         this.busy = false;
         this.toError(
@@ -268,6 +275,7 @@ export class OnboardingFlashViewModel extends Observable {
         : "Connecting to your glasses. Watch the lens for a Yes/No prompt.";
       this.startCommunicator(addresses, skipPrompt);
     } catch (error) {
+      if (this.disposed || generation !== this.promptGeneration) return;
       this.busy = false;
       this.toError(this.formatError(error), () => this.beginPrompt(options));
     }
@@ -296,7 +304,7 @@ export class OnboardingFlashViewModel extends Observable {
         break;
       case "connected":
         this.status =
-          "Connected. Pairing with both lenses — if Android asks to pair, accept it (once per lens)." +
+          "Connected. Pairing with both lenses — if your phone asks to pair, accept it (once per lens)." +
           (skipPrompt ? "" : " Then watch the lens for the confirmation.");
         break;
       case "battery":
@@ -332,7 +340,7 @@ export class OnboardingFlashViewModel extends Observable {
     this.disposePrompt();
     if (!approved) {
       this.busy = false;
-      this.toError("You declined on the glasses. No firmware was written.", () => this.beginPrompt());
+      this.toError("You declined on the glasses. Firmware was not installed.", () => this.beginPrompt());
       return;
     }
     const lowBattery = this.describeLowBattery(this.promptBattery);
@@ -371,6 +379,7 @@ export class OnboardingFlashViewModel extends Observable {
   }
 
   private cancelPrompt(): void {
+    ++this.promptGeneration;
     this.status = "Cancelling...";
     try {
       this.prompt?.cancel();
@@ -393,17 +402,13 @@ export class OnboardingFlashViewModel extends Observable {
     try {
       const build = this.mode === "uninstall" ? buildStockFirmware : buildCustomFirmware;
       const result = await build((progress) => this.reportBuildProgress(progress));
+      if (this.disposed) return;
       this.firmwarePath = result.path;
-      this.busy = false;
-      this.setPhase("ready");
-      this.headline = "Firmware Ready";
-      this.status =
-        `The ${this.noun} is prepared and verified (${result.bytes.toLocaleString()} bytes).\n\n` +
-        "Tap Flash Now to write it to your glasses. Keep both lenses powered on and nearby — " +
-        "each lens takes a few minutes, and the glasses will reboot when each lens finishes. " +
-        "Do not close the app during flashing.";
-      this.appendLog(`saved to ${result.path}`);
+      this.appendLog(`${this.noun} prepared and verified (${result.bytes.toLocaleString()} bytes), saved to ${result.path}`);
+      // The user already said Yes on the lens; no second confirmation here.
+      this.startFlashing();
     } catch (error) {
+      if (this.disposed) return;
       this.busy = false;
       const message =
         error instanceof FirmwareBuildError ? error.message : this.formatError(error);
@@ -412,6 +417,7 @@ export class OnboardingFlashViewModel extends Observable {
   }
 
   private reportBuildProgress(progress: FirmwareProgress): void {
+    if (this.disposed) return;
     switch (progress.phase) {
       case "downloading":
         this.status = "Downloading the stock firmware from Even's CDN...";
@@ -439,6 +445,7 @@ export class OnboardingFlashViewModel extends Observable {
   // --- flashing flow ---------------------------------------------------------
 
   private startFlashing(): void {
+    if (this.disposed) return;
     if (!this.addresses || !this.firmwarePath) {
       this.toError("Missing glasses addresses or firmware; start over.", () => this.beginPrompt());
       return;
@@ -447,7 +454,9 @@ export class OnboardingFlashViewModel extends Observable {
     this.headline = "Flashing Firmware";
     this.busy = true;
     this.progress = 0;
-    this.status = "Starting. Do not close the app or power off the glasses.";
+    this.status =
+      "Starting. Keep both lenses powered on and nearby — each lens takes a few minutes, " +
+      "and the glasses will reboot when each lens finishes. Do not close the app during flashing.";
 
     this.disposeFlasher();
     const flasher = new FirmwareFlasher(this.addresses, this.firmwarePath);
@@ -544,10 +553,7 @@ export class OnboardingFlashViewModel extends Observable {
     }
     this.disposePrompt();
     this.disposeFlasher();
-    Frame.topmost()?.navigate({
-      moduleName: "phone-ui/main-page",
-      clearHistory: true,
-    });
+    finishOnboardingNavigation();
   }
 
   private leave(): void {
@@ -558,6 +564,7 @@ export class OnboardingFlashViewModel extends Observable {
       frame.goBack();
       return;
     }
+    if (!this.fromOnboarding) { finishOnboardingNavigation(); return; }
     frame?.navigate({
       moduleName: this.fromOnboarding ? "phone-ui/onboarding-page" : "phone-ui/main-page",
       clearHistory: true,
@@ -586,6 +593,11 @@ export class OnboardingFlashViewModel extends Observable {
   private appendLog(line: string): void {
     const stamp = new Date().toISOString().slice(11, 19);
     this.log = this._log ? `${this._log}\n[${stamp}] ${line}` : `[${stamp}] ${line}`;
+  }
+
+  dispose(): void {
+    this.disposed = true; ++this.promptGeneration;
+    this.discovery.stopScan(); this.disposePrompt(); this.disposeFlasher();
   }
 
   private disposePrompt(): void {

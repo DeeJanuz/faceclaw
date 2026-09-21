@@ -1,15 +1,8 @@
 declare const com: any;
 declare const global: any;
 
-export const COMPASS_CHANGED = 15;
-export const COMPASS_CALIBRATION_STARTED = 16;
-export const COMPASS_CALIBRATION_COMPLETE = 17;
-
-export type CompassEvent = {
-  command: number;
-  /** Magnetic heading in degrees, or -1 for calibration-only events. */
-  headingDegrees: number;
-};
+import { type CompassEvent } from "./compass-types";
+export * from "./compass-types";
 
 function activeCommunicator(): any {
   if (!global.isAndroid) return null;
@@ -41,8 +34,16 @@ export function addCompassListener(listener: (event: CompassEvent) => void): () 
   const active = activeCommunicator();
   if (!active) return () => {};
   const proxy = new com.faceclaw.app.FaceclawCompassListener({
-    onCompassEvent: (command: number, headingDegrees: number) => {
-      listener({ command: Number(command), headingDegrees: Number(headingDegrees) });
+    onCompassEvent: (command: number, headingDegrees: number, magneticAccuracy: number,
+      magneticAnomalies: number, orientationSource: number, diagnosticFlags: number, sampleTimeMs: number) => {
+      listener({
+        command: Number(command), headingDegrees: Number(headingDegrees),
+        diagnostics: diagnosticFlags >= 0 ? {
+          magneticAccuracy: Number(magneticAccuracy), magneticAnomalies: Number(magneticAnomalies),
+          orientationSource: Number(orientationSource), flags: Number(diagnosticFlags),
+          sampleTimeMs: Number(sampleTimeMs),
+        } : undefined,
+      });
     },
   });
   active.addCompassListener(proxy);

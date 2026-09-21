@@ -1,3 +1,4 @@
+import type { RingInput } from "../g2/ring-input";
 import { ImageSource, Utils } from "@nativescript/core";
 import * as frameTimings from "./frame-timings";
 
@@ -22,6 +23,8 @@ export type CommunicatorState = {
 export type HeadsetBatteryState = {
   battery: number;
   chargingStatus: number;
+  ringBattery?: number;
+  ringChargingStatus?: number;
 };
 
 export type FrameMetrics = {
@@ -30,11 +33,9 @@ export type FrameMetrics = {
   tileCount: number;
 };
 
-export type FirmwareInfo = {
-  leftVersion: string;
-  rightVersion: string;
-  capabilities: string;
-};
+import { type FirmwareInfo } from "../g2/firmware-compat";
+
+export type { FirmwareInfo };
 
 /**
  * Compositor surface configuration. Position/size are in screen pixels;
@@ -52,7 +53,7 @@ export type SurfaceOptions = {
   transparency: "opaque" | "color-key";
 };
 
-export type RawInputEvent =
+export type RawInputEvent = { ringInput?: RingInput } & (
   | {
       kind: "list-click";
       containerName: string;
@@ -113,7 +114,7 @@ export type RawInputEvent =
       eventSource: number;
       systemExitReasonCode: number;
       frameId: number;
-    };
+    });
 
 function nonNegativeNumber(value: number): number {
   const numeric = Number(value);
@@ -189,6 +190,7 @@ export class FaceclawCommunicatorBridge {
         eventSource: number,
         systemExitReasonCode: number,
         frameId: number,
+        ringTick: number, ringType: number, ringAux: number, ringSpeed: number,
       ) => {
         const event = {
           kind: String(kind) as RawInputEvent["kind"],
@@ -197,14 +199,18 @@ export class FaceclawCommunicatorBridge {
           eventSource: Number(eventSource),
           systemExitReasonCode: Number(systemExitReasonCode),
           frameId: Number(frameId),
+          ringInput: Number(ringTick) >= 0 ? { tick: Number(ringTick), type: Number(ringType),
+            aux: Number(ringAux), speed: Number(ringSpeed) } : undefined,
         };
         frameTimings.logFrame(event.frameId, "input event received on JS side");
         this.emitAsync(this.ringListeners, event);
       },
-      onBatteryState: (headsetBattery: number, headsetCharging: number) => {
+      onBatteryState: (headsetBattery: number, headsetCharging: number, ringBattery: number, ringCharging: number) => {
         const state = {
           battery: Number(headsetBattery),
           chargingStatus: Number(headsetCharging),
+          ringBattery: Number(ringBattery),
+          ringChargingStatus: Number(ringCharging),
         };
         this.emitAsync(this.batteryListeners, state);
       },
@@ -238,11 +244,11 @@ export class FaceclawCommunicatorBridge {
       onFrameFinished: (frameId: number, outcome: string) => {
         this.recordFrameFinished(Number(frameId), String(outcome));
       },
-      onFirmwareInfo: (leftVersion: string, rightVersion: string, capabilities: string) => {
-        const info = {
+      onFirmwareInfo: (leftVersion: string, rightVersion: string, extension: string) => {
+        const info: FirmwareInfo = {
           leftVersion: String(leftVersion),
           rightVersion: String(rightVersion),
-          capabilities: String(capabilities),
+          extension: String(extension),
         };
         this.emitAsync(this.firmwareInfoListeners, info);
       },

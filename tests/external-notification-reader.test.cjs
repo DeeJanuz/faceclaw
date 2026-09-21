@@ -17,6 +17,7 @@ function setup() {
  for (const node of ts.createSourceFile('source', fs.readFileSync('app/ui/notifications.ts', 'utf8'), ts.ScriptTarget.Latest).statements)
   if (ts.isImportDeclaration(node)) imports[node.moduleSpecifier.text] = {};
  imports['../native/external-notifications'] = store;
+ imports['~/util/numeric-util'] = { clamp: (value, min, max) => Math.max(min, Math.min(max, value)) };
  imports['./notification-routing'] = { routeNotificationOpen: () => false };
  imports['./shell/shell'] = { shell: { foregroundWindow: () => ({ windowId: focused }), isScreenOn: () => on, openReviewedVoiceInput: (...args) => reviews.push(args) } };
  imports['../native/notification-icons'] = { readActiveNotifications: (_max, includeExternal) => includeExternal ? store.externalNotifications() : [], replyToNotification: () => assert.fail('APK text reached RemoteInput'), invokeNotificationAction: () => assert.fail('APK reply reached native action') };
@@ -25,14 +26,14 @@ function setup() {
  layer.handleInput({ type: 'scroll-down' }, ctx); layer.handleInput({ type: 'scroll-down' }, ctx); layer.handleInput({ type: 'click' }, ctx);
  return { store, sent, reviews, layer, key, focus: () => { focused = 'other'; }, sleep: () => { on = false; } };
 }
-test('stock reader uses exact APK review and safe acknowledgement instead of RemoteInput', () => {
- const h = setup(); assert.equal(h.reviews.length, 1); assert.deepEqual(h.sent, []); assert.equal(h.reviews[0][1](), true);
+test('stock reader uses exact APK review and safe acknowledgement instead of RemoteInput', async () => {
+ const h = setup(); await Promise.resolve(); assert.equal(h.reviews.length, 1); assert.deepEqual(h.sent, []); assert.equal(h.reviews[0][1](), true);
  h.reviews[0][0].onSend('Exact reviewed text'); assert.equal(h.sent.length, 1); assert.equal(h.sent[0][1].text, 'Exact reviewed text'); assert.equal(h.layer.actionError, 'Reply submitted to app.');
  h.store.acceptExternalNotificationReplyResult('fixture.app/.Service', { id: '1', replyToken: 'token', status: 'unknown' }); assert.match(h.layer.actionError, /outcome unknown/);
  h.reviews[0][0].onSend('Again'); assert.equal(h.sent.length, 1);
 });
-test('stock reader refuses stale review after removal, expiry, navigation or sleep', () => {
+test('stock reader refuses stale review after removal, expiry, navigation or sleep', async () => {
  for (const change of [h => h.layer.onRemoved(), h => h.focus(), h => h.sleep(), h => h.store.removeExternalNotification('fixture.app/.Service', '1'), h => h.store.externalNotifications(Date.now() + 60001)]) {
-  const h = setup(); change(h); assert.equal(h.reviews[0][1](), false); h.reviews[0][0].onSend('Reviewed'); assert.deepEqual(h.sent, []);
+  const h = setup(); await Promise.resolve(); change(h); assert.equal(h.reviews[0][1](), false); h.reviews[0][0].onSend('Reviewed'); assert.deepEqual(h.sent, []);
  }
 });

@@ -2,7 +2,7 @@
 
 Prepared September 21, 2026 using `/home/deej/.codex/skills/planning/SKILL.md`.
 
-Status: ready for implementation handoff. Build prerequisites and device acceptance remain outstanding; they are explicit gates below. No blocking product decision remains under the chosen scope. **Planning complete does not authorize implementation.**
+Status: M01-M09 implemented and software-validated locally. M10's merge commit and final ancestry check are the remaining local steps. M11 device acceptance remains pending and was not authorized.
 
 ## Outcome and boundaries
 
@@ -47,7 +47,7 @@ Keep these invariants:
 | Recovery | Retain our generation-fenced `SessionRecoveryPolicy`, one in-place prelude/layout/frame relaunch, paired-exit coalescing, reconnect fallback, transport-owner isolation and nonblocking notification preparation. |
 | Navigation | Preserve `android-sdk/NAVIGATION_AND_WAKE.md` and approved provider precedence. Glanceboard remains disabled by default, as upstream already specifies; it is available through explicit settings. Lock and protected notification/capture flows win over Glanceboard. |
 | Input | Preserve SDK clients' existing gesture semantics. Raw ring press is available to upstream built-ins/diagnostics, not a second implicit click in APK windows. Forward compatible metadata on existing gestures without changing the AIDL schema. |
-| Voice and notifications | Keep accepted-audio drain, suppression sample preservation, `onCaptureStopped`, notification removal callbacks, arrival/read/reply ownership, composer confirmation and foreground-service restrictions. |
+| Voice and notifications | Keep accepted-audio drain, suppression sample preservation, capture-specific `onStopped(captureId)` delivery, notification removal callbacks, arrival/read/reply ownership, composer confirmation and foreground-service restrictions. |
 
 Firmware fingerprinting remains an opaque equality token. Update its input to include both reported base versions and the extension revision with unambiguous separators; clear it on unknown/disconnected state. Firmware-font shortcuts require the matching known bundled font identity, not merely the fact that a newer revision was accepted. Default to raster rendering when that identity is unverified.
 
@@ -135,7 +135,7 @@ Retain notification removal/catalog synchronization, content-free diagnostics, l
 
 Trace the affected Binder inputs, caller identity checks, grants, SharedMemory mappings, notification reply handles and capture callbacks before edits. Preserve all existing permission and expiry checks through callback migration. Confirm security invariants through the existing host boundary tests and `tests/host-voice-notification-security.test.cjs`; no broad security refactor.
 
-Completion: local SDK/extension/notification/composer/voice tests pass; migrated callbacks preserve local methods including `onNotificationRemoved` and `onCaptureStopped`; no authority checks or sample-drain behavior are dropped.
+Completion: local SDK/extension/notification/composer/voice tests pass; migrated callbacks preserve local methods including `onNotificationRemoved` and capture-specific `onStopped(captureId)`; no authority checks or sample-drain behavior are dropped.
 
 ### M08. Merge shell, features and input without changing client contracts
 
@@ -207,4 +207,19 @@ No implementation has started. The skill's boundary is: "This invocation authori
 
 > Implement `docs/UPSTREAM-MERGE-PLAN-20260921.md` through M10 in the existing Faceclaw checkout and branch. Read applicable project instructions and compare current state with the recorded baseline before editing. Reuse the discovery; investigate again only for drift, missing evidence or contradictions. Execute tasks in dependency order in the main thread, preserving local work and SDK contracts. Record completed task IDs, checks and meaningful deviations. Make small local adjustments within the plan; pause affected work and report evidence if architecture, public contracts, security assumptions or scope must change. Continue independent authorized work when safe. Do not push, install on my phone or flash glasses; report M11 as pending.
 
-Execution record: M01–M11 pending. Update this section during authorized implementation with completion evidence and outstanding gates. Do not mark blocked builds or device acceptance complete based on source review alone.
+## Execution record
+
+Implemented locally on September 21, 2026. M01-M09 are complete. M10 is ready for the local merge commit and final ancestry check. M11 remains device-pending; no phone install, firmware flash or glasses command was performed.
+
+- **M01:** Preserved the existing work in checkpoint commits `beb710c` (`fix: show Signal icon for external app`) and `9ebfe2d` (`docs: plan upstream reconciliation`). The original recorded HEAD remains reachable at `061905f`. The local build environment now uses Temurin JDK 21.0.12.1, Android SDK 35/36 at `/home/deej/.local/android-sdk`, Node 24.19.0, npm 11.17.0 and Gradle 8.14.3. Machine-local paths remain ignored.
+- **M02:** Started one no-commit merge of pinned upstream `313ccd86d9c99a230142521e4d11308b284b2d68` over local parent `9ebfe2d2fad9f4329baa1d16c0c833bc05bfbe74`, with shared base `9b70880a5b5a2a2ba32400ab1aff8842483a6ce2`. All conflict groups were reconciled individually; no whole-file ours/theirs resolution was used for the communicator, compositor, shell or controller.
+- **M03:** Adopted upstream's Kotlin/native preparation and migrated-source cleanup while keeping minSdk 27, the local SDK inclusion, AIDL, JNI preparation and arm64 host packaging. The SDK host-test module now compiles the production Kotlin callbacks and Android adapters without retaining duplicate Java implementations.
+- **M04:** Ported the fork's Gray8 and packed-frame paths, dirty-tile composition, retained overlap copies and repairs, draw identities, atlas lifetime, prefetch and hidden-surface clearing into shared Kotlin. Added production Kotlin regression coverage for retained copies, compositor damage/visibility, noise-suppressor tail flushing and BMP header correctness. Corrected the upstream BMP magic byte regression (`BM`, not `B\x04`).
+- **M05:** Combined upstream's bonded two-arm probe, MTU/PHY negotiation, SID `0xf0` CFW transport, ordered ACK/replay and 256 KiB texture protocol with the fork's closed-state guards, traffic counters, exactly-once SDK outcomes and render recovery. Firmware identity now includes length-delimited left base, right base and extension revisions; unknown identity clears the token. Firmware text remains raster-baked unless both arms report the known `2.3.0.24` base and a compatible custom extension.
+- **M06:** Preserved generation-fenced, bounded display-session recovery, notification preparation/reveal ordering and transport-owner isolation. This improves recovery from plugin task exits and lease/session loss. It does not establish a fix for a physical glasses reboot; that claim remains gated on M11 reproduction and hardware evidence.
+- **M07:** Preserved variable-length suppression output, final suppression drain, capture ownership, notification removal/catalog callbacks, reply confirmation and connected-device foreground-service restrictions while adopting upstream Whisper/Moonshine and iOS additions. The callback name changed from the plan's provisional `onCaptureStopped` to the shared Kotlin abstract method `onStopped(captureId)`, because that form survives the NativeScript/Kotlin bridge and preserves capture-specific completion.
+- **M08:** Reconciled launcher/external-app discovery, extension priorities, shell/navigation/wake policy, gameplay holds, raw ring filtering, Glanceboard and remote input. Existing APK authority, generation, expiry, protected capture, lock and destination-review checks remain in the execution paths. Unsupported experimental temple event IDs were not restored; supported ring and held-state tests replace that coverage.
+- **M09:** Software checks passed after `npm ci`: `npm test` (836 tests, 835 passed, 1 skipped), `npm run native:android`, `npm run test:kotlin`, `bash build.sh --no-hmr`, `android-sdk/gradlew build` (853 tasks), and `android-sdk/scripts/check-animation-examples.sh` (10 tests). The T3 client passed `npm run check` (278 tests) and `npm run build`. Signal passed its pinned and `-PfaceclawSdkSource=true` assemble/unit/lint/androidTest checks. Spotify passed pinned checks; its source check exposed a pre-existing circular Gradle build-directory provider in the sibling checkout, which was changed to the same concrete `rootProject.file("build/faceclaw-sdk")` isolation used by Signal, after which its source unit/assemble checks passed. iOS-facing Node tests passed, but native iOS/Kotlin compilation remains unverified because this runner is Linux.
+- **Artifacts:** Host debug APK `bb8ad1020b1578e1c0c0de9779166d822ed89991523fb07ea937d1c613ee644a`; SDK debug AAR `4ebb2164fd43cc787477e0a03e61ae5b3dc49b670f36a1bde609ae319cd4eb48`; SDK release AAR `63fe4fc49bd25046bb09b7fc04a68fcef70b44d9a1232339c17dd358c696212f` (SHA-256). Build logs are under `../output/upstream-merge-20260921/`.
+- **M10:** Merge commit SHA and final ancestry result will be appended immediately after creating the local commit. No push is authorized.
+- **M11:** Pending separate authorization and verified hardware. Detection/pairing behavior, animation throughput, forced task recovery and physical reboot behavior are software-reviewed but not device-validated.

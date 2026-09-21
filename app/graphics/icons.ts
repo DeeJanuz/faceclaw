@@ -1,12 +1,10 @@
 import { GrayImage } from "./image";
-
-declare const com: any;
-declare const global: any;
+import { rasterizeSvg } from "../native/svg-rasterizer";
 
 /**
  * Vector icons for window indicators (and anywhere else). SVGs are rendered
- * once to a correctly sized grayscale bitmap by the Java IconRenderer (a
- * small SVG subset: path/circle/rect/line/polyline) and cached here. To add
+ * once to a correctly sized grayscale bitmap by the platform rasterizer
+ * (Android IconRenderer or iOS SVGKit) and cached here. To add
  * an icon, drop its SVG source into ICON_SVGS — Lucide icons
  * (https://lucide.dev, stroked, 24px viewBox) work as-is; simple single-color
  * Noun Project glyphs also work.
@@ -18,6 +16,10 @@ const ICON_STROKE_WIDTH = 2;
 // Lucide icons (MIT/ISC licensed). Kept verbatim so they can be diffed
 // against upstream if an icon needs updating.
 export const ICON_SVGS = {
+  "message-circle":
+    '<svg viewBox="0 0 24 24" fill="none"><path d="M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.4 8.4 0 0 1 3.8-.9h.5a8.5 8.5 0 0 1 8 8z"/></svg>',
+  eye:
+    '<svg viewBox="0 0 24 24" fill="none"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></svg>',
   "layout-grid":
     '<svg viewBox="0 0 24 24" fill="none"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg>',
   timer:
@@ -32,6 +34,8 @@ export const ICON_SVGS = {
   // Not a Lucide icon: a ball above two angled flippers, for Pinball.
   pinball:
     '<svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="6" r="3"/><path d="M4 14l7 5"/><path d="M20 14l-7 5"/><circle cx="4" cy="14" r="1"/><circle cx="20" cy="14" r="1"/></svg>',
+  bird:
+    '<svg viewBox="0 0 24 24" fill="none"><path d="M16 7h.01"/><path d="M3.4 18H12a8 8 0 0 0 8-8V7a4 4 0 0 0-7.28-2.3L2 20"/><path d="m20 7 2 .5-2 .5"/><path d="M10 18v3"/><path d="M14 17.75V21"/><path d="M7 18a6 6 0 0 0 3.84-10.61"/></svg>',
   spade:
     '<svg viewBox="0 0 24 24" fill="none"><path d="M12 18v4"/><path d="M2 14.499a5.5 5.5 0 0 0 9.591 3.675.6.6 0 0 1 .818.001A5.5 5.5 0 0 0 22 14.5c0-2.29-1.5-4-3-5.5l-5.492-5.312a2 2 0 0 0-3-.02L5 8.999c-1.5 1.5-3 3.2-3 5.5"/></svg>',
   terminal:
@@ -93,9 +97,11 @@ export const ICON_SVGS = {
 } as const;
 
 export type IconName = keyof typeof ICON_SVGS;
+/** Idle prompt, or the visible/hidden phases of an activity cursor. */
+export type IconActivity = "idle" | "on" | "off";
 
-// The "_" element of the terminal icon, swapped out for a session glyph in
-// renderIconWithGlyph.
+// Prompt and session-marker elements replaced by renderIconWithGlyph.
+const TERMINAL_PROMPT = '<path d="m7 11 2-2-2-2"/>';
 const TERMINAL_UNDERSCORE = '<path d="M11 13h4"/>';
 
 /**
@@ -161,12 +167,23 @@ export function renderSvgIcon(cacheName: string, svg: string, size: number): Gra
 /**
  * Render an icon with a glyph character substituted in — currently only the
  * terminal icon, whose "_" becomes the glyph (">3" instead of ">_"). Falls
- * back to the plain icon for other names or unsupported characters.
+ * back to the plain marker for unsupported characters. Active terminal icons
+ * replace the prompt with a blinking cursor, leaving the marker in place.
  */
-export function renderIconWithGlyph(name: IconName, glyph: string, size: number): GrayImage | null {
-  const shape = name === "terminal" ? TERMINAL_GLYPH_SHAPES[glyph] : undefined;
-  if (!shape) return renderIcon(name, size);
-  return renderSvgCached(`${name}[${glyph}]`, ICON_SVGS.terminal.replace(TERMINAL_UNDERSCORE, shape), size);
+export function renderIconWithGlyph(name: IconName, glyph: string, size: number, activity: IconActivity = "idle"): GrayImage | null {
+  if (name !== "terminal") return renderIcon(name, size);
+  const shape = TERMINAL_GLYPH_SHAPES[glyph];
+  if (!shape && activity === "idle") return renderIcon(name, size);
+  let svg: string = ICON_SVGS.terminal;
+  if (shape) svg = svg.replace(TERMINAL_UNDERSCORE, shape);
+  if (activity !== "idle") {
+    // IconRenderer strokes all elements at width 2; the narrow rectangle
+    // therefore becomes a solid cursor without needing per-element fills.
+    svg = svg.replace(TERMINAL_PROMPT, activity === "on"
+      ? '<rect x="7.5" y="8" width="1" height="6"/>'
+      : "");
+  }
+  return renderSvgCached(`${name}[${shape ? glyph : ""}]:${activity}`, svg, size);
 }
 
 function renderSvgCached(cacheName: string, svg: string, size: number): GrayImage | null {
@@ -175,18 +192,10 @@ function renderSvgCached(cacheName: string, svg: string, size: number): GrayImag
   if (cached !== undefined) return cached;
 
   let icon: GrayImage | null = null;
-  if (global.isAndroid) {
-    try {
-      const bytes = com.faceclaw.app.IconRenderer.renderSvgGray(svg, Math.round(size), ICON_STROKE_WIDTH);
-      if (bytes && bytes.length >= size * size) {
-        icon = new GrayImage(size, size, 0);
-        for (let i = 0; i < size * size; i++) {
-          icon.pixels[i] = bytes[i] & 0xff;
-        }
-      }
-    } catch (error) {
-      console.warn(`renderIcon(${cacheName}) failed: ${error}`);
-    }
+  try {
+    icon = rasterizeSvg(svg, Math.round(size), ICON_STROKE_WIDTH);
+  } catch (error) {
+    console.warn(`renderIcon(${cacheName}) failed: ${error}`);
   }
   cache.set(key, icon);
   return icon;

@@ -1,33 +1,46 @@
 import { extensionPlatform } from "../../apps/external/extension-platform";
+import { type NavigationSensorRequest, type NavigationSensorEvent } from "../../apps/navigate/navigation-sensors-messages";
 import { GrayImage } from "../../graphics/image";
 import { windowIcon } from "./chrome-layer";
-import { type IconName } from "../../graphics/icons";
+import { type IconActivity, type IconName } from "../../graphics/icons";
 import { toolRegistry, type ToolResult, type ToolSpec } from "../../assistant/tool-registry";
 import { appViewportSize, type WindowHeightMode } from "./geometry";
 import * as frameTimings from "../../native/frame-timings";
 import { shell, type ShellWindow } from "./shell";
 import { effectiveExtension } from "../extension-settings";
+import { publishWorkerState } from "./worker-state";
 
 /**
  * Messages between the shell (main thread) and an app worker. One worker
  * hosts one app, which may have several windows; messages are routed by
  * windowId. Everything crossing this boundary is small JSON; pixels go
- * worker→Java directly.
+ * worker→Java directly on Android; iOS posts baked frames to the main host.
  */
 export type WorkerAppMessage =
+  | { type: "navigation-sensors"; event: NavigationSensorEvent }
   | { type: "open-window"; windowId: string; surfaceId: string; title: string; viewport: { width: number; height: number } }
   | { type: "resize-window"; windowId: string; viewport: { width: number; height: number } }
   | { type: "close-window"; windowId: string }
   | { type: "input"; windowId: string; event: unknown; frameId: number; focused: boolean }
-  | { type: "text-input"; windowId: string; text: string }
+  | { type: "text-input"; windowId: string; text: string; submit?: boolean }
   | { type: "render"; windowId: string; focused: boolean }
   | { type: "foreground"; windowId: string; foreground: boolean; focused: boolean }
+  /**
+   * Input focus arrived at or left the window, counting shell overlays and
+   * screen-off (see ShellWindow.setInputFocus). Sent on change only; the
+   * per-message `focused` flags above stay the source of truth for painting.
+   */
+  | { type: "input-focus"; windowId: string; focused: boolean }
   | { type: "screen"; on: boolean }
   /** Assistant tool invocation aimed at a window; reply with tool-result. */
   | { type: "tool-call"; callId: string; windowId: string; name: string; args: unknown };
 
 export type WorkerAppReply =
   | { type: "present-app-menu"; windowId: string; menuId: number; title: string; items: { label: string; enabled: boolean }[] }
+  | { type: "buzzer-sequence"; payload: number[] }
+  | { type: "navigation-sensors"; request: NavigationSensorRequest }
+  | { type: "open-url"; url: string }
+  | { type: "surface-frame"; surfaceId: string; width: number; height: number; pixels: string; draws?: string }
   | {
       /**
        * The worker's bundle has evaluated and its onmessage handler is
@@ -66,6 +79,8 @@ export type WorkerAppReply =
     }
   | { type: "set-title"; windowId: string; title: string }
   | { type: "set-attention"; windowId: string; attention: boolean }
+  /** App-driven animation phase for sidebar icons that support an activity cursor. */
+  | { type: "set-icon-activity"; windowId: string; activity: IconActivity }
   | {
       /** Open the shell's voice dialog aimed at this window (a menu pick). */
       type: "start-voice-input";
@@ -136,6 +151,15 @@ export type WorkerAppReply =
       type: "tool-result";
       callId: string;
       result: ToolResult;
+    }
+  | {
+      /**
+       * Publish a small piece of app state for main-thread consumers outside
+       * the app's windows (see app/ui/shell/worker-state.ts). JSON only.
+       */
+      type: "publish-state";
+      key: string;
+      state: unknown;
     };
 
 export type WorkerWindowSpec = {
@@ -162,11 +186,16 @@ export type WorkerWindowSpec = {
 export type WorkerAppHostOptions = {
   appId: string;
   worker: Worker;
+  navigationSensors?: { handle(request: NavigationSensorRequest): void; stop(): void };
+  openUrl?: (url: string) => void;
+  playBuzzerSequence?: (payload: Uint8Array) => Promise<void> | void;
   /** Create/refresh a window surface on the compositor (no-op when disconnected). */
   configureSurface: (surfaceId: string, visible: boolean, heightMode: WindowHeightMode) => Promise<void>;
   setSurfaceVisible: (surfaceId: string, visible: boolean) => void;
   removeSurface: (surfaceId: string) => void;
   requestShellRender: () => void;
+  submitPixels?: (surfaceId: string, pixels: Uint8Array, width: number, height: number, draws: ArrayBuffer | null) => void;
+  startTextInput?: () => void;
   /** Open or focus the Settings app, optionally selecting a section. */
   openSettings: (section?: string) => void;
   /** Open the phone app's text editor on a string setting (by id). */
@@ -179,8 +208,8 @@ export type WorkerAppHostOptions = {
  * Owns the Worker for one app and adapts its windows to the shell's window
  * interface: forwards input and lifecycle over postMessage, relays worker
  * requests (yield-focus, new windows, attention flags) back to the shell,
- * and manages compositor surfaces for the app's windows. The worker submits
- * frames straight to the Java compositor, so no pixels cross this boundary.
+ * and manages compositor surfaces for the app's windows. Android workers send
+ * frames straight to Java; iOS workers use surface-frame replies.
  */
 /** A tool-call awaiting its worker reply; also its own leak-safety timeout. */
 type PendingToolCall = {
@@ -198,6 +227,7 @@ const TOOL_CALL_HOST_TIMEOUT_MS = 15_000;
 
 export class WorkerAppHost {
   private readonly openWindows = new Set<string>();
+  private readonly windowIconActivity = new Map<string, IconActivity>();
   /** Per-window gesture bindings, as last reported (see set-window-gestures). */
   private readonly windowGestures = new Map<string, { hasAppMenu: boolean; claimsLongPress: boolean }>();
   private readonly pendingToolCalls = new Map<string, PendingToolCall>();
@@ -237,6 +267,28 @@ export class WorkerAppHost {
             }, 0);
           });
           if (!opened) send({ type: "app-menu-fallback", menuId: message.menuId, timestampMs: Date.now() });
+          break;
+        }
+        case "buzzer-sequence":
+          if (this.openWindows.size) {
+            void Promise.resolve(this.options.playBuzzerSequence?.(new Uint8Array(message.payload)))
+              .catch(error => console.warn(`${this.options.appId} buzzer failed: ${error}`));
+          }
+          break;
+        case "navigation-sensors":
+          if (this.openWindows.size) this.options.navigationSensors?.handle(message.request);
+          break;
+        case "open-url":
+          if (this.openWindows.size && /^https?:\/\//i.test(message.url)) this.options.openUrl?.(message.url);
+          break;
+        case "surface-frame": {
+          if (!global.isIOS || !this.options.submitPixels || !this.openWindows.has(message.surfaceId.replace(/^window:/, ""))) break;
+          const { width, height } = message;
+          if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width > 640 || height > 480) break;
+          const data = NSData.alloc().initWithBase64EncodedStringOptions(message.pixels, 0 as NSDataBase64DecodingOptions);
+          const draws = message.draws ? NSData.alloc().initWithBase64EncodedStringOptions(message.draws, 0 as NSDataBase64DecodingOptions) : null;
+          if (data?.length === width * height) this.options.submitPixels(message.surfaceId, new Uint8Array(interop.bufferFromData(data)), width, height,
+            draws ? interop.bufferFromData(draws) : null);
           break;
         }
         case "worker-ready":
@@ -286,7 +338,8 @@ export class WorkerAppHost {
           // Menus only open on the focused window, but re-check foreground:
           // the reply crosses a thread boundary and focus may have moved.
           if (shell.foregroundWindow()?.windowId === message.windowId) {
-            shell.startVoiceInput();
+            if (this.options.startTextInput) this.options.startTextInput();
+            else shell.startVoiceInput();
           }
           break;
         case "close-window-request":
@@ -298,6 +351,12 @@ export class WorkerAppHost {
         case "open-system-menu":
           if (this.openWindows.has(message.windowId)) {
             shell.openSystemMenu(message.windowId);
+          }
+          break;
+        case "set-icon-activity":
+          if (this.openWindows.has(message.windowId) && this.windowIconActivity.get(message.windowId) !== message.activity) {
+            this.windowIconActivity.set(message.windowId, message.activity);
+            this.options.requestShellRender();
           }
           break;
         case "set-window-gestures":
@@ -327,6 +386,9 @@ export class WorkerAppHost {
         case "set-title":
           // Titles are informational for now (sidebar shows icons only).
           break;
+        case "publish-state":
+          publishWorkerState(message.key, message.state);
+          break;
         case "set-tools":
           // Only a window we actually have open may contribute tools.
           if (this.openWindows.has(message.windowId)) {
@@ -351,6 +413,7 @@ export class WorkerAppHost {
       }
     };
     options.worker.onerror = (error) => {
+      options.navigationSensors?.stop();
       console.error(`worker app ${options.appId} error: ${JSON.stringify(error)}`);
     };
   }
@@ -387,14 +450,16 @@ export class WorkerAppHost {
       claimsLongPress: () => this.windowGestures.get(spec.windowId)?.claimsLongPress ?? false,
       close: () => {
         this.openWindows.delete(spec.windowId);
+        if (!this.openWindows.size) this.options.navigationSensors?.stop();
         this.windowGestures.delete(spec.windowId);
+        this.windowIconActivity.delete(spec.windowId);
         // Withdraw this window's tools and fail any in-flight calls to it.
         toolRegistry.removeAppTools(spec.windowId);
         this.failPendingToolCallsFor(spec.windowId);
         this.post({ type: "close-window", windowId: spec.windowId });
         this.options.removeSurface(surfaceId);
       },
-      drawIcon: windowIcon(spec.icon, spec.iconLetter, spec.iconGlyph),
+      drawIcon: windowIcon(spec.icon, spec.iconLetter, spec.iconGlyph, () => this.windowIconActivity.get(spec.windowId) ?? "idle"),
       handleInput: (event, frameId) => {
         frameTimings.logFrame(frameId, `input posted to the ${this.options.appId} worker`);
         this.post({
@@ -408,8 +473,8 @@ export class WorkerAppHost {
       requestRender: () => {
         this.post({ type: "render", windowId: spec.windowId, focused: shell.isWindowFocused(spec.windowId) });
       },
-      receiveTextInput: (text) => {
-        this.post({ type: "text-input", windowId: spec.windowId, text });
+      receiveTextInput: (text, options) => {
+        this.post({ type: "text-input", windowId: spec.windowId, text, ...(options?.submit === undefined ? {} : { submit: options.submit }) });
       },
       setForeground: (foreground) => {
         this.options.setSurfaceVisible(surfaceId, foreground);
@@ -427,6 +492,9 @@ export class WorkerAppHost {
         // Screen state is per-app, but sending per-window keeps the protocol
         // uniform; the worker treats it globally.
         this.post({ type: "screen", on });
+      },
+      setInputFocus: (focused) => {
+        this.post({ type: "input-focus", windowId: spec.windowId, focused });
       },
     };
     shell.registerWindow(window);

@@ -9,6 +9,7 @@ import { getDefaultSmallFont } from "../../graphics/ui-fonts";
 import { appMenuPolicy, navigationPolicy, onEffectiveExtensionsChanged, windowLayoutPolicy } from "../extension-settings";
 import { appActionItems, presentAppMenu } from "../window-menu";
 import { EvenAIStatus, EventSourceType, OsEventTypeList, WatchGestureType } from "../../g2/events";
+import { acceptInput } from "../input-monitor";
 import type { RawInputEvent } from "../../native/faceclaw-communicator";
 import {
   directionalFallback,
@@ -29,7 +30,9 @@ import { KeyboardInputLayer, type KeyboardInputSession } from "./keyboard-input"
 import { voiceActivity } from "./voice-activity";
 import { AssistantLayer } from "./assistant";
 import { AssistantSession, type AssistantBackendConfig } from "../../assistant/session";
-import { resolveAssistantModel } from "../../assistant/models";
+import { resolveAssistantModel, type AssistantModel } from "../../assistant/models";
+import { AssistantConversations, type ReasoningLevel } from "../../assistant/conversations";
+import { getStringSetting, setStringSetting } from "../../native/settings-store";
 import type { AssistantContext } from "../../assistant/types";
 import { SingleNotificationLayer } from "../notifications";
 import {
@@ -40,7 +43,8 @@ import {
   assistantBridgeTokenSetting,
   assistantModelSetting,
   assistantSkipConfirmationSetting,
-  batteryDisplayModeSetting,
+  batteryIndicatorSettingsKey,
+  brightnessSetting,
   onAnySettingChanged,
   openAiApiKeySetting,
   timeFormatSetting,
@@ -50,6 +54,7 @@ import { onAmbientCardsChanged } from "./ambient-cards";
 import { ShellChromeLayer, sidebarContentLeft, type ShellChromeState, type ShellChromeWindow } from "./chrome-layer";
 import { ShellModalLayer } from "./modal-layer";
 import { ToolDebugMenuLayer } from "./tool-debug-layer";
+import { BrightnessPickerLayer } from "./brightness-picker-layer";
 import { toolRegistry } from "../../assistant/tool-registry";
 import {
   appViewportRect,
@@ -72,7 +77,7 @@ const currentExtensionPlatform = () => typeof extensionPlatform === "function" ?
  * Input flow: every event enters via receiveInput. The shell consumes
  * everything while the sidebar or a shell overlay has focus and forwards the
  * rest to the focused window. Long-press opens the shell-owned system menu
- * (Focus app switcher, Voice input, Close app, Debug) without reaching the
+ * (Focus app switcher, Voice input, Brightness, Close window, Debug) without reaching the
  * app, so the shell keeps working when a window's handler hangs; a window
  * that claims long-press for a move of its own gets it forwarded instead, and
  * holding the press past the escape threshold still opens the system menu.
@@ -103,6 +108,10 @@ export type ShellWindow = {
    * system menu; holding the press past the escape threshold still opens it.
    */
   claimsLongPress?: () => boolean;
+  /** Chat uses hold-to-talk and tap-then-hold for the system menu, without an escape timer. */
+  holdToTalk?: boolean;
+  /** A window owns microphone capture outside the shell voice dialog. */
+  isVoiceCapturing?: () => boolean;
   /**
    * True when the window gives swipe-left / swipe-right (watch directional
    * input) a meaning; otherwise the shell forwards directionalFallback(event).
@@ -140,7 +149,7 @@ export type ShellWindow = {
    * Deliver a text string to the window (e.g. finalized voice input). Optional:
    * only windows that consume typed text (the terminal) implement it.
    */
-  receiveTextInput?: (text: string) => void;
+  receiveTextInput?: (text: string, options?: { submit?: boolean }) => void;
   /** Foreground state changed: this window's surface is (not) the visible one. */
   setForeground?: (foreground: boolean) => void;
   /**
@@ -153,9 +162,18 @@ export type ShellWindow = {
   onFocus?: (lastInput: InputEvent | null) => void;
   /** Screen turned on/off; hidden or screen-off windows should stop painting. */
   setScreenOn?: (on: boolean) => void;
+  /**
+   * Input focus arrived at or left this window: it is (no longer) where
+   * ordinary input goes. Unlike setForeground / onFocus, this also tracks
+   * shell overlays (the system menu, a notification modal, the voice dialog)
+   * and screen-off, so a game can pause on any of them. Sent on change only.
+   */
+  setInputFocus?: (focused: boolean) => void;
 };
 
 export type ShellConfig = {
+  /** Hosts without microphone support hide and reject voice entry points. */
+  voiceInputEnabled?: boolean;
   /** Actions handed to shell overlay layers; requestRender must re-render the shell surface. */
   actions: LayerActions;
   getScreenTimeoutMs: () => number | null;
@@ -297,24 +315,55 @@ class ShellAlertLayer implements Layer {
   }
 }
 
+/** Every setting the top bar paints from, as one comparable string. */
+function topBarSettingsKey(): string {
+  return `${batteryIndicatorSettingsKey()}|${timeFormatSetting.get()}`;
+}
+
 class Shell {
   private windows: ShellWindow[] = [];
   private selectedIndex = 0;
   /** Window ids in most-recently-visible-first order; closing the visible window returns to the next entry. */
   private mruWindowIds: string[] = [];
   private focus: FocusKind = "sidebar";
+  /** The window last told it holds input focus (see syncInputFocus). */
+  private inputFocusedWindowId: string | null = null;
   private screenOn = true;
   private lastInputAtMs = Date.now();
   /** The most recent input event received, for windows gaining focus (see ShellWindow.onFocus). */
   private lastInput: InputEvent | null = null;
-  private battery: ShellChromeState["battery"] = { headset: null, headsetCharging: null };
+  private battery: ShellChromeState["battery"] = {
+    headset: null, headsetCharging: null, ring: null, ringCharging: null, watch: null, watchCharging: null,
+  };
   private attention = new Map<string, boolean>();
   // App-provided top-bar tray icons, keyed by owner id; drawn between the
   // notification icons and the battery indicators.
   private readonly trayIcons = new Map<string, GrayImage>();
   private activeVoiceLayer: VoiceInputLayer | VoiceSearchLayer | null = null;
   private activeKeyboardLayer: KeyboardInputLayer | null = null;
-  private assistantSession: AssistantSession | null = null;
+  private conversations: AssistantConversations | null = null;
+  private get assistantSession(): AssistantSession | null {
+    return this.conversations?.current().session ?? null;
+  }
+
+  getAssistantConversations(): AssistantConversations {
+    if (!this.conversations) {
+      this.conversations = new AssistantConversations(
+        (model, reasoning) => this.resolveAssistantConfiguration(model, reasoning),
+        () => assistantModelSetting.get(),
+        (value) => setStringSetting("assistant.conversations", value),
+        getStringSetting("assistant.conversations", ""),
+      );
+    }
+    return this.conversations;
+  }
+
+  async prepareChatVoiceCapture(): Promise<boolean> {
+    if (this.activeVoiceLayer || this.activeKeyboardLayer || this.voiceDialogPending) return false;
+    const ready = (await this.config.prepareVoiceCapture?.()) ?? true;
+    return ready && !this.activeVoiceLayer && !this.activeKeyboardLayer &&
+      this.stack.isAtBase() && this.isWindowFocused("ai-chat");
+  }
   private assistantLayer: AssistantLayer | null = null;
   private readonly assistantActivityListeners = new Set<(event: AssistantActivityEvent) => void>();
   private readonly alertListeners = new Set<(text: string) => void>();
@@ -334,14 +383,21 @@ class Shell {
   private readonly chrome = new ShellChromeLayer(() => this.chromeState());
   private readonly stack = new LayerStack(this.chrome, this.actions);
 
-  // Top-bar settings we mirror into the chrome; a change to either repaints
-  // the shell surface so the top bar reflects it immediately.
+  // Top-bar settings we mirror into the chrome; a change to any of them
+  // repaints the shell surface so the top bar reflects it immediately.
   private topBarSettingsSubscribed = false;
-  private lastBatteryDisplayMode: string | null = null;
-  private lastTimeFormat: string | null = null;
+  private lastTopBarSettingsKey: string | null = null;
 
   configure(config: ShellConfig): void {
-    this.config = config;
+    // Nearly every state change ends in a shell render request, so it is
+    // the natural point to tell windows about input-focus changes too.
+    this.config = {
+      ...config,
+      requestShellRender: () => {
+        this.syncInputFocus();
+        config.requestShellRender();
+      },
+    };
     this.stack.setActions(config.actions);
     this.subscribeToTopBarSettings();
     this.subscribeToAmbientCards();
@@ -364,8 +420,7 @@ class Shell {
   private subscribeToTopBarSettings(): void {
     if (this.topBarSettingsSubscribed) return;
     this.topBarSettingsSubscribed = true;
-    this.lastBatteryDisplayMode = batteryDisplayModeSetting.get();
-    this.lastTimeFormat = timeFormatSetting.get();
+    this.lastTopBarSettingsKey = topBarSettingsKey();
     onEffectiveExtensionsChanged(() => {
       for (const window of this.windows) {
         window.relayout?.();
@@ -374,13 +429,9 @@ class Shell {
       this.config.requestShellRender();
     });
     onAnySettingChanged(() => {
-      const batteryMode = batteryDisplayModeSetting.get();
-      const timeFormat = timeFormatSetting.get();
-      if (batteryMode === this.lastBatteryDisplayMode && timeFormat === this.lastTimeFormat) {
-        return;
-      }
-      this.lastBatteryDisplayMode = batteryMode;
-      this.lastTimeFormat = timeFormat;
+      const key = topBarSettingsKey();
+      if (key === this.lastTopBarSettingsKey) return;
+      this.lastTopBarSettingsKey = key;
       this.config.requestShellRender();
     });
   }
@@ -494,7 +545,7 @@ class Shell {
     return this.screenOn;
   }
 
-  /** Current headset battery levels (for the assistant's get_state tool). */
+  /** Current G2, R1, and Wear OS watch battery levels (top bar, Glanceboard, assistant). */
   getBatteryLevels(): ShellChromeState["battery"] {
     return this.battery;
   }
@@ -534,6 +585,34 @@ class Shell {
     return !!window && this.focus === "window" && this.foregroundWindow() === window;
   }
 
+  /**
+   * The window ordinary input reaches right now: the foreground window with
+   * focus in-window, the screen on, and no shell overlay (system menu,
+   * notification modal, voice dialog, alert) above it.
+   */
+  private inputTargetWindow(): ShellWindow | undefined {
+    if (!this.screenOn || this.focus !== "window" || !this.stack.isAtBase() || this.activeVoiceLayer) {
+      return undefined;
+    }
+    return this.foregroundWindow();
+  }
+
+  /**
+   * Tell windows when they gain or lose input focus (ShellWindow.setInputFocus).
+   * Called from every shell render request and the input/wake/sleep paths,
+   * which between them follow every focus-affecting state change; it diffs
+   * against the last notification, so calling it often is cheap.
+   */
+  private syncInputFocus(): void {
+    const target = this.inputTargetWindow();
+    const targetId = target?.windowId ?? null;
+    if (targetId === this.inputFocusedWindowId) return;
+    const previous = this.windows.find((w) => w.windowId === this.inputFocusedWindowId);
+    this.inputFocusedWindowId = targetId;
+    previous?.setInputFocus?.(false);
+    target?.setInputFocus?.(true);
+  }
+
   /** Turn the screen on (if off) and set focus. Returns whether it was off. */
   wake(focus: FocusKind, nowMs = Date.now()): boolean {
     this.lastInputAtMs = nowMs;
@@ -541,7 +620,10 @@ class Shell {
     const alreadyFocused = this.isFocusTarget(gaining);
     this.focus = focus;
     if (gaining && !alreadyFocused) gaining.onFocus?.(this.lastInput);
-    if (this.screenOn) return false;
+    if (this.screenOn) {
+      this.syncInputFocus();
+      return false;
+    }
     this.screenOn = true;
     this.config.onScreenStateChanged(true);
     for (const window of this.windows) {
@@ -550,6 +632,7 @@ class Shell {
     // Refresh the foreground window; the compositor restored its retained
     // frame, but its content may be stale (e.g. a running stopwatch).
     this.foregroundWindow()?.requestRender();
+    this.syncInputFocus();
     return true;
   }
 
@@ -562,6 +645,7 @@ class Shell {
     for (const window of this.windows) {
       window.setScreenOn?.(false);
     }
+    this.syncInputFocus();
     this.config.onScreenStateChanged(false);
   }
 
@@ -574,6 +658,7 @@ class Shell {
     this.setSelectedIndex(index);
     this.focus = "window";
     if (!alreadyFocused) target?.onFocus?.(this.lastInput);
+    this.syncInputFocus();
   }
 
   /** Idle timeout: sleep if the configured timeout elapsed. Returns whether it slept. */
@@ -587,7 +672,7 @@ class Shell {
     // ring. An in-flight assistant turn suspends it for the same reason (a
     // tool loop can run for a while with no input); once the turn ends and
     // the Follow-up/Done menu is showing, the normal idle timeout resumes.
-    if (this.activeVoiceLayer || this.activeKeyboardLayer || this.assistantSession?.isTurnActive()) {
+    if (this.activeVoiceLayer || this.activeKeyboardLayer || this.assistantSession?.isTurnActive() || this.foregroundWindow()?.isVoiceCapturing?.()) {
       this.lastInputAtMs = nowMs;
       return false;
     }
@@ -682,6 +767,27 @@ class Shell {
   }
 
   async receiveInput(event: InputEvent, frameId = 0): Promise<ShellInputOutcome> {
+    if (!acceptInput(event)) return { shell: false, window: false };
+    try {
+      return await this.routeInput(event, frameId);
+    } finally {
+      // Whatever the input did (opened an overlay, moved focus, slept the
+      // screen), windows learn about the resulting input-focus change.
+      this.syncInputFocus();
+    }
+  }
+
+  private async routeInput(event: InputEvent, frameId: number): Promise<ShellInputOutcome> {
+    // Touch-down supplements gestures. It must not wake the screen, operate
+    // menus, or cancel the hold-to-escape timer. Apps can opt into it later.
+    if (event.type === "ring-press") {
+      const window = this.foregroundWindow();
+      if (this.screenOn && this.focus === "window" && this.stack.isAtBase() && window) {
+        await window.handleInput(event, frameId);
+        return { shell: false, window: true };
+      }
+      return { shell: false, window: false };
+    }
     const previous = this.lastInput;
     this.lastInput = event;
     // A visible window may paint a source-dependent indicator (see
@@ -715,6 +821,7 @@ class Shell {
     // Even AI app never launches, so the firmware does not power the display
     // for us either -- actions that need it wake the screen themselves.
     if (event.type === "wakeword") {
+      if (this.foregroundWindow()?.isVoiceCapturing?.()) return { shell: true, window: false };
       const action = wakeWordActionSetting.get();
       if (action === "off") {
         return { shell: false, window: false };
@@ -824,11 +931,11 @@ class Shell {
       if (!this.stack.isAtBase()) {
         return { shell: true, window: false };
       }
-      if (!window.claimsLongPress?.()) {
+      if (!window.holdToTalk && !window.claimsLongPress?.()) {
         this.openEscapeMenu();
         return { shell: true, window: false };
       }
-      this.startEscapeMenuTimer();
+      if (!window.holdToTalk) this.startEscapeMenuTimer();
       if (this.focus === "sidebar") {
         this.focus = "window";
         window.onFocus?.(this.lastInput);
@@ -853,6 +960,10 @@ class Shell {
         return { shell: true, window: Boolean(foreground) };
       }
       const window = this.foregroundWindow();
+      if (window?.holdToTalk) {
+        this.openEscapeMenu();
+        return { shell: true, window: false };
+      }
       // Over the open system menu it switches to the app's context menu:
       // close the system menu and deliver the gesture to the window as
       // usual. A window without a menu of its own would only ask for the
@@ -1094,7 +1205,10 @@ class Shell {
     onCreated?: (layer: VoiceInputLayer) => void;
     onClosed?: () => void;
   }): void {
-    if (this.voiceDialogPending || this.activeVoiceLayer || this.activeKeyboardLayer) { options.onUnavailable?.(); return; }
+    if (this.config.voiceInputEnabled === false || this.voiceDialogPending || this.activeVoiceLayer || this.activeKeyboardLayer) {
+      options.onUnavailable?.();
+      return;
+    }
     if (options.canStart && !options.canStart()) { options.onUnavailable?.(); return; }
     this.voiceDialogPending = true;
     void (async () => {
@@ -1195,8 +1309,8 @@ class Shell {
   }
 
   /** Deliver a text string to the foreground window (e.g. finalized voice input). */
-  sendTextToForegroundWindow(text: string): void {
-    this.foregroundWindow()?.receiveTextInput?.(text);
+  sendTextToForegroundWindow(text: string, options?: { submit?: boolean }): void {
+    this.foregroundWindow()?.receiveTextInput?.(text, options);
   }
 
   /** Voice search has its own confirmation action and cannot invoke a send target. */
@@ -1361,6 +1475,7 @@ class Shell {
    * the dialog finishes on click instead of long-press-release.
    */
   startVoiceInput(): void {
+    if (this.config.voiceInputEnabled === false) return;
     if (!this.screenOn || this.activeVoiceLayer || !this.stack.isAtBase()) return;
     // The transcript is aimed at the window whose menu requested it; the menu
     // entry point defaults the highlight to Type Into App.
@@ -1380,7 +1495,7 @@ class Shell {
    */
   startKeyboardInput(): KeyboardInputSession | null {
     if (this.activeKeyboardLayer) return this.activeKeyboardLayer;
-    if (this.activeVoiceLayer) return null;
+    if (this.activeVoiceLayer || this.foregroundWindow()?.isVoiceCapturing?.()) return null;
     if (!this.screenOn) this.wake("sidebar");
     if (currentExtensionPlatform()?.openAssistant("text-entry")) return null;
     const assistantLayer = this.assistantLayer;
@@ -1426,7 +1541,8 @@ class Shell {
   }
 
   isAssistantAvailable(): boolean {
-    return this.resolveAssistantConfiguration() !== null;
+    const current = this.getAssistantConversations().current();
+    return this.resolveAssistantConfiguration(current.model, current.reasoning) !== null;
   }
 
   /** Observe assistant turns (see AssistantActivityEvent). */
@@ -1464,24 +1580,21 @@ class Shell {
   }
 
   private ensureAssistantSession(): AssistantSession | null {
-    const config = this.resolveAssistantConfiguration();
-    if (!config) return null;
-    if (
-      !this.assistantSession ||
-      this.assistantSession.isExpired() ||
-      !this.assistantSession.matchesConfiguration(config)
-    ) {
-      this.assistantSession?.cancel();
-      this.assistantSession = new AssistantSession(config);
-    }
-    return this.assistantSession;
+    return this.getAssistantConversations().ensureSession();
   }
 
-  private resolveAssistantConfiguration(): AssistantBackendConfig | null {
-    const fallback = this.resolveBaseAssistantConfiguration(), provider = currentExtensionPlatform()?.feature("assistant");
+  private resolveAssistantConfiguration(
+    model: AssistantModel = this.conversations?.current().model ?? assistantModelSetting.get(),
+    reasoning: ReasoningLevel = this.conversations?.current().reasoning ?? "default",
+  ): AssistantBackendConfig | null {
+    const fallback = this.resolveBaseAssistantConfiguration(model, reasoning);
+    const provider = currentExtensionPlatform()?.feature("assistant");
     return provider ? { kind: "extension", component: provider.component, generation: provider.generation, fallback } : fallback;
   }
-  private resolveBaseAssistantConfiguration(): AssistantBackendConfig | null {
+  private resolveBaseAssistantConfiguration(
+    model: AssistantModel = this.conversations?.current().model ?? assistantModelSetting.get(),
+    reasoning: ReasoningLevel = this.conversations?.current().reasoning ?? "default",
+  ): AssistantBackendConfig | null {
     if (assistantBackendSetting.get() === "external") {
       const host = assistantBridgeHostSetting.get().trim();
       const token = assistantBridgeTokenSetting.get();
@@ -1489,10 +1602,11 @@ class Shell {
       const port = parseInt(assistantBridgePortSetting.get(), 10) || 8790;
       return { kind: "external", bridge: { host, port, token } };
     }
-    const llm = resolveAssistantModel(assistantModelSetting.get(), {
+    const llm = resolveAssistantModel(model, {
       anthropic: anthropicApiKeySetting.get(),
       openai: openAiApiKeySetting.get(),
     });
+    if (llm && reasoning !== "default" && llm.effort) llm.effort = reasoning;
     return llm ? { kind: "direct", llm } : null;
   }
 
@@ -1512,17 +1626,27 @@ class Shell {
    * Opens the assistant overlay if it isn't already up; a follow-up reuses the
    * existing session and overlay.
    */
-  sendToAssistant(text: string): void {
+  sendToAssistant(text: string, showOverlay = true): void {
+    text = text.trim();
+    if (!text) return;
     const session = this.ensureAssistantSession();
     if (!session) {
       this.showAlert(
         assistantBackendSetting.get() === "external"
           ? "Configure the agent bridge host and token in Settings."
-          : "Set an API key or download the on-phone model in Settings.",
+          : global.isIOS ? "Set an OpenAI or Anthropic API key in Settings." : "Set an API key or download the on-phone model in Settings.",
       );
       return;
     }
+    if (session.isTurnActive()) {
+      this.showAlert("The assistant is still working on the previous request");
+      return;
+    }
     if (!this.screenOn) this.wake("sidebar");
+    if (!showOverlay || this.foregroundWindow()?.appId === "ai-chat") {
+      this.runAssistantTurn(session, null, text);
+      return;
+    }
     let layer = this.assistantLayer;
     if (!layer) {
       const created = new AssistantLayer(this.config.actions, {
@@ -1531,7 +1655,7 @@ class Shell {
         onClose: () => this.closeAssistantLayer(),
         onRemoved: () => {
           // Removed by any path (Done, or the screen sleeping mid-conversation):
-          // stop the turn and drop the reference so a later query starts clean.
+          // stop the turn and drop the overlay reference; keep shared history.
           this.assistantSession?.cancel();
           if (this.assistantLayer === created) this.assistantLayer = null;
           this.emitAssistantActivity({ phase: "closed", text: "" });
@@ -1545,23 +1669,24 @@ class Shell {
     this.config.requestShellRender();
   }
 
-  private runAssistantTurn(session: AssistantSession, layer: AssistantLayer, text: string): void {
-    layer.startTurn();
+  private runAssistantTurn(session: AssistantSession, layer: AssistantLayer | null, text: string): void {
+    if (session.isTurnActive()) return;
+    layer?.startTurn();
     let replySoFar = "";
     this.emitAssistantActivity({ phase: "thinking", text: "" });
     session.sendUtterance(text, this.buildAssistantContext(), {
       onTextDelta: (delta, textSoFar) => {
         replySoFar = textSoFar;
-        layer.onTextDelta(delta, textSoFar);
+        layer?.onTextDelta(delta, textSoFar);
         this.emitAssistantActivity({ phase: "streaming", text: textSoFar });
       },
-      onToolActivity: (label) => layer.onToolActivity(label),
+      onToolActivity: (label) => layer?.onToolActivity(label),
       onTurnDone: () => {
-        layer.onTurnDone();
+        layer?.onTurnDone();
         this.emitAssistantActivity({ phase: "done", text: replySoFar });
       },
       onError: (message) => {
-        layer.onError(message);
+        layer?.onError(message);
         this.emitAssistantActivity({ phase: "error", text: message });
       },
     });
@@ -1688,7 +1813,7 @@ class Shell {
 
   /**
    * The system/escape menu: the entries every window shares (Focus app
-   * switcher, Voice input, Close app) plus Debug. Shell-owned and
+   * switcher, Voice input, Brightness, Close window) plus Debug. Shell-owned and
    * shell-drawn (never the app's), so an unresponsive app can always be
    * closed. It opens for long-press (over the app's own menu too), after an
    * extended hold in a window that claims long-press, and on a window's
@@ -1728,7 +1853,7 @@ class Shell {
           ctx.stack.pop();
         },
       },
-      {
+      ...(this.config.voiceInputEnabled === false ? [] : [{
         label: "Voice input",
         onSelect: (ctx) => {
           // The transcript is aimed at the foreground window, so keep focus
@@ -1737,10 +1862,23 @@ class Shell {
           ctx.stack.pop();
           this.startVoiceInput();
         },
-      },
+      }]),
     );
     if (grouped) items.splice(initialSelection + 1, 0, { label: "Display off", onSelect: ctx => { ctx.stack.pop(); this.sleepAtAppRoot(); } });
-    if (hasOverlay) items.splice(items.findIndex(item => item.label === "Voice input"), 1);
+    if (hasOverlay) {
+      const voiceIndex = items.findIndex(item => item.label === "Voice input");
+      if (voiceIndex >= 0) items.splice(voiceIndex, 1);
+    }
+    if (!hasOverlay && brightnessSetting.get() !== "auto") {
+      items.push({
+        label: "Brightness",
+        onSelect: (ctx) => {
+          ctx.stack.pop();
+          ctx.stack.push(new BrightnessPickerLayer(() => this.yieldFocusToSidebar()));
+          this.config.requestShellRender();
+        },
+      });
+    }
     if (!hasOverlay) items.push({
       label: "Debug",
       onSelect: (ctx) => {
@@ -1752,8 +1890,10 @@ class Shell {
     // when the app has one (otherwise it opens this very menu, not worth a
     // hint).
     if (grouped && !hasOverlay && foreground.hasAppMenu?.()) items.push({ label: "App actions", onSelect: async ctx => { ctx.stack.pop(); await this.openAppActions(); } });
-    const footer = navigationPolicy().tapHold === "switcher" ? gestureHints([[GESTURE_SHORT_THEN_LONG_PRESS, "app switcher"]]) : foreground.hasAppMenu?.()
-      ? gestureHints([[GESTURE_SHORT_THEN_LONG_PRESS, "app menu"]])
+    const footer = navigationPolicy().tapHold === "switcher"
+      ? gestureHints([[GESTURE_SHORT_THEN_LONG_PRESS, "app switcher"]])
+      : foreground.hasAppMenu?.() && !foreground.holdToTalk
+        ? gestureHints([[GESTURE_SHORT_THEN_LONG_PRESS, "app menu"]])
       : undefined;
     layer = new ShellOverlayMenuLayer(items, footer, () => grouped ? this.focusWindow(foreground.windowId) : this.yieldFocusToSidebar(), grouped ? appMenuPolicy().systemTitle : undefined);
     layer.selectItem(initialSelection);
@@ -1822,12 +1962,19 @@ function formatAssistantTime(date: Date): string {
 }
 
 export function rawInputEventToInputEvent(event: RawInputEvent): InputEvent {
-  return makeInputEvent(rawInputEventToPayload(event));
+  return { ...makeInputEvent(rawInputEventToPayload(event)),
+    ...(event.ringInput ? { ringInput: { ...event.ringInput } } : {}) };
 }
 
 function rawInputEventToPayload(event: RawInputEvent): InputEventPayload {
   if (event.kind === "sys-event") {
-    if (event.eventType === OsEventTypeList.CLICK_EVENT) {
+    if (event.eventType === OsEventTypeList.RING_PRESS_EVENT &&
+        (event.eventSource === EventSourceType.TOUCH_EVENT_FORM_DUMMY_NULL ||
+         event.eventSource === EventSourceType.TOUCH_EVENT_FROM_RING)) {
+      // The firmware emits this dedicated ID only for full raw source 4.
+      // Its stock sender leaves the source unspecified for extension 14.
+      return { type: "ring-press", source: "ring" };
+    } else if (event.eventType === OsEventTypeList.CLICK_EVENT) {
       return {
         type: "click",
         source: eventSourceToString(event.eventSource),
@@ -1889,9 +2036,13 @@ function rawInputEventToPayload(event: RawInputEvent): InputEventPayload {
   };
 }
 
-/** Scroll events only carry a source when it is the watch (the stock ones never needed one). */
+/** Preserve explicit sources; stock scroll notifications usually omit them. */
 function scrollEvent(type: "scroll-up" | "scroll-down", eventSource: number): InputEventPayload {
-  return eventSource === EventSourceType.TOUCH_EVENT_FROM_WATCH ? { type, source: "watch" } : { type };
+  return eventSource === EventSourceType.TOUCH_EVENT_FROM_WATCH ||
+    eventSource === EventSourceType.TOUCH_EVENT_FROM_RING ||
+    eventSource === EventSourceType.TOUCH_EVENT_FROM_GLASSES_L ||
+    eventSource === EventSourceType.TOUCH_EVENT_FROM_GLASSES_R
+    ? { type, source: eventSourceToString(eventSource) } : { type };
 }
 
 function eventSourceToString(eventSource: number): InputSource {
@@ -1909,6 +2060,8 @@ function eventSourceToString(eventSource: number): InputSource {
 
 export function inputEventToString(event: InputEvent): string {
   switch (event.type) {
+    case "ring-press":
+      return "Ring press";
     case "click":
       return `Click from ${event.source}`;
     case "double-click":

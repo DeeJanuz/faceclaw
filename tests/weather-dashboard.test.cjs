@@ -7,7 +7,7 @@ function harness() {
   let now = 100000, granted = true, calls = 0, fail = false, pending;
   const intervals = new Map();
   const imports = {
-    '../g2/android-permissions': { hasLocationPermission: () => granted },
+    './location-permissions': { hasLocationPermission: () => granted },
     './location': { getCurrentLocation: async () => { calls++; if (pending) await pending; if (fail) throw new Error('No location'); return {latitude: 40, longitude: -105}; } },
     '../version': { USER_AGENT: 'test' },
     '../util/http': { fetchWithUserAgent: async url => ({ok: true, json: async () => url.includes('/points/')

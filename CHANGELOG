@@ -1,8 +1,106 @@
 # Changelog
 
-## 0.6.6 - Future
-* Navigate and terminal app: App-specific screen size/position setting
+## 0.7.3 - Future
+
+### Other Features
+
+* Add tokens and faceclaw-input script, which allows using a CLI utility as an input device for the glasses
+* Navigate app: Add map-without-destination mode
+
+### iOS port:
+
+* Add iOS calendar integration
+* iOS main screen matches the Android version's styling
+* Hub apps on iOS no longer have their timers stopped while the phone app is in the background
+
+## 0.7.2 - 2026-09-19
+
+* Rebase to firmware 2.3.0, fixing an issue with some R1 ring input events being lost
+* Receive lower-level ring events: ring-press as opposed to click, bypass filtering, swipe speeds
+* Modify built in games to use ring-press rather than click
+
+## 0.7.1 - 2026-09-19
+
+### iOS Developer Beta
+
+This release contains a developer beta of an iOS port. Most of the
+functionality present in the Android version is working, but it is
+considerably buggier, missing some functionality entirely, and generally not
+quite ready for non-developer users. To use it at this stage, you will have to
+compile it from source code yourself; it is not present in the App Store and
+does not have a Testflight.
+
+Current status:
+* Custom firmware flashing: Tested end to end and working
+* Voice input: Working. On-device transcription with Siri dictation only; cloud transcription providers are not yet supported.
+* AI agent integration: Working. Cloud providers only; on-device LLM is not yet supported.
+* Notifications: Working, with rough edges. Notifications appear on the glasses, but they don't have distinguishing icons and the only action you can take on a notification is dismissing it.
+* Music player integration: Not yet implemented at all
+* Calendar: Not yet implemented at all
+* EvenHub: Partially working. Hub apps install and run, sometimes. They freeze when the app is in the background or the phone is locked.
+
+### Minor Features
+
+* Mark stock firmware 2.3 as validated for installing custom firmware over
+* Add on-device Whisper as a voice transcription option
+* Add Wear OS watch battery indicator to the top bar and Glanceboard
+* Refinements to builtin games
+* Short-then-long gesture from screen off activates the glanceboard
+* Compass: No longer discards calibration when off
+* Glanceboard: Tap setting includes a Disable option
+* Glanceboard: Add a 2x3 layout option
+* Convert a large chunk of the codebase from Android-specific Java to cross-platform Kotlin for iOS porting
+
+### Bluetooth Protocol Changes
+
+* Custom bluetooth messages now use a new SID, rather than modifying the stock image-update message type
+* Compression is done at the transport layer, rather than individual image data buffers
+* Expand the texture cache to 256kb
+
+## 0.7.0 - 2026-09-12
+
+### Major Features
+
+* Add Glanceboard
+
+The Glanceboard is a customizable dashboard, which opens when you single-tap
+or long-press-and-hold while the screen is off, then closes automatically. The
+idea is that this is where you put things that you want to keep accessible
+while you're not actively using the glasses. The glanceboard has four slots
+for widgets, and has a system card widget (time, notifications, etc) and
+widgets for music, calendar, terminals, and more.
+
+* Add "AI Chat" app
+
+This is a conversational-style way to use the voice assistant that was already
+built in. Rather than say the wake word each time, while in the AI Chat app,
+you press-and-hold the ring to start speaking and release to send.
+
+* Significantly increase speed
+
+This version reconfigures the glasses' Bluetooth radio link, increasing
+transfer speed by 3-10x. This makes the user interface a lot snappier overall,
+and will enable better animations and graphics in future versions. There is a
+new Flappy game, to demonstrate that we can now reasonably handle 30fps
+full-screen animation. This does increase battery usage, but not by very much;
+based on the specs of the bluetooth chip used, this is estiamted to consume an
+extra 5% battery per day.
+
+### Smaller Features and Bug Fixes
+
+* After starting in Preview mode, connecting glasses walks you through the custom firmware flashing process in the same way as regular onboarding
+* Messaging in the flasher distinguishes between downgrading from stock firmwares where that's been validated and veresions where it hasn't, and considers 2.2.10 validated
+* Navigate and Terminal apps have their own config setting for screen-size
 * Transcribe app: Scrolling; automatic reconnection; insert newlines
+* Notifications: Add notification filters
+* Phone screen preview: Add rotation option; improve landscape layout
+* Add brightness control to the system context menu
+* Add R1 ring battery to the top bar
+* Battery indicators have new styling and more customization options
+* Add magnetometer calibration debug info to the Compass app
+* Nightscout app has alert thresholds for canula age, cartridge volume, pump battery, time since last loop, shown in the top bar
+* Terminal app: Icons in the app-switcher sidebar show terminal activity
+* Speed up wake wake from sleep (https://github.com/jimrandomh/faceclaw/pull/24)
 
 ## 0.6.5 - 2026-09-04
 * Changed context menu gestures: — for system, ●— for app context menu.
@@ -60,4 +158,3 @@
 
 ## 0.6 - 2026-08-29
 - Start keeping a changelog and making signed binaries via GitHub Releases
-

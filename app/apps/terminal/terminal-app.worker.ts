@@ -35,8 +35,14 @@ import { GrayImage, type UiFont } from "../../graphics/image";
 import { flattenPlanesWithDraws, planesFingerprint, type Plane } from "../../graphics/plane";
 import { prepareFrameDraws } from "../../graphics/glyph-wire";
 import { getDefaultSmallFont, getTerminalFontConfig } from "../../graphics/ui-fonts";
+import { layoutHubHeader } from "./hub-header";
 import { truncateText } from "../../graphics/textwrap";
-import { TERMINAL_ICON_GLYPHS } from "../../graphics/icons";
+import { TERMINAL_ICON_GLYPHS, type IconActivity } from "../../graphics/icons";
+import {
+  drawSessionRow,
+  TERMINAL_SESSIONS_STATE_KEY,
+  type TerminalSessionsSnapshot,
+} from "./session-list";
 import * as frameTimings from "../../native/frame-timings";
 import { getActiveDisplay } from "../../native/active-display";
 import { GESTURE_DOUBLE_CLICK, type InputEvent } from "../../ui/gestures";
@@ -285,7 +291,7 @@ const sessionRecency = new Map<string, number>();
 // continues, so 5s of slack keeps the indicator lit through the gaps.
 const sessionActivity = new Map<string, number>();
 const ACTIVITY_ACTIVE_MS = 5_000;
-// Alternation period of the hub's activity indicator.
+// Alternation period shared by hub rows and sidebar cursors.
 const HUB_ANIMATION_STEP_MS = 800;
 
 function recencyKey(connectionId: string, socket: string): string {
@@ -356,7 +362,8 @@ global.onmessage = (event: { data: WorkerAppMessage }) => {
       // Enter ("\r") after a wrapper-side pause so paste-detecting apps
       // (e.g. Claude Code) submit instead of inserting a newline.
       if (window && window.kind === "view") {
-        window.client.submitInput(message.text);
+        if (message.submit === false) window.client.sendInput(message.text);
+        else window.client.submitInput(message.text);
       } else if (window && window.kind === "hub" && window.mode === "add") {
         terminalNewConnectionSetting.set(message.text);
         scheduleRender(window);
@@ -461,6 +468,7 @@ function openWindow(windowId: string, surfaceId: string, title: string, viewport
   if (pendingView) {
     pendingViews.delete(windowId);
     windows.set(windowId, createViewWindow(windowId, surfaceId, title, viewport, pendingView));
+    updateHubAnimation();
     renderHubWindows();
     return;
   }
@@ -490,6 +498,7 @@ function openWindow(windowId: string, surfaceId: string, title: string, viewport
   if (!controlsInitialized) {
     syncControlsFromSettings();
   }
+  updateHubAnimation();
 }
 
 function closeWindow(windowId: string): void {
@@ -510,6 +519,8 @@ function closeWindow(windowId: string): void {
     endAddConnection(window);
   }
   windows.delete(windowId);
+  windowIconActivity.delete(windowId);
+  updateHubAnimation();
   // Auto-reconnect only runs while at least one terminal window is open.
   if (windows.size === 0) {
     for (const control of controls.values()) {
@@ -718,44 +729,91 @@ function renderHubWindows(): void {
   for (const window of windows.values()) {
     if (window.kind === "hub") scheduleRender(window);
   }
+  // Every change the hub repaints for is one the published list may reflect.
+  publishSessionsSnapshot();
 }
 
-// Hub activity animation: while a foregrounded hub lists at least one active
-// session, a timer re-renders it so the per-row indicator alternates. The
-// timer stops itself once every session's activity ages out (its final tick
-// renders the rows indicator-free) or the hub leaves the foreground.
+let lastPublishedSnapshot = "";
+
+/**
+ * Publish the session list for main-thread consumers (the Glanceboard's
+ * Terminal widget): connected hosts with their sessions most-recently-updated
+ * first, each with its activity deadline (local clock, so the consumer can
+ * expire and animate it itself) and the glyph of its open view window. Posted
+ * only when the JSON actually changed.
+ */
+function publishSessionsSnapshot(): void {
+  const connected = connectedControls();
+  const snapshot: TerminalSessionsSnapshot = {
+    hosts: connected.map((control) => {
+      const connectionId = control.config.id;
+      const sessions = (control.state?.sessions ?? [])
+        .slice()
+        .sort(
+          (a, b) =>
+            (sessionRecency.get(recencyKey(connectionId, b.socket)) ?? 0) -
+            (sessionRecency.get(recencyKey(connectionId, a.socket)) ?? 0),
+        );
+      return {
+        name: connectionDisplayName(control.config),
+        sessions: sessions.map((session) => ({
+          key: recencyKey(connectionId, session.socket),
+          label: sessionLabel(session),
+          activeUntilMs: (sessionActivity.get(recencyKey(connectionId, session.socket)) ?? -ACTIVITY_ACTIVE_MS) + ACTIVITY_ACTIVE_MS,
+          openGlyph: viewGlyphForSocket(connectionId, session.socket),
+        })),
+      };
+    }),
+    status: sessionsStatusLine(),
+    configured: controls.size > 0,
+  };
+  const encoded = JSON.stringify(snapshot);
+  if (encoded === lastPublishedSnapshot) return;
+  lastPublishedSnapshot = encoded;
+  post({ type: "publish-state", key: TERMINAL_SESSIONS_STATE_KEY, state: snapshot });
+}
+
+// One animation clock for foreground hub rows and every terminal sidebar icon.
+// Keep ticking while the sidebar can show activity, even with the hub closed.
 let hubAnimationPhase = 0;
 let hubAnimationTimer: ReturnType<typeof setInterval> | null = null;
+const windowIconActivity = new Map<string, IconActivity>();
 
 function isSessionActive(connectionId: string, socket: string): boolean {
   const at = sessionActivity.get(recencyKey(connectionId, socket));
   return at !== undefined && Date.now() - at < ACTIVITY_ACTIVE_MS;
 }
 
-function hubAnimationShouldRun(): boolean {
-  if (!screenOn) return false;
-  let hubVisible = false;
-  for (const window of windows.values()) {
-    if (window.kind === "hub" && window.foreground) hubVisible = true;
-  }
-  if (!hubVisible) return false;
+function isWindowSessionActive(window: TerminalWindow): boolean {
+  if (window.kind === "view") return isSessionActive(window.connectionId, window.socket);
   const now = Date.now();
-  for (const at of sessionActivity.values()) {
-    if (now - at < ACTIVITY_ACTIVE_MS) return true;
-  }
-  return false;
+  return [...sessionActivity.values()].some((at) => now - at < ACTIVITY_ACTIVE_MS);
 }
 
-/** Start or stop the animation timer to match the current state. */
+function hubAnimationShouldRun(): boolean {
+  return screenOn && [...windows.values()].some(isWindowSessionActive);
+}
+
+function syncWindowIconActivity(): void {
+  for (const window of windows.values()) {
+    const activity: IconActivity = screenOn && isWindowSessionActive(window)
+      ? (hubAnimationPhase === 0 ? "on" : "off") : "idle";
+    if ((windowIconActivity.get(window.windowId) ?? "idle") === activity) continue;
+    windowIconActivity.set(window.windowId, activity);
+    post({ type: "set-icon-activity", windowId: window.windowId, activity });
+  }
+}
+
+/** Start or stop animation and publish changed icons, including expiry/wake. */
 function updateHubAnimation(): void {
-  if (hubAnimationShouldRun()) {
+  const shouldRun = hubAnimationShouldRun();
+  if (shouldRun && !hubAnimationTimer) hubAnimationPhase = 0;
+  syncWindowIconActivity();
+  if (shouldRun) {
     if (hubAnimationTimer) return;
     hubAnimationTimer = setInterval(() => {
       hubAnimationPhase = (hubAnimationPhase + 1) % 2;
-      if (!hubAnimationShouldRun() && hubAnimationTimer) {
-        clearInterval(hubAnimationTimer);
-        hubAnimationTimer = null;
-      }
+      updateHubAnimation();
       // Render even on the stopping tick, to clear expired indicators.
       renderHubWindows();
     }, HUB_ANIMATION_STEP_MS);
@@ -1108,6 +1166,8 @@ type HubItem = {
   heading?: boolean;
   /** Session with recent output: an animated indicator marks the row. */
   active?: boolean;
+  /** Glyph of the view window showing this session (the number column). */
+  openGlyph?: string | null;
   onSelect?: () => void;
 };
 
@@ -1173,10 +1233,10 @@ function hubSessionItems(window: HubWindow): HubItem[] {
     }
     const sessions = orderedSessions(window, control);
     for (const session of sessions) {
-      const openWindowId = viewWindowIdForSocket(control.config.id, session.socket);
       items.push({
-        label: openWindowId ? `${sessionLabel(session)}  [open]` : sessionLabel(session),
+        label: sessionLabel(session),
         active: isSessionActive(control.config.id, session.socket),
+        openGlyph: viewGlyphForSocket(control.config.id, session.socket),
         onSelect: () => {
           const windowId = viewWindowIdForSocket(control.config.id, session.socket);
           if (windowId) {
@@ -1411,6 +1471,19 @@ function handleHubInput(window: HubWindow, event: InputEvent, frameId: number): 
  * Includes views that were requested but whose surface hasn't opened yet, so
  * a quick double-select can't spawn two windows for one session.
  */
+/** Sidebar glyph of the (open or opening) view window on a session, or null. */
+function viewGlyphForSocket(connectionId: string, socket: string): string | null {
+  for (const window of windows.values()) {
+    if (window.kind === "view" && window.connectionId === connectionId && window.socket === socket) {
+      return window.glyph || null;
+    }
+  }
+  for (const pending of pendingViews.values()) {
+    if (pending.connectionId === connectionId && pending.socket === socket) return pending.glyph || null;
+  }
+  return null;
+}
+
 function viewWindowIdForSocket(connectionId: string, socket: string): string | null {
   for (const window of windows.values()) {
     if (window.kind === "view" && window.connectionId === connectionId && window.socket === socket) {
@@ -1497,13 +1570,13 @@ function paintHub(window: HubWindow): GrayImage {
   const font = chromeFont();
   const step = lineStep(font);
   // No border box: the shell chrome (top bar + sidebar) already frames the app.
-  // Title and status share the top line.
+  // Long statuses get a wrapped block and move the list below it.
   const title = window.mode === "connections" ? "Terminal - Connections" : "Terminal";
   image.drawText(font, 18, 10, title, 220);
-  const statusX = 18 + font.measureText(title) + 16;
-  image.drawText(font, statusX, 10, truncateText(font, hubStatusLine(window), Math.max(0, window.viewportWidth - statusX - 12)), 170);
+  const header = layoutHubHeader(font, title, hubStatusLine(window), window.viewportWidth, step);
+  header.lines.forEach((line, index) => image.drawText(font, header.x, header.y + index * step, line, 170));
 
-  let listTop = 16 + step;
+  let listTop = header.listTop;
   if (window.mode === "sessions" && controls.size === 0) {
     image.drawText(font, 24, listTop, "Add a g2mirror:// connection to get started, see:", 150);
     image.drawText(font, 24, listTop + step, "https://github.com/jimrandomh/g2mirror", 190);
@@ -1529,20 +1602,18 @@ function paintHub(window: HubWindow): GrayImage {
       // an outline-only selection signals the sidebar owns input.
       drawSelectionHighlight(image, 20, y - 2, window.viewportWidth - 40, hubRowH - 1, window.focused, 8);
     }
-    image.drawText(chromeFont(), 32, y + 2, item.label, selected ? 255 : 200);
-    if (item.active) {
-      // Activity indicator in the gutter left of the label, alternating
-      // filled/outline each animation step (drawn shapes, not a font glyph,
-      // so the two states render distinctly in every UI font).
-      const size = 6;
-      const iy = y + 2 + Math.max(0, ((font.lineHeight - size) / 2) | 0);
-      const value = selected ? 255 : 200;
-      if (hubAnimationPhase === 0) {
-        image.fillRect(22, iy, size, size, value);
-      } else {
-        image.drawRect(22, iy, size, size, value);
-      }
-    }
+    // Activity gutter, open-window number column, then the label, truncated
+    // to the row (shared with the Glanceboard's Terminal widget).
+    drawSessionRow(image, chromeFont(), {
+      x: 22,
+      y: y + 2,
+      width: window.viewportWidth - 22 - 26,
+      label: item.label,
+      openGlyph: item.openGlyph ?? null,
+      active: Boolean(item.active),
+      phase: hubAnimationPhase,
+      value: selected ? 255 : 200,
+    });
   }
   if (items.length > visibleRowCount) {
     drawListScrollbar(
@@ -1585,6 +1656,11 @@ function hubStatusLine(window: HubWindow): string {
   if (window.mode === "connections") {
     return "Select a connection to connect, disconnect, or remove.";
   }
+  return sessionsStatusLine();
+}
+
+/** The sessions view's status line (also published with the session snapshot). */
+function sessionsStatusLine(): string {
   if (controls.size === 0) {
     return "No connections configured.";
   }
@@ -1820,7 +1896,8 @@ function toolListSessions(): ToolResult {
       lines.push(`${connectionDisplayName(control.config)}:`);
     }
     for (const session of sessions) {
-      const open = viewWindowIdForSocket(control.config.id, session.socket) ? " [open]" : "";
+      const glyph = viewGlyphForSocket(control.config.id, session.socket);
+      const open = glyph ? ` [open in window ${glyph}]` : viewWindowIdForSocket(control.config.id, session.socket) ? " [open]" : "";
       lines.push(`- ${sessionLabel(session)}${open}`);
     }
     if (!sessions.length && multiHost) {

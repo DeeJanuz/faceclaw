@@ -71,12 +71,11 @@ test('review layer cleanup during sleep cannot turn the display back on', async 
   assert.equal(shell.screenOn, false); assert.deepEqual(screen, [false]);
 });
 
-test('native removal contract requires a generated JavaScript proxy override', () => {
-  const contract = fs.readFileSync('App_Resources/Android/src/main/java/com/faceclaw/app/FaceclawNotificationListener.java', 'utf8');
-  assert.match(contract, /\bvoid onNotificationRemoved\(String key\);/);
-  assert.doesNotMatch(contract, /default\s+void\s+onNotificationRemoved/);
-  assert.match(contract, /\bvoid onNotificationsChanged\(\);/);
-  assert.doesNotMatch(contract, /default\s+void\s+onNotificationsChanged/);
+test('native removal contract requires every Kotlin proxy callback', () => {
+  const contract = fs.readFileSync('native/kotlin/shared/src/commonMain/kotlin/com/faceclaw/app/callbacks/FaceclawNotificationListener.kt', 'utf8');
+  assert.match(contract, /\bfun onNotificationRemoved\(key: String\?\)/);
+  assert.match(contract, /\bfun onNotificationsChanged\(\)/);
+  assert.doesNotMatch(contract, /=\s*Unit/);
 });
 
 test('native snapshot changes invalidate icons and notify all observers without fake arrivals', async () => {
@@ -85,6 +84,7 @@ test('native snapshot changes invalidate icons and notify all observers without 
   const api = load('app/native/notification-icons.ts', {
     '../graphics/icons': { renderIcon: () => null },
     './external-notifications': { externalNotifications: () => [], invokeExternalNotification: () => false, dismissExternalNotification: () => false },
+    './notification-sources': { rememberNotificationSources() {} },
     '../graphics/image': { GrayImage }, './frame-timings': { logCurrent() {}, spanCurrent: (_label, run) => run() },
     '../util/array-util': { toUint8Array: value => value },
   }, { global: { isAndroid: true }, com: { faceclaw: { app: {
@@ -124,6 +124,7 @@ test('phone removal invalidates cached icons and reaches every removal observer'
   const api = load('app/native/notification-icons.ts', {
     '../graphics/icons': { renderIcon: () => null },
     './external-notifications': { externalNotifications: () => [], invokeExternalNotification: () => false, dismissExternalNotification: () => false },
+    './notification-sources': { rememberNotificationSources() {} },
     '../graphics/image': { GrayImage }, './frame-timings': { logCurrent() {}, spanCurrent: (label, run) => run() },
     '../util/array-util': { toUint8Array: value => value },
   }, { global: { isAndroid: true }, com: { faceclaw: { app: {

@@ -3,6 +3,15 @@ import { Frame, Observable, Screen } from "@nativescript/core";
 import { openEvenAppSettings } from "../native/even-app-conflict";
 
 export class OnboardingUnpairViewModel extends Observable {
+  get settingsButtonVisibility(): "visible" | "collapse" {
+    return global.isAndroid ? "visible" : "collapse";
+  }
+
+  get evenAppInstructions(): string {
+    return "If you use the Even Realities app, go to Home, select your glasses, open the Connection submenu, and press Disconnect" +
+      (global.isIOS ? "." : " (or disable the Even app's \"nearby devices\" permission).");
+  }
+
   onOpenEvenAppSettingsTap(): void {
     openEvenAppSettings();
   }

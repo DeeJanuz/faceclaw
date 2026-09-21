@@ -1,3 +1,4 @@
+import { evaluateNightscoutAlerts } from "./nightscout-alerts";
 import { getDefaultLargeFont, getDefaultSmallFont } from "../../graphics/ui-fonts";
 import { GrayImage, type UiFont } from "../../graphics/image";
 import { truncateText } from "../../graphics/textwrap";
@@ -6,6 +7,13 @@ import { Layer, LayerContext } from "../../ui/layers";
 import { nightscoutBridge, type NightscoutState } from "../../native/nightscout-bridge";
 import {
   isNightscoutSettingsConfigured,
+  loadNightscoutThresholds,
+  nightscoutMaxCannulaAgeSetting,
+  nightscoutCartridgeLowSetting,
+  nightscoutBatteryLowSetting,
+  nightscoutMaxLoopAgeSetting,
+  nightscoutAlwaysShowInTopBarSetting,
+  toggleSettingMenuItem,
   nightscoutApiTokenSetting,
   nightscoutSiteUrlSetting,
   textSettingMenuItem,
@@ -16,11 +24,11 @@ import { openSettingsSubMenu } from "../../ui/dashboard/settings-panel";
 import { lineStep } from "../../ui/metrics";
 
 const nightscoutLargeFont = getDefaultLargeFont();
-const NIGHTSCOUT_STALE_MS = 15 * 60 * 1000;
+export const NIGHTSCOUT_STALE_MS = 15 * 60 * 1000;
 const NIGHTSCOUT_GRAPH_WINDOW_MS = 2 * 60 * 60 * 1000;
 const NIGHTSCOUT_GRAPH_TIME_QUANTUM_MS = 60 * 1000;
 
-function drawDirectionIndicator(
+export function drawDirectionIndicator(
   image: GrayImage,
   font: UiFont,
   x: number,
@@ -77,7 +85,7 @@ function truncateLine(text: string, maxChars: number): string {
   return `${text.slice(0, Math.max(0, maxChars - 3))}...`;
 }
 
-function formatDelta(delta: number | null): string {
+export function formatDelta(delta: number | null): string {
   if (delta === null) return "--";
   return `${delta >= 0 ? "+" : ""}${Math.round(delta)}`;
 }
@@ -90,7 +98,7 @@ function formatBolusLabel(value: number): string {
   return Number.isInteger(value) ? `${value}` : value.toFixed(1);
 }
 
-function drawNightscoutGraph(
+export function drawNightscoutGraph(
   image: GrayImage,
   bounds: { x: number; y: number; width: number; height: number },
   nightscout: NightscoutState,
@@ -332,21 +340,43 @@ export class NightscoutLayer implements Layer {
 
     const statusX = 170;
     const statusWidth = width - 22 - statusX;
-    const statusLines: { text: string; shade: number; direction?: string }[] = [
+    const alerts = evaluateNightscoutAlerts(nightscout, loadNightscoutThresholds(), nowMs);
+    const statusLines: { text: string; shade: number; direction?: string; fields?: { text: string; warning?: boolean }[] }[] = [
       { text: `Delta ${formatDelta(nightscout.delta)}  Trend `, shade: 180, direction: nightscout.direction },
       {
         text: `IOB ${nightscout.iob === null ? "--" : nightscout.iob.toFixed(2)}  COB ${nightscout.cob === null ? "--" : formatWholeNumber(nightscout.cob)}  Updated ${formatTimestamp(latest.timestampMs)}`,
         shade: 160,
       },
       {
-        text: `CAGE ${formatAgeShortFromTimestamp(nightscout.cageTimestampMs, nowMs)}  Loop ${nightscout.openapsStatusShort}`,
-        shade: 160,
+        text: "", shade: 160,
+        fields: [
+          { text: `CAGE ${formatAgeShortFromTimestamp(nightscout.cageTimestampMs, nowMs)}`, warning: alerts.cannula },
+          { text: `Loop ${formatAgeShortFromTimestamp(nightscout.loopTimestampMs, nowMs)}`, warning: alerts.loop },
+        ],
       },
-      { text: `Pump ${nightscout.pumpStatus || "--"}`, shade: 150 },
+      {
+        text: "", shade: 150,
+        fields: [
+          { text: "Pump" },
+          { text: nightscout.reservoirUnits === null ? "--U" : `${Math.round(nightscout.reservoirUnits)}U`, warning: alerts.cartridge },
+          { text: nightscout.batteryVoltage === null ? "--V" : `${nightscout.batteryVoltage.toFixed(2)}V`, warning: alerts.battery },
+          { text: nightscout.pumpStatus || "--" },
+        ],
+      },
     ];
     let statusY = graphTop - 8 - statusLines.length * step;
     for (const line of statusLines) {
-      if (line.direction !== undefined) {
+      if (line.fields) {
+        let x = statusX;
+        for (const field of line.fields) {
+          const text = truncateText(font, field.text, Math.max(0, statusX + statusWidth - x));
+          const textWidth = font.measureText(text);
+          if (field.warning && textWidth > 0) image.fillRect(x - 2, statusY - 1, textWidth + 4, font.lineHeight + 2, 230);
+          image.drawText(font, x, statusY, text, field.warning ? 0 : line.shade);
+          x += textWidth + font.measureText("  ");
+          if (x >= statusX + statusWidth) break;
+        }
+      } else if (line.direction !== undefined) {
         image.drawText(font, statusX, statusY, line.text, line.shade);
         drawDirectionIndicator(image, font, statusX + font.measureText(line.text), statusY, line.direction, line.shade);
       } else {
@@ -390,16 +420,21 @@ export function nightscoutMenuItems(): MenuItem[] {
         openSettingsSubMenu(ctx, "Nightscout settings", [
           textSettingMenuItem(nightscoutSiteUrlSetting),
           textSettingMenuItem(nightscoutApiTokenSetting),
+          textSettingMenuItem(nightscoutMaxCannulaAgeSetting),
+          textSettingMenuItem(nightscoutCartridgeLowSetting),
+          textSettingMenuItem(nightscoutBatteryLowSetting),
+          textSettingMenuItem(nightscoutMaxLoopAgeSetting),
+          toggleSettingMenuItem(nightscoutAlwaysShowInTopBarSetting),
         ]);
       },
     },
   ];
 }
 
-function isNightscoutPointStale(point: NightscoutState["latest"], nowMs: number): boolean {
+export function isNightscoutPointStale(point: NightscoutState["latest"], nowMs: number): boolean {
   return point !== null && nowMs - point.timestampMs > NIGHTSCOUT_STALE_MS;
 }
 
-function drawNightscoutValueStrikeThrough(image: GrayImage, x: number, y: number, width: number): void {
+export function drawNightscoutValueStrikeThrough(image: GrayImage, x: number, y: number, width: number): void {
   image.drawLine(x, y, x + width, y, 180);
 }

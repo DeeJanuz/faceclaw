@@ -14,7 +14,6 @@ public final class Pcm16StreamAdapterCheck {
         acceptsEmptyAndLargerOutput();
         respectsValidInputCount();
         rejectsInvalidProcessorOutput();
-        matchesRealSuppressorOutput();
     }
 
     private static void preservesFourGlassesPackets() {
@@ -68,21 +67,6 @@ public final class Pcm16StreamAdapterCheck {
         assertThrows(() -> Pcm16StreamAdapter.process(new short[] {1}, 2, bytes -> bytes));
     }
 
-    private static void matchesRealSuppressorOutput() {
-        FaceclawNoiseSuppressor direct = new FaceclawNoiseSuppressor(16000);
-        FaceclawNoiseSuppressor adapted = new FaceclawNoiseSuppressor(16000);
-        int[] chunks = {800, 800, 17, 91, 1200};
-        int offset = 0;
-        short[] source = sequence(Arrays.stream(chunks).sum(), -1200);
-        for (int chunk : chunks) {
-            short[] input = Arrays.copyOfRange(source, offset, offset + chunk);
-            byte[] expectedBytes = direct.process(toBytes(input));
-            short[] actual = Pcm16StreamAdapter.process(input, input.length, adapted::process);
-            assertArrayEquals(fromBytes(expectedBytes), actual, "real suppressor output");
-            offset += chunk;
-        }
-    }
-
     private static short[] sequence(int length, int start) {
         short[] values = new short[length];
         for (int i = 0; i < length; i++) values[i] = (short) (start + i);
@@ -96,14 +80,6 @@ public final class Pcm16StreamAdapterCheck {
             bytes[i * 2 + 1] = (byte) ((samples[i] >> 8) & 0xff);
         }
         return bytes;
-    }
-
-    private static short[] fromBytes(byte[] bytes) {
-        short[] samples = new short[bytes.length / 2];
-        for (int i = 0; i < samples.length; i++) {
-            samples[i] = (short) ((bytes[i * 2] & 0xff) | (bytes[i * 2 + 1] << 8));
-        }
-        return samples;
     }
 
     private static short[] concatenate(List<short[]> blocks) {

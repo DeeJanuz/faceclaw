@@ -28,12 +28,14 @@ import { WindowMenu, WindowMenuLayer } from "../../ui/window-menu";
 import type { LayerContext } from "../../ui/layers";
 import { truncateText, wrapText } from "../../graphics/textwrap";
 import { onSettingsStoreChanged } from "../../native/settings-store";
+import { openUrlOnPhone } from "../../native/open-url";
 import {
   navigateDestinationAddressDraftSetting,
   navigateDestinationNameDraftSetting,
   navigateRememberRecentSetting,
   navigateDisplayModeSetting,
   navigateVerticalPositionSetting,
+  mapboxApiKeySetting,
   enumSettingMenuItem,
   type ConfigSettingString,
 } from "../../ui/dashboard-settings";
@@ -62,19 +64,20 @@ import {
   GESTURE_SHORT_THEN_LONG_PRESS,
   type InputEvent,
 } from "../../ui/gestures";
-import { LocationTracker, type TrackedLocation } from "../../native/location-tracker";
+import { LocationTracker, type TrackedLocation } from "./navigation-sensors";
 import {
   fetchRoute,
   fetchStaticMapGray,
   geocodeForward,
   isMapboxConfigured,
+  MAPBOX_TOKEN_SETTING_KEY,
   type GeocodeCandidate,
   type Route,
   type RouteProfile,
   type StaticMapCamera,
 } from "../../native/mapbox";
-import { addCompassListener, COMPASS_CHANGED, setCompassEnabled, type CompassEvent } from "../../native/compass";
-import { magneticDeclinationDegrees } from "../../native/geomagnetic";
+import { addCompassListener, COMPASS_CHANGED, setCompassEnabled, type CompassEvent } from "./navigation-sensors";
+import { magneticDeclinationDegrees, handleNavigationSensorEvent } from "./navigation-sensors";
 import { calibrateHeading, normalizeHeading } from "../compass/calibration";
 import { bearingDegrees, haversineMeters, RouteFollower, type RouteProgress } from "./route-follower";
 import { drawManeuverGlyph } from "./maneuver-icons";
@@ -111,7 +114,7 @@ const largeFont = getFont("terminus32");
 const mediumFont = getFont("terminus24");
 const smallFont = getDefaultSmallFont();
 
-type NavPhase = "idle" | "acquiring" | "routing" | "navigating" | "arrived";
+type NavPhase = "idle" | "acquiring" | "routing" | "navigating" | "map" | "arrived";
 type MapMode = "follow" | "overview";
 
 type NavWindow = {
@@ -181,6 +184,8 @@ let lastRerouteAtMs = 0;
 let rerouteInFlight = false;
 /** Bumped on every new route/mode so stale map fetches can be discarded. */
 let routeGeneration = 0;
+/** Invalidates GPS/geocoding/routing work when the route is replaced or closed. */
+let navigationGeneration = 0;
 
 /**
  * Where to go: free text to geocode (optionally shown under a saved
@@ -190,10 +195,14 @@ type NavTarget =
   | { kind: "query"; query: string; label?: string }
   | { kind: "place"; name: string; place: string; longitude: number; latitude: number };
 
-/** An entry on the idle page's destination list. */
+/**
+ * An entry on the idle page's list: the map, a destination, or (while no
+ * Mapbox token is set) one of the setup actions offered in its place.
+ */
 type IdleEntry =
   | { kind: "saved"; destination: SavedDestination }
-  | { kind: "recent"; destination: RecentDestination };
+  | { kind: "recent"; destination: RecentDestination }
+  | { kind: "action"; label: string; detail: string; run: () => void };
 
 /** Idle-page list selection (index into idleEntries()). */
 let idleSelection = 0;
@@ -208,6 +217,8 @@ type DestinationEdit = {
   setting: ConfigSettingString;
   title: string;
   onDone: (value: string) => void;
+  /** Runs on double-click (cancel); edits of a live setting restore it here. */
+  onCancel?: () => void;
 };
 let editing: DestinationEdit | null = null;
 
@@ -230,7 +241,6 @@ let compassActive = false;
 let unsubscribeCompass: (() => void) | null = null;
 /** Wearer's true heading (degrees clockwise from north) as last drawn, or null before compass data arrives. */
 let headHeadingDeg: number | null = null;
-let declinationCache: { latitude: number; longitude: number; degrees: number | null } | null = null;
 
 let tickTimer: ReturnType<typeof setInterval> | null = null;
 let firstFixWaiters: Array<(fix: TrackedLocation) => void> = [];
@@ -239,7 +249,7 @@ const tracker = new LocationTracker({
   onLocation: (fix) => handleFix(fix),
   onError: (message) => {
     statusMessage = message;
-    if (phase === "acquiring") phase = "idle";
+    if (phase === "acquiring") stopNavigation(message);
     render();
   },
 });
@@ -251,7 +261,9 @@ function post(message: WorkerAppReply): void {
 // Destinations edited on the phone (the text editor, or the Settings app's
 // Home/Work rows) repaint the idle list / the edit screen live.
 onSettingsStoreChanged((key) => {
-  if (key.startsWith("navigate.")) render();
+  // The token key repaints too: the phone editor writes it live during
+  // Edit token, and the idle page changes shape once one is set.
+  if (key.startsWith("navigate.") || key === MAPBOX_TOKEN_SETTING_KEY) render();
 });
 
 // The host queues messages until this arrives: posts to a worker whose bundle
@@ -263,6 +275,9 @@ post({ type: "worker-ready" });
 global.onmessage = (event: { data: WorkerAppMessage }) => {
   const message = event.data;
   switch (message.type) {
+    case "navigation-sensors":
+      handleNavigationSensorEvent(message.event);
+      break;
     case "open-window":
       window = {
         windowId: message.windowId,
@@ -284,6 +299,10 @@ global.onmessage = (event: { data: WorkerAppMessage }) => {
       window.viewportHeight = message.viewport.height;
       window.menu?.resize(message.viewport);
       window.lastSubmittedFingerprint = "";
+      if (phase === "map") {
+        resetMapState();
+        maybeRefreshMap();
+      }
       render();
       break;
     case "close-window":
@@ -371,15 +390,43 @@ function startNavigation(query: string, requestedProfile: RouteProfile): Promise
   );
 }
 
+async function startMap(): Promise<void> {
+  if (!isMapboxConfigured()) return;
+  stopNavigation("");
+  const generation = navigationGeneration;
+  phase = "acquiring";
+  mapMode = "follow";
+  zoomOffset = 0;
+  statusMessage = "Locating you for the map...";
+  render();
+  try {
+    ensureTracking();
+    await waitForFix();
+    if (generation !== navigationGeneration) return;
+    phase = "map";
+    statusMessage = "";
+    ensureTickTimer();
+    maybeRefreshMap();
+    render();
+  } catch (error) {
+    if (generation !== navigationGeneration) return;
+    stopNavigation(String((error as Error)?.message ?? error));
+    render();
+  }
+}
+
 async function startNavigationTo(target: NavTarget, requestedProfile: RouteProfile): Promise<string> {
   const query = target.kind === "query" ? target.query : target.name;
   if (!isMapboxConfigured()) {
-    statusMessage = "Set a Mapbox token in Settings > API Keys.";
+    statusMessage = "Navigation needs a Mapbox token. This is free (up to a usage limit); open Mapbox in a browser on your phone or pick Edit token below.";
     phase = "idle";
     render();
     throw new Error(statusMessage);
   }
+  const generation = ++navigationGeneration;
+  const checkCurrent = () => { if (generation !== navigationGeneration) throw new Error("Navigation cancelled."); };
   const hadActiveRoute = phase === "navigating" && follower !== null;
+  const hadActiveMap = phase === "map";
   const previous = {
     destination,
     destinationName,
@@ -393,6 +440,7 @@ async function startNavigationTo(target: NavTarget, requestedProfile: RouteProfi
     render();
     ensureTracking();
     const fix = await waitForFix();
+    checkCurrent();
 
     phase = "routing";
     let picked: GeocodeCandidate;
@@ -409,6 +457,7 @@ async function startNavigationTo(target: NavTarget, requestedProfile: RouteProfi
       statusMessage = `Finding ${query}...`;
       render();
       candidates = await geocodeForward(query, fix, 5);
+      checkCurrent();
       if (!candidates.length) {
         throw new Error(`No places found matching "${query}".`);
       }
@@ -421,6 +470,7 @@ async function startNavigationTo(target: NavTarget, requestedProfile: RouteProfi
     statusMessage = `Routing to ${destinationName}...`;
     render();
     const route = await fetchRoute(fix, destination, profile);
+    checkCurrent();
     adoptRoute(route);
     // Saved destinations already have a row of their own on the idle page;
     // everything else (voice, assistant, a re-picked recent) goes on the
@@ -436,13 +486,13 @@ async function startNavigationTo(target: NavTarget, requestedProfile: RouteProfi
     if (window) post({ type: "focus-window", windowId: window.windowId });
     return startSummary(picked, candidates, route);
   } catch (error) {
+    if (generation !== navigationGeneration) throw error;
     const message = String((error as Error)?.message ?? error);
     statusMessage = message;
-    // A failed new destination shouldn't kill guidance that was already
-    // running; fall back to the ongoing route (and its destination, which
-    // the geocode step may have partially overwritten).
-    if (hadActiveRoute) {
-      phase = "navigating";
+    // A failed new destination shouldn't close the existing map or guidance.
+    // Restore the destination too: geocoding may have overwritten it.
+    if (hadActiveRoute || hadActiveMap) {
+      phase = hadActiveRoute ? "navigating" : "map";
       destination = previous.destination;
       destinationName = previous.destinationName;
       destinationPlace = previous.destinationPlace;
@@ -463,7 +513,6 @@ function adoptRoute(route: Route): void {
   mapMode = "follow";
   zoomOffset = 0;
   statusMessage = "";
-  routeGeneration++;
   resetMapState();
   ensureTracking();
   ensureTickTimer();
@@ -473,6 +522,7 @@ function adoptRoute(route: Route): void {
 }
 
 function stopNavigation(finalStatus: string): void {
+  ++navigationGeneration;
   phase = "idle";
   statusMessage = finalStatus;
   follower = null;
@@ -480,7 +530,6 @@ function stopNavigation(finalStatus: string): void {
   destination = null;
   destinationName = "";
   destinationPlace = "";
-  routeGeneration++;
   resetMapState();
   stopTrackingIfIdle();
   ensureTickTimer();
@@ -501,6 +550,12 @@ function handleFix(fix: TrackedLocation): void {
   }
   for (const waiter of firstFixWaiters.splice(0)) waiter(fix);
 
+  if (phase === "map") {
+    statusMessage = "";
+    maybeRefreshMap();
+    render();
+    return;
+  }
   if (phase !== "navigating" || !follower) return;
   progress = follower.update(fix.longitude, fix.latitude);
 
@@ -522,14 +577,16 @@ function handleFix(fix: TrackedLocation): void {
 async function maybeReroute(fix: TrackedLocation): Promise<void> {
   if (rerouteInFlight || !destination) return;
   if (Date.now() - lastRerouteAtMs < REROUTE_MIN_INTERVAL_MS) return;
+  const generation = navigationGeneration;
   rerouteInFlight = true;
   lastRerouteAtMs = Date.now();
   statusMessage = "Rerouting...";
   render();
   try {
     const route = await fetchRoute(fix, destination, profile);
-    if (phase === "navigating") adoptRoute(route);
+    if (generation === navigationGeneration && phase === "navigating") adoptRoute(route);
   } catch (error) {
+    if (generation !== navigationGeneration) return;
     statusMessage = `Reroute failed: ${String((error as Error)?.message ?? error)}`;
     render();
   } finally {
@@ -571,7 +628,7 @@ function waitForFix(): Promise<TrackedLocation> {
 /** Hold the magnetometer only while its reading is actually on screen. */
 function reconcileCompass(): void {
   const wanted =
-    window !== null && window.foreground && screenOn && phase === "navigating" && mapMode === "follow";
+    window !== null && window.foreground && screenOn && (phase === "navigating" || phase === "map") && mapMode === "follow";
   if (wanted === compassActive) return;
   compassActive = wanted;
   if (wanted) {
@@ -590,7 +647,9 @@ function handleCompassEvent(event: CompassEvent): void {
   // Wearer-fit offset from the Compass app's calibration, then declination
   // from our own GPS fix: the map is always true-north referenced.
   const magnetic = calibrateHeading(event.headingDegrees);
-  const heading = normalizeHeading(magnetic + (currentDeclination() ?? 0));
+  const correction = currentDeclination();
+  if (correction === null) return; // Keep the travel-direction arrow until true north is known.
+  const heading = normalizeHeading(magnetic + correction);
   if (headHeadingDeg !== null && angularDistance(heading, headHeadingDeg) < HEADING_STEP_DEG) return;
   headHeadingDeg = heading;
   render();
@@ -598,19 +657,7 @@ function handleCompassEvent(event: CompassEvent): void {
 
 /** Declination at the last fix; it only varies over tens of kilometres, so cache per coarse position. */
 function currentDeclination(): number | null {
-  if (!lastFix) return null;
-  if (
-    !declinationCache ||
-    Math.abs(declinationCache.latitude - lastFix.latitude) > 0.5 ||
-    Math.abs(declinationCache.longitude - lastFix.longitude) > 0.5
-  ) {
-    declinationCache = {
-      latitude: lastFix.latitude,
-      longitude: lastFix.longitude,
-      degrees: magneticDeclinationDegrees(lastFix.latitude, lastFix.longitude),
-    };
-  }
-  return declinationCache.degrees;
+  return lastFix ? magneticDeclinationDegrees(lastFix.latitude, lastFix.longitude) : null;
 }
 
 function angularDistance(a: number, b: number): number {
@@ -619,7 +666,7 @@ function angularDistance(a: number, b: number): number {
 }
 
 function ensureTickTimer(): void {
-  const shouldRun = phase === "navigating";
+  const shouldRun = phase === "navigating" || phase === "map";
   if (shouldRun && tickTimer === null) {
     tickTimer = setInterval(() => {
       maybeRefreshMap();
@@ -635,6 +682,7 @@ function ensureTickTimer(): void {
 // Map pane
 
 function resetMapState(): void {
+  routeGeneration++;
   mapImage = null;
   mapFetchedKey = "";
   mapInFlight = false;
@@ -665,7 +713,7 @@ function currentBearing(): number {
 
 function currentZoom(): number {
   let zoom: number;
-  if (profile === "walking") {
+  if (phase === "map" || profile === "walking") {
     zoom = 16.5;
   } else if (progress && progress.metersToNextManeuver < 250) {
     zoom = 16.5;
@@ -692,7 +740,7 @@ function desiredMapView(): { camera: StaticMapCamera; key: string; path: Array<[
   const position = currentPosition();
   if (!position) return null;
   const zoom = currentZoom();
-  const bearing = Math.round(currentBearing() / BEARING_BUCKET_DEG) * BEARING_BUCKET_DEG;
+  const bearing = phase === "map" ? 0 : Math.round(currentBearing() / BEARING_BUCKET_DEG) * BEARING_BUCKET_DEG;
   const path =
     follower && progress
       ? simplifyPath(follower.routeSliceAround(progress.alongMeters, 250, 3000), 80)
@@ -710,6 +758,7 @@ function desiredMapView(): { camera: StaticMapCamera; key: string; path: Array<[
  * a few seconds passed while moving. Single-flight with failure backoff.
  */
 function maybeRefreshMap(): void {
+  if (phase !== "navigating" && phase !== "map") return;
   if (!window || !window.foreground || !screenOn) return;
   if (mapInFlight || Date.now() < mapNextRetryAtMs) return;
   if (!isMapboxConfigured()) return;
@@ -719,7 +768,8 @@ function maybeRefreshMap(): void {
   let stale = mapImage === null || view.key !== mapFetchedKey;
   if (!stale && view.camera.kind === "center" && mapLastFetchCenter) {
     const moved = haversineMeters(mapLastFetchCenter, [view.camera.longitude, view.camera.latitude]);
-    const viewportMeters = MAP_SIZE * metersPerPixel(view.camera.zoom, view.camera.latitude);
+    const size = mapDimensions();
+    const viewportMeters = Math.min(size.width, size.height) * metersPerPixel(view.camera.zoom, view.camera.latitude);
     if (moved > viewportMeters * MOVE_REFRESH_FRACTION) stale = true;
     else if (Date.now() - mapLastFetchAtMs > IDLE_REFRESH_MS && moved > IDLE_REFRESH_MIN_MOVE_M) stale = true;
   }
@@ -729,13 +779,12 @@ function maybeRefreshMap(): void {
   const generation = routeGeneration;
   fetchStaticMapGray({
     camera: view.camera,
-    width: MAP_SIZE,
-    height: MAP_SIZE,
+    ...mapDimensions(),
     routePath: view.path.length >= 2 ? view.path : undefined,
   })
     .then((image) => {
-      mapInFlight = false;
       if (generation !== routeGeneration) return; // Route/mode changed mid-fetch.
+      mapInFlight = false;
       levelMap(image);
       mapImage = image;
       mapFetchedKey = view.key;
@@ -746,11 +795,18 @@ function maybeRefreshMap(): void {
       render();
     })
     .catch((error) => {
+      if (generation !== routeGeneration) return;
       mapInFlight = false;
       mapNextRetryAtMs = Date.now() + MAP_RETRY_BACKOFF_MS;
       mapLastError = String((error as Error)?.message ?? error);
       render();
     });
+}
+
+function mapDimensions(): { width: number; height: number } {
+  return phase === "map" && window
+    ? { width: window.viewportWidth, height: Math.max(1, window.viewportHeight - 30) }
+    : { width: MAP_SIZE, height: MAP_SIZE };
 }
 
 /** Keep every Nth point (ends always included) to bound the overlay URL size. */
@@ -834,6 +890,7 @@ function startSummary(picked: GeocodeCandidate, candidates: GeocodeCandidate[], 
 }
 
 function describeRouteStatus(): string {
+  if (phase === "map") return "Showing the map around your current location. No destination set.";
   if (phase === "arrived") return `Arrived at ${destinationName}.`;
   if (phase !== "navigating" || !follower) return "Navigation is not active.";
   if (!progress) return `Navigating to ${destinationName}; waiting for a GPS fix.`;
@@ -855,12 +912,12 @@ function describeRouteStatus(): string {
  */
 function windowMenuItems(win: NavWindow): MenuItem[] {
   const items: MenuItem[] = [];
-  if (phase === "navigating" || phase === "arrived") {
+  if (phase !== "idle") {
     items.push({
-      label: "Stop navigation",
+      label: phase === "map" ? "Close map" : "Stop navigation",
       onSelect: (ctx) => {
         ctx.stack.pop();
-        stopNavigation("Navigation stopped.");
+        stopNavigation(phase === "map" ? "" : "Navigation stopped.");
         render();
       },
     });
@@ -1036,8 +1093,13 @@ function closeMenusAnd(ctx: LayerContext, action: () => void): void {
  * Open the phone text editor on a staging setting. The editor writes the
  * draft live (repainted via the settings listener); click here confirms.
  */
-function beginEdit(setting: ConfigSettingString, title: string, onDone: (value: string) => void): void {
-  editing = { setting, title, onDone };
+function beginEdit(
+  setting: ConfigSettingString,
+  title: string,
+  onDone: (value: string) => void,
+  onCancel?: () => void,
+): void {
+  editing = { setting, title, onDone, onCancel };
   post({ type: "start-text-setting-edit", settingId: setting.id });
   render();
 }
@@ -1047,6 +1109,7 @@ function finishEdit(confirmed: boolean): void {
   editing = null;
   post({ type: "end-text-setting-edit" });
   if (current && confirmed) current.onDone(current.setting.get());
+  else if (current) current.onCancel?.();
   // onDone may have started the next step; only fully leave when it didn't.
   if (!editing) {
     navigateDestinationNameDraftSetting.set("");
@@ -1075,13 +1138,61 @@ function beginAddDestination(): void {
   });
 }
 
+/**
+ * Edit the Mapbox token in place: the phone editor writes the real setting
+ * live, so cancelling puts back whatever was there before.
+ */
+function beginTokenEdit(): void {
+  const previous = mapboxApiKeySetting.get();
+  beginEdit(
+    mapboxApiKeySetting,
+    mapboxApiKeySetting.glassesEditTitle,
+    () => {
+      statusMessage = "";
+    },
+    () => mapboxApiKeySetting.set(previous),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Idle page destination list
 
+/** Where a user gets a token: Mapbox's access-tokens page (sign-up/login first when needed). */
+const MAPBOX_TOKENS_URL = "https://account.mapbox.com/access-tokens/";
+
+/** Offered in place of the destination list until a Mapbox token is set. */
+function tokenSetupEntries(): IdleEntry[] {
+  return [
+    {
+      kind: "action",
+      label: "Open mapbox.com",
+      detail: "Get a free token in the phone browser",
+      run: () => {
+        statusMessage = openUrlOnPhone(MAPBOX_TOKENS_URL)
+          ? "Opening mapbox.com on your phone. Copy your public token (pk...) and pick Edit token."
+          : "Could not open a browser on the phone. Visit account.mapbox.com/access-tokens to get a token.";
+      },
+    },
+    {
+      kind: "action",
+      label: "Edit token",
+      detail: "Type or paste it in the phone app",
+      run: () => beginTokenEdit(),
+    },
+  ];
+}
+
 function idleEntries(): IdleEntry[] {
-  const entries: IdleEntry[] = loadSavedDestinations()
+  if (!isMapboxConfigured()) return tokenSetupEntries();
+  const entries: IdleEntry[] = [{
+    kind: "action",
+    label: "Map around me",
+    detail: "Follow my location",
+    run: () => { void startMap(); },
+  }];
+  entries.push(...loadSavedDestinations()
     .filter((destination) => destination.address)
-    .map((destination): IdleEntry => ({ kind: "saved", destination }));
+    .map((destination): IdleEntry => ({ kind: "saved", destination })));
   for (const destination of loadRecentDestinations()) {
     entries.push({ kind: "recent", destination });
   }
@@ -1094,6 +1205,10 @@ function clampIdleSelection(): void {
 }
 
 function navigateToIdleEntry(entry: IdleEntry): void {
+  if (entry.kind === "action") {
+    entry.run();
+    return;
+  }
   const target: NavTarget =
     entry.kind === "saved"
       ? { kind: "query", query: entry.destination.address, label: entry.destination.name }
@@ -1157,7 +1272,7 @@ function handleInput(win: NavWindow, event: InputEvent, frameId: number): void {
       mapMode = mapMode === "follow" ? "overview" : "follow";
       resetMapState();
       maybeRefreshMap();
-    } else if (phase === "arrived") {
+    } else if (phase === "arrived" || phase === "map") {
       stopNavigation("");
     } else if (phase === "idle") {
       const entry = idleEntries()[idleSelection];
@@ -1174,7 +1289,7 @@ function handleInput(win: NavWindow, event: InputEvent, frameId: number): void {
     return;
   }
   if (event.type === "scroll-up" || event.type === "scroll-down") {
-    if (phase === "navigating" && mapMode === "follow") {
+    if ((phase === "navigating" || phase === "map") && mapMode === "follow") {
       zoomOffset = Math.max(-3, Math.min(2, zoomOffset + (event.type === "scroll-up" ? 0.5 : -0.5)));
       maybeRefreshMap();
       renderAndSubmit(win, frameId);
@@ -1201,6 +1316,8 @@ function paintContent(win: NavWindow): GrayImage {
   const image = new GrayImage(win.viewportWidth, win.viewportHeight, 0);
   if (editing) {
     paintEdit(image, editing);
+  } else if (phase === "map") {
+    paintMap(image);
   } else if (phase === "idle" || phase === "acquiring" || phase === "routing") {
     paintIdle(image, win);
   } else {
@@ -1233,10 +1350,11 @@ function paintIdle(image: GrayImage, win: NavWindow): void {
   image.drawText(mediumFont, 24, 16, "Navigate", 245);
   const busy = phase !== "idle";
   const entries = busy ? [] : idleEntries();
-  const hint = !isMapboxConfigured()
-    ? "Set a Mapbox token in Settings > API Keys to enable navigation."
+  const configured = isMapboxConfigured();
+  const hint = !configured
+    ? "Navigation needs a Mapbox public token (free at mapbox.com). Get one, then enter it here or in Settings > API Keys."
     : entries.length
-      ? "Pick a destination below, or say one via Voice input (system menu, long-press)."
+      ? "View the map or pick a destination below. Use Voice input (system menu, long-press) to say a destination."
       : "Ask the voice assistant to navigate somewhere, or pick Voice input from the system menu (long-press) to say a destination. Save Home, Work and other places from the app menu.";
   const hintLines = wrapText(smallFont, hint, image.width - 48);
   const hintStep = smallFont.lineHeight + 2;
@@ -1255,14 +1373,14 @@ function paintIdle(image: GrayImage, win: NavWindow): void {
     paintIdleList(image, win, entries, y);
     drawFooter(
       image,
-      `${GESTURE_SCROLL} select   ${GESTURE_CLICK} go   ${GESTURE_SHORT_THEN_LONG_PRESS} app menu   ${GESTURE_DOUBLE_CLICK} back`,
+      `${GESTURE_SCROLL} select   ${GESTURE_CLICK} ${configured ? "go" : "choose"}   ${GESTURE_SHORT_THEN_LONG_PRESS} app menu   ${GESTURE_DOUBLE_CLICK} back`,
     );
   } else {
     drawFooter(image, `${GESTURE_SHORT_THEN_LONG_PRESS} app menu   ${GESTURE_DOUBLE_CLICK} back`);
   }
 }
 
-/** Saved destinations (name + address) then recent places, one selectable row each. */
+/** Map action, saved destinations, then recent places, one selectable row each. */
 function paintIdleList(image: GrayImage, win: NavWindow, entries: IdleEntry[], top: number): void {
   const rowHeight = listRowHeight(smallFont);
   const listBottom = image.height - 30;
@@ -1281,7 +1399,18 @@ function paintIdleList(image: GrayImage, win: NavWindow, entries: IdleEntry[], t
     if (selected) drawSelectionHighlight(image, rowX, y, rowWidth, rowHeight - 2, win.focused);
     const textX = rowX + 6;
     const textY = y + LIST_ROW_TEXT_INSET;
-    if (entry.kind === "saved") {
+    if (entry.kind === "action") {
+      const label = truncateText(smallFont, entry.label, labelWidth);
+      image.drawText(smallFont, textX, textY, label, selected ? 245 : 210);
+      const detailX = textX + labelWidth + 8;
+      image.drawText(
+        smallFont,
+        detailX,
+        textY,
+        truncateText(smallFont, entry.detail, rowX + rowWidth - 6 - detailX),
+        selected ? 170 : 130,
+      );
+    } else if (entry.kind === "saved") {
       const label = truncateText(smallFont, entry.destination.name, labelWidth);
       image.drawText(smallFont, textX, textY, label, selected ? 245 : 210);
       const detailX = textX + labelWidth + 8;
@@ -1378,6 +1507,21 @@ function paintNavigating(image: GrayImage, win: NavWindow): void {
   }
   const modeHint = mapMode === "follow" ? "overview" : "follow";
   drawFooter(image, `${GESTURE_SCROLL} zoom   ${GESTURE_CLICK} ${modeHint}   ${GESTURE_DOUBLE_CLICK} back`, PANEL_X + 8);
+}
+
+function paintMap(image: GrayImage): void {
+  const { width, height } = mapDimensions();
+  if (mapImage) {
+    image.bitBlt(mapImage, 0, 0);
+    drawChevron(image, width / 2, height / 2, headHeadingDeg ?? 0);
+  } else {
+    image.drawText(smallFont, 24, height / 2 - 8, mapLastError ? "Map unavailable; retrying..." : "Loading map...", 170);
+  }
+  if (statusMessage) {
+    image.fillRect(0, 0, width, smallFont.lineHeight + 8, 0);
+    image.drawText(smallFont, 16, 4, truncateText(smallFont, statusMessage, width - 32), 200);
+  }
+  drawFooter(image, `${GESTURE_SCROLL} zoom   ${GESTURE_CLICK} destinations   ${GESTURE_DOUBLE_CLICK} back`);
 }
 
 /**

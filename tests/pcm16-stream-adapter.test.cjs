@@ -10,12 +10,7 @@ test('PCM stream adapter preserves variable-length processor output', () => {
   try {
     execFileSync('javac', [
       '-d', classes,
-      'tests/fixtures/android/media/audiofx/AudioEffect.java',
-      'tests/fixtures/android/media/audiofx/NoiseSuppressor.java',
-      'tests/fixtures/android/media/audiofx/AcousticEchoCanceler.java',
-      'tests/fixtures/android/media/audiofx/AutomaticGainControl.java',
       'App_Resources/Android/src/main/java/com/faceclaw/app/Pcm16StreamAdapter.java',
-      'App_Resources/Android/src/main/java/com/faceclaw/app/FaceclawNoiseSuppressor.java',
       'tests/fixtures/Pcm16StreamAdapterCheck.java',
     ], { encoding: 'utf8', stdio: 'pipe' });
     assert.equal(execFileSync(

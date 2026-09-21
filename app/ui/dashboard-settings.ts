@@ -1,3 +1,4 @@
+import { normalizeNightscoutThreshold, type NightscoutThresholds } from "../apps/nightscout/nightscout-alerts";
 import { GESTURE_DOUBLE_CLICK, InputEvent } from "./gestures";
 import {
   getBooleanSetting,
@@ -9,7 +10,7 @@ import {
 import { getDefaultSmallFont } from "~/graphics/ui-fonts";
 import { wrapText } from "~/graphics/textwrap";
 import {
-  ASSISTANT_MODEL_VALUES,
+  ASSISTANT_MODEL_CHOICES,
   assistantModelLabel,
   assistantModelProvider,
   type AssistantModel,
@@ -24,7 +25,9 @@ export type NightscoutSettings = {
   siteUrl: string;
   apiToken: string;
 };
-export type BatteryDisplayMode = "icon" | "percentage";
+export type BatteryDisplayMode = "icon" | "percentage" | "stacked" | "stacked-percentage";
+/** When a top-bar battery indicator is shown: always, only below 50%, or never. */
+export type BatteryIndicatorVisibility = "always" | "low" | "never";
 export type TimeFormat = "24h" | "12h";
 export type ScreenTimeoutSetting = "15s" | "30s" | "1m" | "3m" | "never";
 // "auto" lets the glasses' ambient-light sensor drive brightness; the numeric
@@ -59,9 +62,14 @@ export function onAnySettingChanged(listener: () => void): () => void {
 }
 
 onSettingsStoreChanged(() => {
-  for (const listener of Array.from(settingChangeListeners)) {
-    listener();
-  }
+  // Font/cache invalidation listeners may register after this relay. Let the
+  // entire store notification finish before observers synchronously repaint.
+  // Otherwise Save updates the label but paints the previous typeface once.
+  setTimeout(() => {
+    for (const listener of Array.from(settingChangeListeners)) {
+      listener();
+    }
+  }, 0);
 });
 
 export abstract class ConfigSetting<TValue, TId extends string = string> {
@@ -205,13 +213,67 @@ export class ConfigSettingString<TId extends string = string> extends ConfigSett
 
 export const batteryDisplayModeSetting = new ConfigSettingEnum<BatteryDisplayMode>({
   id: "batteryDisplayMode",
-  label: "Battery display",
+  label: "Style",
   storageKey: "dashboard.systemCard.batteryDisplayMode",
-  defaultValue: "icon",
-  values: ["icon", "percentage"],
+  defaultValue: "stacked",
+  values: ["icon", "percentage", "stacked", "stacked-percentage"],
   formatValue: batteryDisplayModeLabel,
-  description: "How the top bar shows the phone and glasses battery levels: a small gauge icon or an exact percentage.",
+  description: "How the top bar shows battery levels: a gauge icon or exact percentage beside the label, or a compact gauge or percentage with the label stacked above it.",
 });
+
+/** Below this charge level a "Below 50%" indicator becomes visible. */
+export const BATTERY_LOW_VISIBILITY_THRESHOLD = 50;
+
+function batteryVisibilitySetting(
+  id: string,
+  device: string,
+  storageKey: string,
+): ConfigSettingEnum<BatteryIndicatorVisibility> {
+  return new ConfigSettingEnum<BatteryIndicatorVisibility>({
+    id,
+    label: device,
+    storageKey,
+    defaultValue: "always",
+    values: ["always", "low", "never"],
+    formatValue: batteryIndicatorVisibilityLabel,
+    description: `When the top bar shows the ${device} battery: always, only once it drops below ${BATTERY_LOW_VISIBILITY_THRESHOLD}%, or never.`,
+  });
+}
+
+export const phoneBatteryVisibilitySetting = batteryVisibilitySetting(
+  "phoneBatteryVisibility", "Phone", "display.battery.phoneVisibility",
+);
+export const glassesBatteryVisibilitySetting = batteryVisibilitySetting(
+  "glassesBatteryVisibility", "G2", "display.battery.glassesVisibility",
+);
+export const ringBatteryVisibilitySetting = batteryVisibilitySetting(
+  "ringBatteryVisibility", "R1", "display.battery.ringVisibility",
+);
+/** The Wear OS watch; the indicator only exists while a watch is reachable. */
+export const watchBatteryVisibilitySetting = batteryVisibilitySetting(
+  "watchBatteryVisibility", "Watch", "display.battery.watchVisibility",
+);
+
+/** Whether an indicator with this visibility setting shows at the given charge. */
+export function batteryIndicatorVisible(visibility: BatteryIndicatorVisibility, percent: number): boolean {
+  if (visibility === "never") return false;
+  if (visibility === "always") return true;
+  return percent < BATTERY_LOW_VISIBILITY_THRESHOLD;
+}
+
+/**
+ * One string summarizing every setting the top-bar battery block reads, so
+ * the shell can cheaply tell whether a settings change needs a repaint.
+ */
+export function batteryIndicatorSettingsKey(): string {
+  return [
+    batteryDisplayModeSetting.get(),
+    phoneBatteryVisibilitySetting.get(),
+    glassesBatteryVisibilitySetting.get(),
+    ringBatteryVisibilitySetting.get(),
+    watchBatteryVisibilitySetting.get(),
+  ].join("|");
+}
 
 export const timeFormatSetting = new ConfigSettingEnum<TimeFormat>({
   id: "timeFormat",
@@ -279,12 +341,24 @@ export const lockScreenEnabledSetting = new ConfigSettingBoolean({
   storageKey: "display.lockScreenEnabled",
   defaultValue: true,
   description:
-    "Lock the glasses after they are taken off while the phone is locked. Unlocking the phone unlocks the glasses.",
+    "Lock the glasses after they are taken off while the phone is locked. Unlocking the phone unlocks the glasses." +
+    (global.isIOS ? " On iPhone, this requires a device passcode and follows iOS data-protection notifications, which may be delayed after the screen locks." : ""),
 });
 
 // Phone display: the phone app's mirror of the glasses screen and the
 // controls around it on the main page.
 export type PreviewColor = "white" | "green";
+export type PhoneRotation = "auto" | "portrait" | "landscape";
+
+export const phoneRotationSetting = new ConfigSettingEnum<PhoneRotation>({
+  id: "phone-rotation",
+  label: "Rotation",
+  storageKey: "phone.rotation",
+  defaultValue: "auto",
+  values: ["auto", "portrait", "landscape"],
+  formatValue: (value) => ({ auto: "Auto-Rotate", portrait: "Always Portrait", landscape: "Always Landscape" })[value],
+  description: "Automatically rotate with the phone, or keep the phone app in portrait or landscape. Auto-Rotate follows the phone's system rotation preference.",
+});
 
 export const previewColorSetting = new ConfigSettingEnum<PreviewColor>({
   id: "preview-color",
@@ -430,7 +504,7 @@ export const useMicControlSetting = new ConfigSettingBoolean({
   storageKey: "developer.useMicControl",
   defaultValue: true,
   description:
-    "Use the custom firmware's per-temple mic-control channel (caps token micctl) for the Microphones app's array capture. When off, behave as if the firmware doesn't have the feature and use the standard single mixed stream.",
+    "Use the custom firmware's per-temple mic-control channel for the Microphones app's array capture. When off, use the standard single mixed stream.",
 });
 
 export const showBleBandwidthSetting = new ConfigSettingBoolean({
@@ -439,7 +513,7 @@ export const showBleBandwidthSetting = new ConfigSettingBoolean({
   storageKey: "developer.showBleBandwidth",
   defaultValue: false,
   description:
-    "Show a running total of Bluetooth messages and bytes sent, at the bottom of the phone app's main screen.",
+    "Show Bluetooth messages and bytes sent, throughput, acknowledged display fps, and bytes per frame at the bottom of the phone screen. Rates use a five-second window; bytes include control traffic and protocol framing.",
 });
 
 export type RingConnectionMode = "glasses" | "direct";
@@ -455,12 +529,19 @@ export const ringConnectionModeSetting = new ConfigSettingEnum<RingConnectionMod
     "How R1 ring input reaches the phone. Only via glasses: the ring's own link to the glasses carries its gestures, and the phone never opens a Bluetooth connection to the ring. Direct: also connect to the ring from the phone (currently unreliable). Takes effect on the next connection to the glasses.",
 });
 
-export type VoiceProvider = "onboard" | "elevenlabs" | "whisper" | "soniox";
+// "whisper" (no "onboard-" prefix) is OpenAI's CLOUD realtime model
+// (gpt-realtime-whisper); "onboard-whisper" is the on-device sherpa-onnx
+// Whisper backend. Same underlying model family, two different places it
+// runs -- see the same note in native/voice-control.ts. The "whisper" value
+// keeps its name (it's a persisted setting on real installs) but its label
+// below now says "OpenAI" to tell the two apart in the picker.
+export type VoiceProvider = "onboard" | "onboard-whisper" | "elevenlabs" | "whisper" | "soniox";
 
 const voiceProviderLabels: Record<VoiceProvider, string> = {
-  onboard: "On-device",
+  onboard: "On-device (Moonshine)",
+  "onboard-whisper": "On-device (Whisper)",
   elevenlabs: "ElevenLabs",
-  whisper: "Whisper",
+  whisper: "OpenAI (Whisper)",
   soniox: "Soniox",
 };
 
@@ -469,7 +550,7 @@ export const voiceProviderSetting = new ConfigSettingEnum<VoiceProvider>({
   label: "Transcription Provider",
   storageKey: "voice.provider",
   defaultValue: "onboard",
-  values: ["onboard", "elevenlabs", "whisper", "soniox"],
+  values: ["onboard", "onboard-whisper", "elevenlabs", "whisper", "soniox"],
   formatValue: (value) => voiceProviderLabels[value] ?? value,
   isDisabled: (value) => {
     if (value === "elevenlabs") return elevenLabsApiKeySetting.get().trim().length === 0;
@@ -477,7 +558,7 @@ export const voiceProviderSetting = new ConfigSettingEnum<VoiceProvider>({
     if (value === "soniox") return sonioxApiKeySetting.get().trim().length === 0;
     return false;
   },
-  description: "Speech-to-text engine for voice input. ElevenLabs, Whisper, and Soniox are cloud services that need an API key, with significantly better accuracy than on-device transcription. On-device transcription needs the voice model downloaded (below).",
+  description: "Speech-to-text engine for voice input. ElevenLabs, OpenAI, and Soniox are cloud services that need an API key, with significantly better accuracy than on-device transcription. The two On-device options need their voice model downloaded (below) and never leave the phone.",
 });
 
 const wakeWordActionLabels: Record<WakeWordAction, string> = {
@@ -515,7 +596,7 @@ export const assistantSkipConfirmationSetting = new ConfigSettingBoolean({
 export type AssistantBackendKind = "direct" | "external";
 
 const assistantBackendLabels: Record<AssistantBackendKind, string> = {
-  direct: "On-phone",
+  direct: global.isIOS ? "Cloud API" : "On-phone",
   external: "My own agent (bridge)",
 };
 
@@ -524,10 +605,10 @@ export const assistantBackendSetting = new ConfigSettingEnum<AssistantBackendKin
   label: "Assistant backend",
   storageKey: "assistant.backend",
   defaultValue: "direct",
-  values: ["direct", "external"],
+  values: global.isIOS ? ["direct"] : ["direct", "external"],
   formatValue: (value) => assistantBackendLabels[value] ?? value,
   description:
-    "Who answers assistant queries: an LLM called from the phone (a cloud API with your key, or the downloaded on-phone model), or your own long-running agent (e.g. OpenClaw) reached through the faceclaw-agent-bridge plugin.",
+    global.isIOS ? "Cloud models called with your OpenAI or Anthropic API key. Add your key in Settings > API Keys." : "Who answers assistant queries: an LLM called from the phone (a cloud API with your key, or the downloaded on-phone model), or your own long-running agent (e.g. OpenClaw) reached through the faceclaw-agent-bridge plugin.",
 });
 
 export const assistantBridgeHostSetting = new ConfigSettingString({
@@ -620,7 +701,7 @@ export const assistantModelSetting = new ConfigSettingEnum<AssistantModel>({
   label: "Assistant model",
   storageKey: "assistant.model",
   defaultValue: "auto",
-  values: ASSISTANT_MODEL_VALUES,
+  values: ASSISTANT_MODEL_CHOICES,
   formatValue: assistantModelLabel,
   isDisabled: (value) => {
     const provider = assistantModelProvider(value);
@@ -630,7 +711,7 @@ export const assistantModelSetting = new ConfigSettingEnum<AssistantModel>({
     return false;
   },
   description:
-    "Model used by the voice assistant. Auto prefers Terra when an OpenAI key is set, then Sonnet when an Anthropic key is set, then the downloaded on-phone model.",
+    global.isIOS ? "Model used by the voice assistant. Auto prefers Terra with an OpenAI key, then Sonnet with an Anthropic key." : "Model used by the voice assistant. Auto prefers Terra when an OpenAI key is set, then Sonnet when an Anthropic key is set, then the downloaded on-phone model.",
 });
 
 export const mapboxApiKeySetting = new ConfigSettingString({
@@ -755,6 +836,48 @@ export const nightscoutApiTokenSetting = new ConfigSettingString({
   description: "Access token for the Nightscout site's API.",
 });
 
+function nightscoutThresholdSetting(id: string, label: string, unit: string, description: string): ConfigSettingString {
+  return new ConfigSettingString({
+    id: `nightscout-${id}`,
+    label,
+    storageKey: `integrations.nightscout.${id}`,
+    defaultValue: "0",
+    editorTitle: `${label} (${unit}; 0 = off)`,
+    normalize: normalizeNightscoutThreshold,
+    formatValue: (value) => Number(value) > 0 ? `${value} ${unit}` : "Off",
+    description: `${description} Enter 0 to disable.`,
+  });
+}
+
+export const nightscoutMaxCannulaAgeSetting = nightscoutThresholdSetting(
+  "max-cannula-age-hours", "Max cannula age", "h", "Warn when time since the last site change exceeds this many hours.",
+);
+export const nightscoutCartridgeLowSetting = nightscoutThresholdSetting(
+  "cartridge-low-units", "Cartridge low threshold", "U", "Warn when the pump reservoir falls below this many units.",
+);
+export const nightscoutBatteryLowSetting = nightscoutThresholdSetting(
+  "battery-low-voltage", "Battery voltage threshold", "V", "Warn when pump battery voltage falls below this value.",
+);
+export const nightscoutMaxLoopAgeSetting = nightscoutThresholdSetting(
+  "max-loop-age-minutes", "Max time since last loop", "min", "Warn when time since the last loop exceeds this many minutes.",
+);
+export const nightscoutAlwaysShowInTopBarSetting = new ConfigSettingBoolean({
+  id: "nightscout-always-show-in-top-bar",
+  label: "Always show in top bar",
+  storageKey: "integrations.nightscout.alwaysShowInTopBar",
+  defaultValue: false,
+  description: "Keep the Nightscout glucose graph and warnings in the top bar even when all Nightscout windows are closed.",
+});
+
+export function loadNightscoutThresholds(): NightscoutThresholds {
+  return {
+    maxCannulaAgeHours: Number(nightscoutMaxCannulaAgeSetting.get()),
+    cartridgeLowUnits: Number(nightscoutCartridgeLowSetting.get()),
+    batteryLowVoltage: Number(nightscoutBatteryLowSetting.get()),
+    maxLoopAgeMinutes: Number(nightscoutMaxLoopAgeSetting.get()),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Navigate app: saved and recent destinations.
 
@@ -875,7 +998,16 @@ export function screenTimeoutLabel(value: ScreenTimeoutSetting): string {
 }
 
 export function batteryDisplayModeLabel(value: BatteryDisplayMode): string {
-  return value === "icon" ? "Icon" : "Percentage";
+  if (value === "percentage") return "Percentage";
+  if (value === "stacked") return "Stacked";
+  if (value === "stacked-percentage") return "Stacked percentage";
+  return "Icon";
+}
+
+export function batteryIndicatorVisibilityLabel(value: BatteryIndicatorVisibility): string {
+  if (value === "never") return "Never";
+  if (value === "low") return `Below ${BATTERY_LOW_VISIBILITY_THRESHOLD}%`;
+  return "Always";
 }
 
 export function timeFormatLabel(value: TimeFormat): string {

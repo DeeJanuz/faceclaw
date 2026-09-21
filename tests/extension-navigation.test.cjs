@@ -31,8 +31,12 @@ function harness(options = {}) {
  imports['./chrome-layer'] = { ShellChromeLayer: class {} };
  imports['../menu'] = { MenuLayer: class { constructor(title, items) { this.items = items; } selectItem() { return this; } } };
  imports['../gestures'] = load('app/ui/gestures.ts', {});
+ imports['../input-monitor'] = { acceptInput: () => true };
  imports['../extension-settings'] = { navigationPolicy: policy, appMenuPolicy: () => ({}), windowLayoutPolicy: () => ({ switcherHeight: enabled ? 'display' : 'minimum' }) };
- imports['../dashboard-settings'] = { wakeWordActionSetting: { get: () => options.wakeWordAction ?? 'voice-input' } };
+ imports['../dashboard-settings'] = {
+  wakeWordActionSetting: { get: () => options.wakeWordAction ?? 'voice-input' },
+  brightnessSetting: { get: () => 'auto' },
+ };
  imports['../../apps/external/extension-platform'] = { extensionPlatform: () => options.extensionPlatform ?? null };
  imports['../../graphics/image'] = { G2_LENS_WIDTH: 640, G2_LENS_HEIGHT: 480 };
  imports['./geometry'] = { appViewportRect: () => ({ x: 0, width: 640 }), minWindowTop: () => 0, TOP_BAR_HEIGHT: 0 };
@@ -63,6 +67,7 @@ function controllerFor(h, options = {}) {
   frameTimings: { logFrame() {}, annotateFrame() {}, spanAsync: (_id, _name, fn) => fn(), spanStart() {}, spanEnd() {}, finishFrame() {} },
   eventLabel: () => '', eventName: () => '', sourceName: () => '',
   EventSourceType: { TOUCH_EVENT_FROM_RING: 2, TOUCH_EVENT_FROM_WATCH: 3 }, OsEventTypeList: {},
+  acceptInput: () => true,
  };
  vm.createContext(context);
  vm.runInContext(ts.transpileModule(`class Controller { ${method} }; globalThis.Controller = Controller;`, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText, context);
@@ -75,7 +80,8 @@ function controllerFor(h, options = {}) {
   return operation;
  };
  Object.assign(controller, { glassesLocked: false, evenHubSessionSuspended: options.suspended ?? true,
-  ensureEvenHubSessionActive: ensure, requestShellRender() {}, appendLog() {} });
+  ensureEvenHubSessionActive: ensure, glanceEventFor: () => null,
+  requestShellRender() {}, appendLog() {} });
  return {
   controller, barriers: () => barriers,
   send: (kind = 'display-wake', eventType = kind === 'even-ai' ? 1 : 3) => controller.handleInputEvent({ kind, eventType, eventSource: 0, frameId: 1 }),

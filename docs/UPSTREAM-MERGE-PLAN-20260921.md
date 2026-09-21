@@ -2,7 +2,7 @@
 
 Prepared September 21, 2026 using `/home/deej/.codex/skills/planning/SKILL.md`.
 
-Status: M01-M09 implemented and software-validated locally. M10's merge commit and final ancestry check are the remaining local steps. M11 device acceptance remains pending and was not authorized.
+Status: M01-M10 implemented and software-validated locally. M11 device acceptance remains pending and was not authorized.
 
 ## Outcome and boundaries
 
@@ -209,7 +209,7 @@ No implementation has started. The skill's boundary is: "This invocation authori
 
 ## Execution record
 
-Implemented locally on September 21, 2026. M01-M09 are complete. M10 is ready for the local merge commit and final ancestry check. M11 remains device-pending; no phone install, firmware flash or glasses command was performed.
+Implemented locally on September 21, 2026. M01-M10 are complete. M11 remains device-pending; no phone install, firmware flash or glasses command was performed.
 
 - **M01:** Preserved the existing work in checkpoint commits `beb710c` (`fix: show Signal icon for external app`) and `9ebfe2d` (`docs: plan upstream reconciliation`). The original recorded HEAD remains reachable at `061905f`. The local build environment now uses Temurin JDK 21.0.12.1, Android SDK 35/36 at `/home/deej/.local/android-sdk`, Node 24.19.0, npm 11.17.0 and Gradle 8.14.3. Machine-local paths remain ignored.
 - **M02:** Started one no-commit merge of pinned upstream `313ccd86d9c99a230142521e4d11308b284b2d68` over local parent `9ebfe2d2fad9f4329baa1d16c0c833bc05bfbe74`, with shared base `9b70880a5b5a2a2ba32400ab1aff8842483a6ce2`. All conflict groups were reconciled individually; no whole-file ours/theirs resolution was used for the communicator, compositor, shell or controller.
@@ -221,5 +221,5 @@ Implemented locally on September 21, 2026. M01-M09 are complete. M10 is ready fo
 - **M08:** Reconciled launcher/external-app discovery, extension priorities, shell/navigation/wake policy, gameplay holds, raw ring filtering, Glanceboard and remote input. Existing APK authority, generation, expiry, protected capture, lock and destination-review checks remain in the execution paths. Unsupported experimental temple event IDs were not restored; supported ring and held-state tests replace that coverage.
 - **M09:** Software checks passed after `npm ci`: `npm test` (836 tests, 835 passed, 1 skipped), `npm run native:android`, `npm run test:kotlin`, `bash build.sh --no-hmr`, `android-sdk/gradlew build` (853 tasks), and `android-sdk/scripts/check-animation-examples.sh` (10 tests). The T3 client passed `npm run check` (278 tests) and `npm run build`. Signal passed its pinned and `-PfaceclawSdkSource=true` assemble/unit/lint/androidTest checks. Spotify passed pinned checks; its source check exposed a pre-existing circular Gradle build-directory provider in the sibling checkout, which was changed to the same concrete `rootProject.file("build/faceclaw-sdk")` isolation used by Signal, after which its source unit/assemble checks passed. iOS-facing Node tests passed, but native iOS/Kotlin compilation remains unverified because this runner is Linux.
 - **Artifacts:** Host debug APK `bb8ad1020b1578e1c0c0de9779166d822ed89991523fb07ea937d1c613ee644a`; SDK debug AAR `4ebb2164fd43cc787477e0a03e61ae5b3dc49b670f36a1bde609ae319cd4eb48`; SDK release AAR `63fe4fc49bd25046bb09b7fc04a68fcef70b44d9a1232339c17dd358c696212f` (SHA-256). Build logs are under `../output/upstream-merge-20260921/`.
-- **M10:** Merge commit SHA and final ancestry result will be appended immediately after creating the local commit. No push is authorized.
+- **M10:** Created local merge commit `49b5b7f2b19a09b9e211f0af8e8a49e3bf4732c8` with parents `9ebfe2d2fad9f4329baa1d16c0c833bc05bfbe74` and pinned upstream `313ccd86d9c99a230142521e4d11308b284b2d68`. `git merge-base --is-ancestor 313ccd86d9c99a230142521e4d11308b284b2d68 49b5b7f2b19a09b9e211f0af8e8a49e3bf4732c8` passed. The candidate is software-validated and device-pending. No push was performed.
 - **M11:** Pending separate authorization and verified hardware. Detection/pairing behavior, animation throughput, forced task recovery and physical reboot behavior are software-reviewed but not device-validated.

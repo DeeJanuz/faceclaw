@@ -199,6 +199,22 @@ class ProtocolTest {
     }
 
     @Test
+    fun realWorldSlowLensAckDoesNotCausePrematureReplay() {
+        val frame = message()
+        frame.ackDeadlineAtMs = CfwMessageWindow.ACK_TIMEOUT_MS.toLong()
+        frame.cfwAckLenses = 1
+        assertTrue(CfwMessageWindow.replayWindow(listOf(frame), 558).isEmpty())
+        frame.cfwAckLenses = 3
+        assertSame(frame, CfwMessageWindow.acknowledgedHead(listOf(frame)))
+        assertTrue(CfwMessageWindow.replayWindow(listOf(frame), 1500).isEmpty())
+        frame.cfwAckLenses = 1
+        assertEquals(listOf(frame), CfwMessageWindow.replayWindow(listOf(frame), 1500))
+        frame.ackDeadlineAtMs = 2000
+        frame.cfwRetryPending = true
+        assertEquals(listOf(frame), CfwMessageWindow.replayWindow(listOf(frame), 100))
+    }
+
+    @Test
     fun orderedCompletionAndWholeWindowRecovery() {
         val head = message()
         val tail = message()

@@ -91,3 +91,7 @@ mark the full surface damaged after raster use. Only an unchanged scene with no
 intervening raster frames may consume a credit without redrawing. Applications
 supporting older hosts should issue a full scene commit when returning from
 raster animation. Keep that restoration pending after a rejected local commit.
+
+### Display ACK deadlines
+
+Do not infer an ACK failure deadline from a small animation benchmark. A real Messages frame produced valid per-lens ACKs at 536–558 ms, beyond the former 500 ms custom-message deadline. The host now allows 1,500 ms after writes complete, retaining immediate NACK handling and bounded retries. This does not add a minimum delay to successful frames. A timeout still indicates incomplete acknowledgement, not proof that Android Bluetooth pairing failed. Diagnose layout acknowledgements separately from image acknowledgements and record payload sizes when investigating large frames.

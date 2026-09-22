@@ -5,9 +5,10 @@ import kotlin.jvm.JvmStatic
 /** Ordered completion and go-back-N recovery for the custom-message window. */
 class CfwMessageWindow private constructor() {
     companion object {
-        // Flappy capture: p99 ACK 63ms, max 77ms. Allow full-frame processing
-        // while recovering a lost reply well before the stock timeout.
-        const val ACK_TIMEOUT_MS = 500
+        // Full application frames have produced valid per-lens ACKs at 536–558ms.
+        // A 500ms deadline replays while the second lens is still processing.
+        // This is a failure deadline, not a minimum presentation interval.
+        const val ACK_TIMEOUT_MS = 1_500
         const val MAX_RETRIES = 3
 
         @JvmStatic

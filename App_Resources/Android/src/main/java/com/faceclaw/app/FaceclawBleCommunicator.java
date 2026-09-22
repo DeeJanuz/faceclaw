@@ -3626,7 +3626,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         FrameTimings.getInstance().log(frameId, "queued image update#" + updateId
                 + " messages=" + messageCount + " payload=" + plan.payload.length + "B");
         logLine("queue image update#" + updateId + " fingerprint=" + fingerprint
-                + " messages=" + messageCount);
+                + " messages=" + messageCount + " payloadBytes=" + plan.payload.length);
     }
 
     /**

@@ -6,7 +6,7 @@ import { appViewportRect, type WindowHeightMode } from "./geometry";
 /** Receives only private raster snapshots already checked by the native adapter. */
 export class ExtensionLayer implements Layer {
   readonly acceptsDirectional = true;
-  get dimUnderneath(): false | number { return this.opaque ? 0 : false; }
+  get dimUnderneath(): false | number { return this.opaque && (!this.preserveUntilReady || this.readyForDisplay) ? 0 : false; }
   opaque: boolean;
   private frame: GrayImage | undefined;
   get readyForDisplay(): boolean { return this.frame !== undefined; }
@@ -18,6 +18,7 @@ export class ExtensionLayer implements Layer {
     opaque = true,
     public alignTop = false,
     private readonly notificationDismissGesture = false,
+    private readonly preserveUntilReady = false,
   ) { this.opaque = opaque; }
   private presentationId: string | undefined;
   /** Bind lifecycle cleanup to the logical presentation using this layer. */
@@ -38,13 +39,20 @@ export class ExtensionLayer implements Layer {
     if (this.alignTop) rect.y = 0;
     const size = `${rect.width}:${rect.height}`;
     if (size !== this.size) { this.size = size; this.frame = undefined; this.resized(rect.width, rect.height); }
+    if (this.preserveUntilReady && !this.frame) return image;
     if (this.opaque) image.fillRect(rect.x, rect.y, rect.width, rect.height, 1);
     if (this.frame?.width === rect.width && this.frame.height === rect.height) {
       image.bitBlt(this.frame, rect.x, rect.y, { transparentZero: !this.opaque });
     }
     return image;
   }
-  handleInput(event: InputEvent): void { this.input(event); }
+  handleInput(event: InputEvent, ctx?: LayerContext): void {
+    if (this.preserveUntilReady && !this.readyForDisplay) {
+      if (event.type === "double-click") ctx?.stack.pop();
+      return;
+    }
+    this.input(event);
+  }
   /** Only the host-owned arrival preview may reserve a plain long press. */
   claimsNotificationDismissGesture(): boolean { return this.notificationDismissGesture; }
   onRemoved(): void { const presentationId = this.presentationId; this.frame = undefined; this.closed(presentationId); }

@@ -939,7 +939,7 @@ export class MainViewModel extends RemoteControlsViewModel {
 
   private async openFlashPage(mode: "install" | "uninstall"): Promise<void> {
     // The flasher needs the glasses to itself, so drop the main connection first.
-    if (this.phase === "connected" || this.phase === "charging") {
+    if (this.phase === "connected" || this.phase === "charging" || this.phase === "connecting") {
       try {
         await dashboardController.disconnect();
       } catch {

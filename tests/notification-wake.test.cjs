@@ -28,7 +28,7 @@ function harness() {
     schedulePreviewUpdate() {}, display: { submitSurfaceFrame: async () => { events.push('submit'); if (submit) await submit(); }, waitForFrameFinished: async () => { events.push('wait'); return true; } },
     communicator: { setG2ScreenOn: async () => events.push('screen-on'), resumeEvenHubSession: async () => { events.push('resume'); return true; }, setScreenBlanked: async () => events.push('unblank'), awaitEvenHubSessionPrepared: async () => { events.push('session-ready'); return true; }, awaitEvenHubSessionReady: async () => true },
   });
-  return { controller, events, timers, deadlines, onSubmit: fn => submit = fn };
+  return { controller, events, timers, deadlines, shell: context.shell, onSubmit: fn => submit = fn };
 }
 test('notification wake stays blank until content is submitted, without waiting for a blank frame ACK', async () => {
   const h = harness();
@@ -105,4 +105,20 @@ test('the configured preview timer starts only after the first valid frame is re
   assert.equal(h.deadlines[0].presentationId, 'preview');
   assert.ok(h.deadlines[0].expiresAtMs >= before + 3000);
   assert.equal(state.deadlineMs, h.deadlines[0].expiresAtMs);
+});
+
+test('Glanceboard can resume and unblank while the regular shell remains asleep', async () => {
+ const h = harness(); h.controller.pendingNotificationWake = null;
+ h.shell.isScreenOn = () => false; h.controller.glance = { isVisible: () => true };
+ assert.equal(await h.controller.ensureEvenHubSessionActive(), true);
+ assert.deepEqual(h.events, ['screen-on', 'resume', 'unblank']);
+ assert.equal(h.shell.isScreenOn(), false);
+});
+test('release during Glanceboard wake prevents a late resume or unblank', async () => {
+ const h = harness(); h.controller.pendingNotificationWake = null;
+ h.shell.isScreenOn = () => false; let held = true;
+ h.controller.glance = { isVisible: () => held };
+ h.controller.communicator.setG2ScreenOn = async () => { held = false; };
+ assert.equal(await h.controller.ensureEvenHubSessionActive(), false);
+ assert.deepEqual(h.events, []);
 });

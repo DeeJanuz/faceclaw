@@ -846,7 +846,7 @@ class DashboardController {
     const isCurrentWake = () => this.communicator === communicator
       && this.displayWakeGeneration === wakeGeneration
       && this.phase !== "charging" && this.phase !== "disconnected"
-      && shell.isScreenOn() && !this.glassesLocked;
+      && (shell.isScreenOn() || this.glance.isVisible()) && !this.glassesLocked;
 
     const notificationSessionReady = this.notificationSessionReady;
     const notificationResume = this.notificationResumePromise;
@@ -2002,7 +2002,7 @@ class DashboardController {
     // protects against a watch acting on a stale state snapshot.
     const allowedWhileDark = kind === "click" || kind === "double-click" ||
       kind === "long-press" || kind === "long-press-start" || kind === "long-press-release" ||
-      (kind === "short-then-long-press" && navigationPolicy().tapHold === "switcher");
+      (kind === "short-then-long-press" && ["switcher", "glanceboard"].includes(navigationPolicy().tapHold));
     if (
       origin === "watch" &&
       !shell.isScreenOn() &&
@@ -2863,7 +2863,7 @@ class DashboardController {
       }
       this.extensionSurfaces.delete(feature);
       this.externalApps.extensions.closeSurface(feature, removedPresentationId);
-    }, feature === "ui.notifications" ? "medium" : feature === "ui.composer" ? "max" : "min", feature !== "ui.notifications" || target === "inbox" || wokeScreen, feature === "ui.notifications" && target !== "inbox", feature === "ui.notifications" && target !== "inbox");
+    }, feature === "ui.notifications" ? "medium" : feature === "ui.composer" ? "max" : "min", feature !== "ui.notifications" || target === "inbox" || wokeScreen, feature === "ui.notifications" && target !== "inbox", feature === "ui.notifications" && target !== "inbox", feature === "ui.app-menu");
     const presentationId = feature === "ui.composer" ? target
       : feature === "ui.notifications" && target !== "inbox" ? target : undefined;
     const state = {

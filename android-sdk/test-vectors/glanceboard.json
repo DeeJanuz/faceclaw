@@ -1,0 +1,424 @@
+{
+  "now": 1000,
+  "registry": {
+    "version": 1,
+    "widgets": [
+      {
+        "id": "default",
+        "label": "Tasks",
+        "kind": "list",
+        "rows": 1,
+        "refreshMs": 30000
+      },
+      {
+        "id": "home",
+        "label": "Home",
+        "kind": "scene",
+        "rows": 2,
+        "refreshMs": 60000,
+        "uses": [
+          "battery"
+        ]
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "multiple-widgets",
+      "kind": "registry",
+      "value": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "default",
+            "label": "Tasks",
+            "kind": "list",
+            "rows": 1,
+            "refreshMs": 30000
+          },
+          {
+            "id": "home",
+            "label": "Home",
+            "kind": "scene",
+            "rows": 2,
+            "refreshMs": 60000,
+            "uses": [
+              "battery"
+            ]
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "duplicate-id",
+      "kind": "registry",
+      "value": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "default",
+            "label": "Tasks",
+            "kind": "list",
+            "rows": 1,
+            "refreshMs": 30000
+          },
+          {
+            "id": "home",
+            "label": "Home",
+            "kind": "scene",
+            "rows": 2,
+            "refreshMs": 60000,
+            "uses": [
+              "battery"
+            ]
+          },
+          {
+            "id": "default",
+            "label": "Tasks",
+            "kind": "list",
+            "rows": 1,
+            "refreshMs": 30000
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "unsupported-height",
+      "kind": "registry",
+      "value": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "default",
+            "label": "Tasks",
+            "kind": "list",
+            "rows": 3,
+            "refreshMs": 30000
+          },
+          {
+            "id": "home",
+            "label": "Home",
+            "kind": "scene",
+            "rows": 2,
+            "refreshMs": 60000,
+            "uses": [
+              "battery"
+            ]
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "unbounded-polling",
+      "kind": "registry",
+      "value": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "default",
+            "label": "Tasks",
+            "kind": "list",
+            "rows": 1,
+            "refreshMs": 1
+          },
+          {
+            "id": "home",
+            "label": "Home",
+            "kind": "scene",
+            "rows": 2,
+            "refreshMs": 60000,
+            "uses": [
+              "battery"
+            ]
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "unapproved-context",
+      "kind": "registry",
+      "value": {
+        "version": 1,
+        "widgets": [
+          {
+            "id": "default",
+            "label": "Tasks",
+            "kind": "list",
+            "rows": 1,
+            "refreshMs": 30000,
+            "uses": [
+              "notifications"
+            ]
+          },
+          {
+            "id": "home",
+            "label": "Home",
+            "kind": "scene",
+            "rows": 2,
+            "refreshMs": 60000,
+            "uses": [
+              "battery"
+            ]
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "scene",
+      "kind": "content",
+      "value": {
+        "version": 2,
+        "widgetId": "home",
+        "expiresAt": 61000,
+        "commands": [
+          {
+            "op": "text",
+            "x": 8,
+            "y": 8,
+            "text": "Hello",
+            "width": 272,
+            "value": 190
+          },
+          {
+            "op": "bitmap",
+            "x": 0,
+            "y": 0,
+            "width": 2,
+            "height": 1,
+            "bits": "gA==",
+            "value": 255
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "unknown-widget",
+      "kind": "content",
+      "value": {
+        "version": 2,
+        "widgetId": "foreign",
+        "expiresAt": 61000,
+        "commands": [
+          {
+            "op": "text",
+            "x": 8,
+            "y": 8,
+            "text": "Hello",
+            "width": 272,
+            "value": 190
+          },
+          {
+            "op": "bitmap",
+            "x": 0,
+            "y": 0,
+            "width": 2,
+            "height": 1,
+            "bits": "gA==",
+            "value": 255
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "expired",
+      "kind": "content",
+      "value": {
+        "version": 2,
+        "widgetId": "home",
+        "expiresAt": 1000,
+        "commands": [
+          {
+            "op": "text",
+            "x": 8,
+            "y": 8,
+            "text": "Hello",
+            "width": 272,
+            "value": 190
+          },
+          {
+            "op": "bitmap",
+            "x": 0,
+            "y": 0,
+            "width": 2,
+            "height": 1,
+            "bits": "gA==",
+            "value": 255
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "long-lived",
+      "kind": "content",
+      "value": {
+        "version": 2,
+        "widgetId": "home",
+        "expiresAt": 61001,
+        "commands": [
+          {
+            "op": "text",
+            "x": 8,
+            "y": 8,
+            "text": "Hello",
+            "width": 272,
+            "value": 190
+          },
+          {
+            "op": "bitmap",
+            "x": 0,
+            "y": 0,
+            "width": 2,
+            "height": 1,
+            "bits": "gA==",
+            "value": 255
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "string-version",
+      "kind": "content",
+      "value": {
+        "version": "2",
+        "widgetId": "home",
+        "expiresAt": 61000,
+        "commands": [
+          {
+            "op": "text",
+            "x": 8,
+            "y": 8,
+            "text": "Hello",
+            "width": 272,
+            "value": 190
+          },
+          {
+            "op": "bitmap",
+            "x": 0,
+            "y": 0,
+            "width": 2,
+            "height": 1,
+            "bits": "gA==",
+            "value": 255
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "noncanonical-bitmap",
+      "kind": "content",
+      "value": {
+        "version": 2,
+        "widgetId": "home",
+        "expiresAt": 61000,
+        "commands": [
+          {
+            "op": "text",
+            "x": 8,
+            "y": 8,
+            "text": "Hello",
+            "width": 272,
+            "value": 190
+          },
+          {
+            "op": "bitmap",
+            "x": 0,
+            "y": 0,
+            "width": 2,
+            "height": 1,
+            "bits": "gB==",
+            "value": 255
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "out-of-bounds",
+      "kind": "content",
+      "value": {
+        "version": 2,
+        "widgetId": "home",
+        "expiresAt": 61000,
+        "commands": [
+          {
+            "op": "text",
+            "x": 288,
+            "y": 8,
+            "text": "Hello",
+            "width": 272,
+            "value": 190
+          },
+          {
+            "op": "bitmap",
+            "x": 0,
+            "y": 0,
+            "width": 2,
+            "height": 1,
+            "bits": "gA==",
+            "value": 255
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "unknown-operation",
+      "kind": "content",
+      "value": {
+        "version": 2,
+        "widgetId": "home",
+        "expiresAt": 61000,
+        "commands": [
+          {
+            "op": "url",
+            "x": 8,
+            "y": 8,
+            "text": "Hello",
+            "width": 272,
+            "value": 190
+          },
+          {
+            "op": "bitmap",
+            "x": 0,
+            "y": 0,
+            "width": 2,
+            "height": 1,
+            "bits": "gA==",
+            "value": 255
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "expired-row",
+      "kind": "content",
+      "value": {
+        "version": 2,
+        "widgetId": "default",
+        "expiresAt": 61000,
+        "title": "Tasks",
+        "emptyText": "Done",
+        "entries": [
+          {
+            "id": "one",
+            "title": "Review",
+            "detail": "Ready",
+            "expiresAt": 999
+          }
+        ]
+      },
+      "valid": true
+    }
+  ]
+}

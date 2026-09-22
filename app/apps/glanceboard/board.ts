@@ -1,3 +1,4 @@
+import { appGlanceSources, onAppGlanceRegistryChanged } from './app-content';
 import { GrayImage } from "../../graphics/image";
 import { onAnySettingChanged } from "../../ui/dashboard-settings";
 import { glanceLayout, glanceShowLinesSetting, glanceSlotSettings } from "./glanceboard-settings";
@@ -12,7 +13,8 @@ type LiveRegion = { region: GlanceRegion; key: string; widget: GlanceWidget | nu
 
 /** Identity of a region for diffing: which widget, in which slots. */
 function regionKey(region: GlanceRegion): string {
-  return `${region.choice}@${region.slots.join(",")}`;
+  const source = region.choice.startsWith('app:') ? appGlanceSources().find(source => `app:${source.key}` === region.choice) : undefined;
+  return `${region.choice}@${region.slots.join(",")}@${source ? JSON.stringify(source) : ''}`;
 }
 
 /**
@@ -26,6 +28,7 @@ function regionKey(region: GlanceRegion): string {
 export class GlanceBoard {
   private regions: LiveRegion[] = [];
   private started = false;
+  private unsubscribeRegistry: (() => void) | null = null;
   private unsubscribeSettings: (() => void) | null = null;
   private currentLayout: GlanceLayout;
 
@@ -52,12 +55,14 @@ export class GlanceBoard {
     if (this.started) return;
     this.started = true;
     this.applySlotSettings();
+    this.unsubscribeRegistry = onAppGlanceRegistryChanged(() => this.applySlotSettings());
     this.unsubscribeSettings = onAnySettingChanged(() => this.applySlotSettings());
   }
 
   stop(): void {
     if (!this.started) return;
     this.started = false;
+    this.unsubscribeRegistry?.(); this.unsubscribeRegistry = null;
     this.unsubscribeSettings?.();
     this.unsubscribeSettings = null;
     for (const live of this.regions) live.widget?.stop();

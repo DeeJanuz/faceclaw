@@ -74,7 +74,7 @@ public final class FaceclawExternalApps {
   Set<String> present=new HashSet<>();
   for(ResolveInfo r:discover()) if(approved(r.serviceInfo)) { String k=key(r.serviceInfo); present.add(k); if(!connections.containsKey(k)&&connections.size()<8) bind(r.serviceInfo); }
   for(String k:new ArrayList<>(connections.keySet())) if(!present.contains(k)) disconnect(k,false);
-  emit("","changed",new JSONObject()); extensionsChanged();
+  emit("","changed",new JSONObject()); publishGlanceRegistry(); extensionsChanged();
  }
  private void bind(ServiceInfo s) {
   Connection c=new Connection(s); connections.put(c.component,c);
@@ -133,11 +133,11 @@ public final class FaceclawExternalApps {
    if(type.equals("close")||type.equals("resize"))c.enqueueRender(128,()->sweepResources(c));
    if(type.equals("input"))c.sendInput("window",new FaceclawInputEvent(data));else c.sendControl(type,data);
    if(type.equals("render")||type.equals("input")||type.equals("open")||type.equals("resize")||(type.equals("visibility")&&c.visible&&c.screenOn))scheduleCredit(c,c.windowSurface(),type.equals("input")?DisplayScheduler.Priority.DIRECT_INPUT:DisplayScheduler.Priority.FOCUSED_ANIMATION,inputTrace);
-  } catch(Exception e) { disconnect(component,true); }
+  } catch(Exception e) { android.util.Log.w("FaceclawApps","control send failed type="+type+" category="+e.getClass().getSimpleName());disconnect(component,true); }
  }
  private void publishCapabilities(String component) {
   Connection current=connections.get(component);if(current!=null)invalidateContract(current);
-  send(component,"capabilities",Protocol.object("notifications",allows(component,"notifications"),"dictation",allows(component,"dictation"),"previews",allows(component,"previews"),"maxWidth",Protocol.MAX_WIDTH,"maxHeight",Protocol.MAX_HEIGHT,"maxText",8000,"maxNotificationText",4096,"notificationReplies",true,"searchDictation",true,"extensions",ExtensionContract.VERSION,"windowMenus",true,"messaging",allows(component,"messaging")).toString());
+  send(component,"capabilities",Protocol.object("notifications",allows(component,"notifications"),"dictation",allows(component,"dictation"),"previews",allows(component,"previews"),"maxWidth",Protocol.MAX_WIDTH,"maxHeight",Protocol.MAX_HEIGHT,"maxText",8000,"maxNotificationText",4096,"glanceboard",1,"glanceboardRegistry",1,"notificationReplies",true,"searchDictation",true,"extensions",ExtensionContract.VERSION,"windowMenus",true,"messaging",allows(component,"messaging")).toString());
  }
  private void disconnect(String component,boolean retry) {
   Connection c=connections.remove(component); if(c==null) return;
@@ -146,7 +146,7 @@ public final class FaceclawExternalApps {
   c.ready=false;for(PendingFrame frame:new ArrayList<>(c.pendingFrames.values()))complete(c,frame.surfaceId,frame.clientFrameId,frame.contentVersion,FrameOutcome.Status.SESSION_LOST,frame.traceId,"Application Binder session lost",frame.metadataDropped);c.generation++;for(Surface surface:c.surfaces.values()){scheduler.cancel(c.component+":"+surface.id);surface.close();}c.renderExecutor.shutdownNow();for(HostResource resource:c.resources.values())releaseResourceAtlas(resource);c.resources.clear();
   try { if(c.remote!=null)c.remote.close(new DisconnectInfo(retry?DisconnectInfo.Reason.BINDER_DIED:DisconnectInfo.Reason.HOST_STOPPED,retry,retry?"Host reconnecting":"Host closed session")); } catch(Exception ignored) {}
   try { context.unbindService(c); } catch(Exception ignored) {}
-  emit(component,retry?"recovering":"disconnected",Protocol.object("category",retry?"binder":"host-policy")); extensionsChanged();
+  emit(component,retry?"recovering":"disconnected",Protocol.object("category",retry?"binder":"host-policy")); publishGlanceRegistry(); extensionsChanged();
   if(retry && approved(c.service)) {int attempt=retryAttempts.merge(component,1,Integer::sum)-1;long delay=RETRY_DELAYS_MS[Math.min(attempt,RETRY_DELAYS_MS.length-1)];main.postDelayed(()->{ if(!connections.containsKey(component)&&approved(c.service)) bind(c.service); },delay);}
   else retryAttempts.remove(component);
  }
@@ -180,6 +180,8 @@ public final class FaceclawExternalApps {
    if(!surface.creditOutstanding){surface.creditOutstanding=true;surface.creditScheduleEpoch++;}
    scheduleEpoch=surface.creditScheduleEpoch;
    FaceclawBleCommunicator display=FaceclawBleCommunicator.getActive();long period=display==null?0:display.renderCreditDelayMs();
+   Object requested=c.service.metaData==null?null:c.service.metaData.get("com.faceclaw.ANIMATION_FRAME_INTERVAL_MS");
+   period=RenderCadence.requestedPeriod(period,requested instanceof Integer?(Integer)requested:0);
    pacing=priority==DisplayScheduler.Priority.DIRECT_INPUT?0:RenderCadence.remainingDelay(SystemClock.elapsedRealtime(),surface.lastCreditAtMs,period);
   }
   final String trace=causeTrace!=null&&causeTrace.matches("[A-Za-z0-9_.:-]{1,128}")?causeTrace:UUID.randomUUID().toString();
@@ -299,7 +301,9 @@ public final class FaceclawExternalApps {
     long version=transaction.sceneVersion;if(version<=surface.sceneVersion)throw new IllegalArgumentException("Stale scene version");
     if(!surface.visible||!surface.screenOn||!surface.creditOutstanding||!surface.creditGranted)throw new IllegalArgumentException("Scene has no matching render credit");consumedCredit=true;
     deliveredId=surface.id;deliveredGeneration=surface.generation;deliveredVersion=version;deliveredWidth=surface.width;deliveredHeight=surface.height;
-    boolean unchanged=!transaction.clear&&transaction.upserts.isEmpty()&&transaction.removes.length==0&&transaction.order.length==0;
+    // An empty scene transaction still restores retained nodes after raster
+    // animation. The current displayed pixels are then not the scene pixels.
+    boolean unchanged=!surface.rasterSinceScene&&!transaction.clear&&transaction.upserts.isEmpty()&&transaction.removes.length==0&&transaction.order.length==0;
     if(unchanged){surface.sceneVersion=version;surface.clearCreditLocked();}
     else{
      Map<Long,Bundle> next=transaction.clear?new HashMap<>():new HashMap<>(surface.nodes);ArrayList<Long> nextOrder=transaction.clear?new ArrayList<>():new ArrayList<>(surface.sceneOrder);
@@ -352,7 +356,7 @@ public final class FaceclawExternalApps {
   };
   Connection(ServiceInfo service) { this.service=service; component=key(service);byte[] saved=restorationTokens.get(component);restorationToken=saved==null?null:saved.clone();RecoveryContext recovery=recoveryContexts.get(component);if(recovery!=null){width=recovery.width;height=recovery.height;generation=recovery.generation;open=recovery.open;visible=recovery.visible;screenOn=recovery.screenOn;for(RecoverySurface state:recovery.surfaces){Surface surface=new Surface(state.id,state.width,state.height,state.generation);surface.visible=state.visible;surface.screenOn=state.screenOn;String surfaceKey=state.id.startsWith("extension:")?state.id.substring(10):state.id;surfaces.put(surfaceKey,surface);}}renderExecutor=new ThreadPoolExecutor(1,1,0L,TimeUnit.MILLISECONDS,new ArrayBlockingQueue<>(MAX_RENDER_QUEUE),r->{Thread t=new Thread(r,"FaceclawRender-"+service.packageName);t.setDaemon(true);return t;},new ThreadPoolExecutor.AbortPolicy()); }
   boolean enqueueRender(long retainedBytes,Runnable task){long bytes=Math.max(1,retainedBytes),current;do{current=renderQueueBytes.get();if(bytes>MAX_RENDER_QUEUE_BYTES-current)return false;}while(!renderQueueBytes.compareAndSet(current,current+bytes));try{renderExecutor.execute(()->{try{task.run();}finally{renderQueueBytes.addAndGet(-bytes);}});return true;}catch(RejectedExecutionException rejected){renderQueueBytes.addAndGet(-bytes);return false;}}
-  void renderQueueOverflow(){main.post(()->{if(connections.get(component)==this)disconnect(component,true);});}
+  void renderQueueOverflow(){main.post(()->{if(connections.get(component)==this){android.util.Log.w("FaceclawApps","reconnect reason=render_queue_full");disconnect(component,true);}});}
   public void onServiceConnected(ComponentName name,IBinder binder) {
    if(connections.get(component)!=this || !approved(service)) return;
    endpoint=IFaceclawAppEndpoint.Stub.asInterface(binder);
@@ -364,10 +368,12 @@ public final class FaceclawExternalApps {
   public void onNullBinding(ComponentName name) { disconnect(component,false); }
   void ready(SessionHello hello,IFaceclawAppSession app){
    if(connections.get(component)!=this||!approved(service)||hello==null||hello.protocolMajor!=Protocol.VERSION||!session.equals(hello.sessionId)||app==null)return;
-   remote=app;ready=true;consent=null;selectionActivity=null;retryAttempts.remove(component);recoveryContexts.remove(component);
+   remote=app;ready=true;consent=null;selectionActivity=null;recoveryContexts.remove(component);
+   // A handshake followed by immediate failure must retain reconnect backoff.
+   main.postDelayed(()->{if(connections.get(component)==this&&ready)retryAttempts.remove(component);},30000);
    try{app.asBinder().linkToDeath(()->main.post(()->disconnect(component,true)),0);}catch(Exception error){disconnect(component,true);return;}
    try{remote.applyHostSnapshot(snapshot());}catch(Exception error){disconnect(component,true);return;}
-   publishCapabilities(component);send(component,"shared-style",sharedStyle.toString());emit(component,"connected",new JSONObject());extensionsChanged();
+   publishCapabilities(component);send(component,"shared-style",sharedStyle.toString());emit(component,"connected",new JSONObject());publishGlanceRegistry();extensionsChanged();
   }
   void consent(ConsentRequest value,int uid){
    PendingIntent pi=value==null?null:value.consent;
@@ -388,7 +394,7 @@ public final class FaceclawExternalApps {
    main.postDelayed(()->{if(connections.get(component)!=this)return;for(JSONObject result:controls.expire(SystemClock.elapsedRealtime()))try{sendControl("control-result",result);}catch(RemoteException error){disconnect(component,true);}},Math.max(1,data.optLong("expiresAtElapsedMs")-now));
    emit(component,"contract-control",request);
   }
-  synchronized HostSnapshot snapshot(){Bundle b=new Bundle();b.putLong("stateRevision",++stateRevision);b.putInt("protocolMajor",Protocol.VERSION);b.putInt("maxWidth",Protocol.MAX_WIDTH);b.putInt("maxHeight",Protocol.MAX_HEIGHT);b.putInt("maxDamageRects",Protocol.MAX_DAMAGE_RECTS);b.putInt("bufferSlots",Protocol.BUFFER_SLOTS);b.putBoolean("screenOn",screenOn);b.putBoolean("windowOpen",open);b.putBoolean("windowVisible",visible);b.putLong("windowGeneration",generation);b.putInt("windowWidth",width);b.putInt("windowHeight",height);b.putString("grants",Protocol.object("notifications",allows(component,"notifications"),"dictation",allows(component,"dictation"),"previews",allows(component,"previews"),"messaging",allows(component,"messaging")).toString());b.putString("sharedStyle",sharedStyle.toString());b.putString("extensions",extensionsJson());b.putString("hostState",hostState.toString());FaceclawBleCommunicator display=FaceclawBleCommunicator.getActive();b.putString("capabilities",Protocol.object("appIndependence",catalog(),"notificationReplies",true,"searchDictation",true,"windowMenus",true,"gray8",true,"sharedMemory",true,"damage",true,"resources",true,"retainedScenes",true,"firmwareFingerprint",display==null?"":display.getFirmwareFingerprint()).toString());ArrayList<Bundle> openSurfaces=new ArrayList<>();for(Surface surface:surfaces.values()){Bundle item=new Bundle();item.putString("id",surface.id);item.putInt("width",surface.width);item.putInt("height",surface.height);item.putLong("generation",surface.generation);item.putBoolean("visible",surface.visible);item.putBoolean("screenOn",surface.screenOn);openSurfaces.add(item);}b.putParcelableArrayList("surfaces",openSurfaces);if(restorationToken!=null)b.putByteArray("restorationToken",restorationToken.clone());return new HostSnapshot(b);}
+  synchronized HostSnapshot snapshot(){Bundle b=new Bundle();b.putLong("stateRevision",++stateRevision);b.putInt("protocolMajor",Protocol.VERSION);b.putInt("maxWidth",Protocol.MAX_WIDTH);b.putInt("maxHeight",Protocol.MAX_HEIGHT);b.putInt("maxDamageRects",Protocol.MAX_DAMAGE_RECTS);b.putInt("bufferSlots",Protocol.BUFFER_SLOTS);b.putBoolean("screenOn",screenOn);b.putBoolean("windowOpen",open);b.putBoolean("windowVisible",visible);b.putLong("windowGeneration",generation);b.putInt("windowWidth",width);b.putInt("windowHeight",height);b.putString("grants",Protocol.object("notifications",allows(component,"notifications"),"dictation",allows(component,"dictation"),"previews",allows(component,"previews"),"messaging",allows(component,"messaging")).toString());b.putString("sharedStyle",sharedStyle.toString());b.putString("extensions",extensionsJson());b.putString("hostState",hostState.toString());FaceclawBleCommunicator display=FaceclawBleCommunicator.getActive();b.putString("capabilities",Protocol.object("appIndependence",catalog(),"glanceboard",1,"glanceboardRegistry",1,"notificationReplies",true,"searchDictation",true,"windowMenus",true,"gray8",true,"sharedMemory",true,"damage",true,"resources",true,"retainedScenes",true,"firmwareFingerprint",display==null?"":display.getFirmwareFingerprint()).toString());ArrayList<Bundle> openSurfaces=new ArrayList<>();for(Surface surface:surfaces.values()){Bundle item=new Bundle();item.putString("id",surface.id);item.putInt("width",surface.width);item.putInt("height",surface.height);item.putLong("generation",surface.generation);item.putBoolean("visible",surface.visible);item.putBoolean("screenOn",surface.screenOn);openSurfaces.add(item);}b.putParcelableArrayList("surfaces",openSurfaces);if(restorationToken!=null)b.putByteArray("restorationToken",restorationToken.clone());return new HostSnapshot(b);}
   Surface windowSurface(){synchronized(this){return surfaces.computeIfAbsent("window",ignored->new Surface("window",width,height,generation));}}
   synchronized void sendControl(String type,JSONObject data)throws RemoteException{if(remote==null)throw new RemoteException("App session unavailable");try{JSONObject copy=new JSONObject(data.toString());copy.put("stateRevision",++stateRevision);remote.sendControl(new ControlEvent(type,copy));}catch(org.json.JSONException error){throw new RemoteException("Invalid host state");}}
   void sendInput(String surfaceId,FaceclawInputEvent event)throws RemoteException{if(remote==null)throw new RemoteException("App session unavailable");remote.onInput(surfaceId,event);}
@@ -438,6 +444,30 @@ public final class FaceclawExternalApps {
     }
     if(type.equals("composer-cancel")){if(negotiated.contains("composer.session")){IndependenceProtocol.keys(data,"composerId");IndependenceProtocol.token(data,"composerId");emit(component,type,data);}return;}
     if(type.equals("invocation-result")){String id=data.optString("invocationId");String result=data.optString("state");if(invocations.containsKey(id)&&Arrays.asList("accepted","rejected","completed","cancelled","unknown").contains(result)){if(!result.equals("accepted"))invocations.remove(id);emit(component,type,Protocol.object("invocationId",id,"state",result));}return;}
+    if(type.equals("glanceboard-register")) {
+     JSONObject registry=com.faceclaw.sdk.GlanceboardContract.registry(data);
+     String saved=Protocol.object("pin",prefs.getString(component+":pin",""),"registry",registry).toString();
+     if(!saved.equals(prefs.getString(component+":glance-widgets",""))){prefs.edit().putString(component+":glance-widgets",saved).apply();publishGlanceRegistry();}
+     return;
+    }
+    if(type.equals("glanceboard-widget-content")) {
+     JSONObject clean=com.faceclaw.sdk.GlanceboardContract.content(data,glanceRegistry(service),System.currentTimeMillis());
+     if(!allows(component,"previews"))clean=Protocol.object("version",2,"widgetId",clean.getString("widgetId"),"expiresAt",clean.getLong("expiresAt"),"redacted",true);
+     emit(component,"glanceboard-widget-content",clean);return;
+    }
+    if(type.equals("glanceboard-content")) {
+     JSONObject clean=com.faceclaw.sdk.GlanceboardContract.validate(data,System.currentTimeMillis());
+     if(glanceRegistry(service)==null){
+      JSONObject registry=Protocol.object("version",1,"widgets",new JSONArray().put(Protocol.object("id","default","label",service.loadLabel(context.getPackageManager()).toString(),"kind","list","rows",1,"refreshMs",30000)));
+      registry=com.faceclaw.sdk.GlanceboardContract.registry(registry);
+      prefs.edit().putString(component+":glance-widgets",Protocol.object("pin",prefs.getString(component+":pin",""),"registry",registry).toString()).apply();publishGlanceRegistry();
+     }
+     if(!allows(component,"previews")) {
+      clean.put("title",service.loadLabel(context.getPackageManager()).toString());
+      clean.put("entries",new JSONArray());clean.put("emptyText","Content previews disabled");
+     }
+     emit(component,"glanceboard-content",clean);return;
+    }
     if(type.equals("publish-contract")){negotiate(data);return;}
     if(type.equals("control-request")){control(data,now);return;}
     if(type.equals("restoration-token")){byte[] value=event.opaquePayload;if(value!=null&&value.length<=4096){restorationToken=value.clone();restorationTokens.put(component,restorationToken.clone());}return;}
@@ -665,7 +695,7 @@ public final class FaceclawExternalApps {
  }
  private void revokeApproval(String component) {
   restorationTokens.remove(component);retryAttempts.remove(component);recoveryContexts.remove(component);
-  SharedPreferences.Editor edit=prefs.edit().remove(component+":pin");
+  SharedPreferences.Editor edit=prefs.edit().remove(component+":pin").remove(component+":glance-widgets");
   for(String capability:APPROVAL_CAPABILITIES) edit.remove(component+":"+capability);
   for(String key:prefs.getAll().keySet()) if(key.startsWith(component+":extension")) edit.remove(key);
   edit.apply(); disconnect(component,false); extensionsChanged(); emit(component,"changed",new JSONObject());
@@ -717,6 +747,40 @@ public final class FaceclawExternalApps {
     if(!enabled) new AlertDialog.Builder(a).setMessage(index==4?"Suppress only "+source+" notifications on glasses while this app is connected? Phone notifications stay unchanged.":"Enable "+options.get(index).split(":")[0]+" for this app?").setNegativeButton("Cancel",null).setPositiveButton("Enable",(dialog,which)->change.run()).show(); else change.run();
    } else if(index==6) configure(a,k,s); else if(index==7) showExtensions(a,k); else revokeApproval(k);
   }).setNegativeButton("Close",null).show();
+ }
+ /** Catalog ownership is the approved service and its pinned signing identity. */
+ private JSONObject glanceRegistry(ServiceInfo service) {
+  try {
+   String component=key(service);if(!approved(service))return null;
+   JSONObject saved=new JSONObject(prefs.getString(component+":glance-widgets","{}"));
+   if(!prefs.getString(component+":pin","").equals(saved.optString("pin")))return null;
+   return com.faceclaw.sdk.GlanceboardContract.registry(saved.getJSONObject("registry"));
+  }catch(Exception ignored){return null;}
+ }
+ public String glanceboardRegistryJson() {
+  JSONArray providers=new JSONArray();
+  for(ResolveInfo app:discover()){
+   if(providers.length()>=64)break;
+   JSONObject registry=glanceRegistry(app.serviceInfo);if(registry==null)continue;
+   String component=key(app.serviceInfo);
+   providers.put(Protocol.object("component",component,"connected",isConnected(component),"widgets",registry.optJSONArray("widgets")));
+  }
+  return Protocol.object("version",1,"providers",providers).toString();
+ }
+ private void publishGlanceRegistry(){try{emit("","glanceboard-registry",new JSONObject(glanceboardRegistryJson()));}catch(Exception ignored){}}
+ public boolean requestGlanceboardWidget(String component,String widgetId,String contextJson) {
+  Connection connection=connections.get(component);if(connection==null||!connection.ready||!approved(connection.service))return false;
+  JSONObject widget=com.faceclaw.sdk.GlanceboardContract.widget(glanceRegistry(connection.service),widgetId);if(widget==null)return false;
+  try {
+   JSONObject context=new JSONObject(contextJson==null?"{}":contextJson);if(context.toString().length()>8192)return false;
+   send(component,"glanceboard-request",Protocol.object("version",2,"widgetId",widgetId,"width",288,"height",widget.getInt("rows")*144,"context",context).toString());return true;
+  }catch(Exception ignored){return false;}
+ }
+ /** Read-only request; no window is opened and no user action authority is granted. */
+ public boolean requestGlanceboard(String component) {
+  Connection c=connections.get(component);
+  if(c==null||!c.ready||!approved(c.service))return false;
+  send(component,"glanceboard-request",Protocol.object("version",1).toString());return true;
  }
  public boolean publishSharedStyle(String json) {
   if(json==null||json.length()>ExtensionContract.MAX_CONFIG) return false;

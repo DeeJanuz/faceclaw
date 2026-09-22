@@ -45,3 +45,22 @@ test('shared composer binding forwards one terminal result and cancels outstandi
  controls.composer('generic','field','Use text','',200,event=>events.push(event));controls.dispose();assert.equal(cancelled,1);
  global.com=oldCom;
 });
+
+test('translation steps bound delayed targets, reverse and finish without overshoot', () => {
+ const { limitTranslationStep } = require('./index');
+ assert.equal(limitTranslationStep(0,576,29),29);
+ assert.equal(limitTranslationStep(550,576,29),576);
+ assert.equal(limitTranslationStep(29,0,29),0);
+ assert.equal(limitTranslationStep(100,-100,32),68);
+ assert.equal(limitTranslationStep(7,7,32),7);
+ assert.throws(()=>limitTranslationStep(0,100,0),RangeError);
+ assert.throws(()=>limitTranslationStep(0,NaN,32),RangeError);
+});
+
+test('glance publication uses the typed service binding and stops after disposal', () => {
+ const { appControls } = require('./index'); const sent=[];
+ const api=appControls({publishGlanceboard: value => {sent.push(value);return true;}},{json:value=>value});
+ const content={version:1,title:'T3',emptyText:'Caught up',expiresAt:60000,entries:[]};
+ assert.equal(api.publishGlanceboard(content),true);assert.deepEqual(sent,[content]);
+ api.dispose();assert.equal(api.publishGlanceboard(content),false);assert.equal(sent.length,1);
+});

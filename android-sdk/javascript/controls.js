@@ -13,7 +13,17 @@ function appControls(service, bridge) {
   const captures = new Set();
   const composers = new Set();
   const native = () => !disposed && service?.controls?.();
+  const widgetMethod = (name, payload) => {
+    if (disposed || !service) return false;
+    if (typeof service[name] !== 'function') throw new Error(`SDK bridge metadata missing ${name}; verify and rebuild the APK`);
+    return !!service[name](b.json(payload));
+  };
   return {
+    registerGlanceboardWidgets(registry) { return widgetMethod('registerGlanceboardWidgets', require('./glanceboard').validateWidgetRegistry(registry)); },
+    publishGlanceboardWidget(content) { return widgetMethod('publishGlanceboardWidget', content); },
+    publishGlanceboard(content) {
+      return !disposed && !!service?.publishGlanceboard?.(b.json(content));
+    },
     supports(feature) { return !!native()?.supports(feature); },
     onReady(callback) { native()?.onReady(b.runnable(() => { if (!disposed) callback(); })); },
     request(operation, payload = {}, timeoutMs = 5000) {

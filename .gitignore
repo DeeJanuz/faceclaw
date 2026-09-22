@@ -68,3 +68,7 @@ native/kotlin/plugin/platforms/ios/
 tests/kotlin/.gradle/
 tests/kotlin/.kotlin/
 tests/kotlin/build/
+
+# Python SDK tooling bytecode
+__pycache__/
+*.pyc

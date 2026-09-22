@@ -52,7 +52,7 @@ export class WindowMenuLayer extends MenuLayer {
   constructor(title: string | null, items: MenuItem[], holdToTalk = false) {
     super(appMenuPolicy().title ?? title, items, {
       ...WINDOW_MENU_LAYOUT,
-      footer: navigationPolicy().tapHold === "switcher"
+      footer: ["switcher", "glanceboard"].includes(navigationPolicy().tapHold)
         ? undefined
         : holdToTalk
           ? gestureHints([[GESTURE_SHORT_THEN_LONG_PRESS, "system menu"]])

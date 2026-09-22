@@ -4,6 +4,14 @@ Faceclaw applications are ordinary Android APKs running under their own UID. SDK
 
 The public SDK version is `1.0.0`. Wire protocol major `2` intentionally rejects prerelease clients with `UPDATE_REQUIRED`. The minimum Android version is API 27. There is no protocol-1 compatibility path.
 
+## Host firmware and animation transport
+
+The current host requires Faceclaw firmware revision **22 or newer**, using the
+new SID `0xf0` transport and 256 KiB texture cache. Updating an APK does not flash
+the glasses. Read the normative [transport contract](TRANSPORT_CONTRACT.md) for
+firmware migration, prefetch, render credits, recovery and acknowledgement rules.
+SDK wire protocol remains major 2; SDK 1.0.0 application APIs remain compatible.
+
 ## Build and consume locally
 
 Use Android SDK 35 and JDK 17 or newer:
@@ -160,3 +168,11 @@ release, and phone/host presentation adapters. See the
 before consuming it. The older [candidate handoff](../docs/sdk-independence/CANDIDATE-HANDOFF.md)
 and [acceptance status](../docs/sdk-independence/STATUS.md) remain the historical
 record for `1.1.0-rc.1.9dc05298f50a`.
+
+## Portable Glanceboard widgets
+
+Apps register multiple widgets with SDK-owned identities, list or scene content, and one- or two-slot layouts. No host source edits are required. See [the complete contract and CLI guide](GLANCEBOARD.md) and [the standalone Android starter](widget-starter/README.md). The JavaScript package includes `faceclaw-widget` validation, scaffolding, and offline previews.
+
+### Portable widget integration and deployment checks
+
+See [Glanceboard](GLANCEBOARD.md) for the registry, app-owned scene renderer, attention-list semantics, bounded history/layout work, reconnect rules, optional typed media artwork, and the packaged NativeScript APK metadata verifier. The SDK's `decodeMediaArtwork` helper validates and decodes optional artwork without a Faceclaw source dependency. The independent `widget-starter` project demonstrates artifact-only Android integration.

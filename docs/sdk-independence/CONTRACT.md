@@ -37,6 +37,15 @@ All JSON size limits count UTF-8 bytes, not Java `String.length()`. Integers mus
 be safe signed 64-bit values where the type below says `int64`; IDs are opaque
 tokens and must not contain transcripts, package secrets, or user content.
 
+## Display transport and firmware
+
+The [display transport contract](../../android-sdk/TRANSPORT_CONTRACT.md) is
+normative for current host builds. It requires Faceclaw firmware revision 22 or
+newer and defines credit-driven animation, optional resource prefetch, retained
+copy baselines, raster fallback and ACK/recovery semantics. This host/firmware
+migration does not change contract version 1 or application wire protocol major 2.
+Applications negotiate catalog features and retain host ownership of BLE and flashing.
+
 ## Common values
 
 ### IDs and time
@@ -381,3 +390,11 @@ The shared vectors must include:
 
 The vectors are normative. A production implementation that cannot test one of
 these cases is incomplete for the corresponding gate.
+
+## Glanceboard widget registry
+
+Registry v1 and content v2 provide app-owned declarations, generic list/scene rendering, and declared slot sizes through the authenticated SDK service connection. Registration does not change extension negotiation. See the [Glanceboard contract](../../android-sdk/GLANCEBOARD.md) for limits, ambient context, lifecycle, privacy, compatibility, and standalone tooling.
+
+### Optional now-playing artwork in host state
+
+The passive `host-state` payload may include `media: {title, artist, art}` for a visible app window while the display is on and its preview permission is granted. It is `null` when unavailable or outside that scope. This uses the host's active Android media session, not an app-specific music login. `art` is either null or `{width, height, gray4}`: dimensions from 1 to 64, with one lowercase hexadecimal grayscale nibble per pixel in row-major order (multiply by 17 for Gray8). Titles and artists are bounded to 160 characters. Artwork uses the music UI's photo tone and dithering. Consumers should validate dimensions/length, cache decoded pixels, clear content when disconnected, and display a fallback when artwork is absent. Playback controls remain independent of this optional metadata.

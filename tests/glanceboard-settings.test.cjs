@@ -7,7 +7,8 @@ const ts = require('typescript');
 const layout = require('../.test-build/app/apps/glanceboard/layout.js');
 
 function load(file, dependencies) {
-  const context = { exports: {}, console, require: (name) => {
+  const context = { exports: {}, console, setTimeout, clearTimeout, require: (name) => {
+    if (name === './app-content' && !(name in dependencies)) return load('app/apps/glanceboard/app-content.ts', {});
     assert.ok(name in dependencies, name);
     return dependencies[name];
   } };
@@ -18,6 +19,7 @@ function load(file, dependencies) {
 }
 
 function harness() {
+  const content = load('app/apps/glanceboard/app-content.ts', {});
   const values = new Map();
   const listeners = new Set();
   class Setting {
@@ -34,7 +36,7 @@ function harness() {
     findGlanceWidget: () => ({ create: () => ({ start() {}, stop() {}, paint() {} }) }),
   };
   const settings = load('app/apps/glanceboard/glanceboard-settings.ts', {
-    '../../ui/dashboard-settings': config, './layout': layout, './widgets': widgets,
+    '../../ui/dashboard-settings': config, './layout': layout, './widgets': widgets, './app-content': content,
   });
   class GrayImage {
     constructor(width, height) { this.width = width; this.height = height; }
@@ -43,9 +45,9 @@ function harness() {
   }
   const { GlanceBoard } = load('app/apps/glanceboard/board.ts', {
     '../../graphics/image': { GrayImage }, '../../ui/dashboard-settings': config,
-    './glanceboard-settings': settings, './layout': layout, './widgets': widgets,
+    './glanceboard-settings': settings, './layout': layout, './widgets': widgets, './app-content': content,
   });
-  return { settings, GlanceBoard, values, listeners, notify: () => [...listeners].forEach((listener) => listener()) };
+  return { settings, GlanceBoard, content, values, listeners, notify: () => [...listeners].forEach((listener) => listener()) };
 }
 
 test('layout defaults to 2x2; expanding preserves stored slots and remembers the extra row', () => {
@@ -56,7 +58,7 @@ test('layout defaults to 2x2; expanding preserves stored slots and remembers the
   s.glanceLayoutSetting.set('2x3');
   assert.equal(s.glanceLayout(), layout.SIX_SLOT_LAYOUT);
   assert.deepEqual(Array.from(s.glanceSlotSettings(), (slot) => slot.get()),
-    ['compass', 'calendar', 'music', 'calendar', 'none', 'none']);
+    ['compass', 'calendar', 'none', 'calendar', 'none', 'none']);
   s.glanceSlotSettings()[5].set('nightscout');
   s.glanceLayoutSetting.set('2x2');
   assert.equal(s.glanceSlotSettings().length, 4);
@@ -96,4 +98,26 @@ test('an active empty board resizes and requests a frame when the layout changes
   assert.equal(renders, 2);
   board.stop();
   assert.equal(h.listeners.size, 0);
+});
+
+test('an open board updates when a provider appears or disconnects and stops listening when closed', () => {
+  const h = harness();
+  for (const slot of h.settings.glanceSlotSettings()) slot.set('none');
+  h.settings.glanceSlotSettings()[0].set('app:org.example/.Widgets');
+  let renders = 0;
+  const board = new h.GlanceBoard(() => renders++);
+  board.start();
+  const initial = renders;
+  const catalog = {version: 1, providers: [{component: 'org.example/.Widgets', connected: true,
+    widgets: [{id: 'default', label: 'Example', kind: 'list', rows: 1, refreshMs: 30000, uses: []}]}]};
+  h.content.applyAppGlanceRegistry(catalog);
+  assert.equal(renders, initial + 1);
+  h.content.applyAppGlanceRegistry(catalog);
+  assert.equal(renders, initial + 1, 'unchanged catalog does not rebuild');
+  catalog.providers[0].connected = false;
+  h.content.applyAppGlanceRegistry(catalog);
+  assert.equal(renders, initial + 2);
+  board.stop();
+  h.content.applyAppGlanceRegistry({version: 1, providers: []});
+  assert.equal(renders, initial + 2, 'closed boards no longer subscribe');
 });

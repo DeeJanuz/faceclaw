@@ -1,0 +1,9 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+ <queries><package android:name="com.faceclaw.app"/></queries>
+ <application android:label="Portable widget example" android:allowBackup="false" android:theme="@android:style/Theme.Material.Light.NoActionBar">
+  <service android:name=".ExampleWidgetService" android:exported="true">
+   <intent-filter><action android:name="com.faceclaw.action.APP_SERVICE"/></intent-filter>
+   <meta-data android:name="com.faceclaw.PROTOCOL_MAJOR" android:value="2"/>
+  </service>
+ </application>
+</manifest>

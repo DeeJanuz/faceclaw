@@ -17,3 +17,10 @@ export class FrameRequest {
 }
 
 export * from "./controls";
+
+/** Bound newly exposed pixels; continue requesting credits until the final position. */
+export function limitTranslationStep(previous: number, desired: number, maxStep: number): number;
+
+export * from './glanceboard';
+
+export * from './media';

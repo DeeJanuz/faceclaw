@@ -1,3 +1,7 @@
+import { currentMediaSnapshot } from './media-snapshot';
+import { weatherBridge } from '../../native/weather';
+import { timeFormatSetting } from '../../ui/dashboard-settings';
+import { acceptAppGlance, applyAppGlanceRegistry, clearAppGlance, configureAppGlanceRequest } from '../glanceboard/app-content';
 import { ExtensionPlatform, type ExtensionHooks } from "./extension-platform";
 import { boundedToken } from "./extension-policy";
 import { Application, Utils } from "@nativescript/core";
@@ -51,6 +55,17 @@ export class ExternalAppPlatform {
   private readonly captureHistory = new Map<string, Map<string, { body: string; at: number; result?: any }>>();
   private readonly hostStateSnapshots = new Map<string, string>();
   constructor(private readonly options: ExternalPlatformOptions) {
+    configureAppGlanceRequest(source => {
+      if (this.options.isLocked()) return;
+      const context: any = {};
+      if (source.uses.includes('battery')) context.battery = shell.getBatteryLevels();
+      if (source.uses.includes('time-format')) context.timeFormat = timeFormatSetting.get();
+      if (source.uses.includes('weather')) {
+        const weather = weatherBridge.snapshotForDashboard(true);
+        context.weather = { phase: weather.phase, locationName: weather.locationName, current: weather.current, lastUpdatedMs: weather.lastUpdatedMs };
+      }
+      this.native?.requestGlanceboardWidget(source.component, source.id, JSON.stringify(context));
+    });
     this.extensions = new ExtensionPlatform(this.native, { ...options.extensions, openAssistant: async (component, current) => {
       if (!current()) return false;
       await this.open(component, "", current);
@@ -81,6 +96,7 @@ export class ExternalAppPlatform {
       },
     }) : null;
     this.native?.setListener(this.listener);
+    if (this.native?.glanceboardRegistryJson) applyAppGlanceRegistry(JSON.parse(String(this.native.glanceboardRegistryJson())));
     // Expiry must retract popups even when the bridge is unreachable.
     setInterval(() => {
       if (expireExternalNotifications()) publishExternalNotificationPosted("");
@@ -102,7 +118,10 @@ export class ExternalAppPlatform {
     this.native?.send(component, type, JSON.stringify(data));
   }
   private publishHostState(component: string): void {
-    const data = this.extensions.ownHostState(component), serialized = JSON.stringify(data);
+    const window = this.windows.get(component);
+    const media = window?.ready && window.visible && shell.isScreenOn() && this.granted(component, 'previews')
+      ? currentMediaSnapshot() : null;
+    const data = { ...(this.extensions.ownHostState(component) as object), media }, serialized = JSON.stringify(data);
     if (serialized === this.hostStateSnapshots.get(component)) return;
     this.hostStateSnapshots.set(component, serialized);
     this.send(component, "host-state", data);
@@ -183,6 +202,9 @@ export class ExternalAppPlatform {
     } finally { state.rendering = false; }
   }
   private onEvent(component: string, type: string, data: any): void {
+    if (type === 'glanceboard-registry') { applyAppGlanceRegistry(data); return; }
+    if (type === 'glanceboard-content' || type === 'glanceboard-widget-content') { acceptAppGlance(component, data); return; }
+    if (['disconnected', 'recovering', 'grants-changed', 'changed'].includes(type)) clearAppGlance(component);
     if (["connected", "disconnected", "changed", "grants-changed", "extensions-changed"].includes(type)) this.hostStateSnapshots.delete(component);
     if (this.extensions.onNativeEvent(component, type, data)) {
       if (type === "extensions-changed") for (const [owner, state] of this.windows) if (state.window.heightMode !== this.heightMode(owner)) state.window.relayout?.();

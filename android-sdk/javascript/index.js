@@ -39,3 +39,16 @@ class FrameRequest {
 module.exports = { DURATION_MS, BODY_REVEAL_PROGRESS, interpolateRect, WindowMotion, FrameRequest };
 
 Object.assign(module.exports, require("./controls"));
+
+/** Mirrors FrameAnimator.limitTranslationStep; credits own scheduling. */
+function limitTranslationStep(previous, desired, maxStep) {
+  if (![previous, desired, maxStep].every(Number.isSafeInteger) || maxStep <= 0)
+    throw new RangeError('Integer positions and a positive integer maxStep are required');
+  const delta = desired - previous;
+  return delta > maxStep ? previous + maxStep : delta < -maxStep ? previous - maxStep : desired;
+}
+module.exports.limitTranslationStep = limitTranslationStep;
+
+Object.assign(module.exports, require('./glanceboard'));
+
+Object.assign(module.exports, require('./media'));

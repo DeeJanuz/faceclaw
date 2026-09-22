@@ -341,3 +341,11 @@ test('T3 back policy wakes only the retained app; tap then hold opens the switch
   assert.equal(h.shell.getFocus(), 'sidebar');
  }
 });
+
+test('Glanceboard tap-hold policy leaves asleep gestures to the board and keeps the awake switcher', async () => {
+ const h = harness({ tapHold: 'glanceboard', doubleTap: 'back', rootBack: 'sleep' });
+ h.shell.sleep(); await h.send('short-then-long-press');
+ assert.equal(h.shell.isScreenOn(), false, 'shell must not wake the app switcher ahead of Glanceboard');
+ await h.send('double-click'); await h.send('short-then-long-press');
+ assert.equal(h.shell.getFocus(), 'sidebar');
+});

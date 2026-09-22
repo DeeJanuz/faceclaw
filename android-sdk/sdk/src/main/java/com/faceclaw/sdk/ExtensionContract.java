@@ -37,7 +37,7 @@ public final class ExtensionContract {
   configuration(data);
   Map<String,String> rules=new HashMap<>();
   if(feature.equals("ui.launcher")) { rules.put("label","text"); rules.put("filesDefaultView","icons|list"); }
-  else if(feature.equals("ui.navigation")) { rules.put("rootBack","sleep|switcher"); rules.put("doubleTap","back|sleep"); rules.put("tapHold","switcher|app-menu"); rules.put("hold","app-menu|system-menu"); rules.put("wakeFocus","window|sidebar"); }
+  else if(feature.equals("ui.navigation")) { rules.put("rootBack","sleep|switcher"); rules.put("doubleTap","back|sleep"); rules.put("tapHold","switcher|app-menu|glanceboard"); rules.put("hold","app-menu|system-menu"); rules.put("wakeFocus","window|sidebar"); }
   else if(feature.equals("ui.window-layout")) { rules.put("centered","boolean"); rules.put("sidebarMode","overlay|persistent"); rules.put("switcherHeight","display|minimum"); rules.put("dividerWidth","1:4"); rules.put("ownTopBar","boolean"); rules.put("ownHeightMode","min|medium|max"); rules.put("inputDialogs","compact|viewport"); }
   else if(feature.equals("ui.typography")) { rules.put("font","(?:Inter_18pt|Roboto|RobotoMono|Montserrat)-(?:Regular|Light|Bold)\\.ttf"); rules.put("size","8:20"); rules.put("raster","antialiased|crisp|hinted"); rules.put("borderWidth","1:4"); rules.put("selectionBorderWidth","1:5"); rules.put("cardRadius","0:24"); }
   else if(feature.equals("ui.app-menu")) { rules.put("title","text"); rules.put("systemTitle","text"); rules.put("displayOffFirst","boolean"); rules.put("systemActionsLast","boolean"); }

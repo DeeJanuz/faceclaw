@@ -52,7 +52,7 @@ export function onEffectiveExtensionsChanged(listener: () => void): () => void {
 export type NavigationPolicy = {
   doubleTap: "back" | "sleep";
   rootBack: "sleep" | "switcher";
-  tapHold: "switcher" | "app-menu";
+  tapHold: "switcher" | "app-menu" | "glanceboard";
   hold: "app-menu" | "system-menu";
   wakeFocus: "window" | "sidebar";
 };

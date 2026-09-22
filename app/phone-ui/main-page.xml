@@ -13,6 +13,7 @@
         <ActionItem text="Conversations" tap="{{ onConversationsTap }}" android.position="popup" />
         <ActionItem text="Take screenshot" tap="{{ onTakeScreenshotTap }}" android.position="popup" />
         <ActionItem text="Record screen" tap="{{ onRecordScreenTap }}" android.position="popup" />
+        <ActionItem text="Install / update custom firmware" tap="{{ onInstallFirmwareTap }}" isEnabled="{{ canRun }}" visibility="{{ glassesMenuItemsVisibility }}" android.position="popup" />
         <ActionItem text="Uninstall custom firmware" tap="{{ onUninstallFirmwareTap }}" isEnabled="{{ canRun }}" visibility="{{ glassesMenuItemsVisibility }}" android.position="popup" />
     </ActionBar>
 

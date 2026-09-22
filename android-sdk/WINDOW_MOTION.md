@@ -2,7 +2,8 @@
 
 Start here for every new animated SDK application. This is the current integration
 recipe; [ANIMATION_PATTERNS.md](ANIMATION_PATTERNS.md) contains engineering rationale
-and historical T3 findings. No firmware changes or additional SDK API are required.
+and historical T3 findings. The current host requires the matching firmware described in the
+[transport contract](TRANSPORT_CONTRACT.md); no additional application API is required.
 A fixed frame rate or optical presentation time is not guaranteed.
 
 ## Ownership
@@ -38,7 +39,8 @@ new SDK lifecycle methods or wire events.
 Use complete source and destination snapshots when measurements show that their
 combined entering-glyph work fits the transport budget. Register printable characters with
 `registerGlyph(fontKey, encoding, ...)`, attach their `DrawBatch` placements to
-every authoritative Gray8 frame, and call `resources.prefetch(...)` while the
+every authoritative Gray8 frame, and prefetch both source and destination
+resources with `resources.prefetch(...)` while the
 first frame is still at the settled source position. If the next animation has a
 known complete cache set, `prefetchWorkingSet(...)` may replace an idle cache.
 

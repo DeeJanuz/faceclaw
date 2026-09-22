@@ -264,6 +264,10 @@ public abstract class FaceclawAppService extends Service {
    if(type.equals("capability-cancel")){capabilityRequests.remove(data.optString("requestId"));onControlEvent(event);return;}
    if(type.equals("capability-request")){long now=System.currentTimeMillis(),expiry=data.optLong("expiresAt");capabilityRequests.entrySet().removeIf(entry->entry.getValue()<=now);String requestId=data.optString("requestId"),capabilityId=data.optString("capabilityId");int version=data.optInt("capabilityVersion");JSONObject published=null;for(int i=0;i<toolCapabilities.length();i++){JSONObject capability=toolCapabilities.optJSONObject(i);if(capability!=null&&capabilityId.equals(capability.optString("id"))&&version==capability.optInt("version")){published=capability;break;}}if(published==null||!ExtensionContract.token(requestId)||capabilityRequests.containsKey(requestId)||capabilityRequests.size()>=32||expiry<=now||expiry>now+30000||data.optJSONObject("arguments")==null||data.optJSONObject("caller")==null||data.toString().length()>Protocol.MAX_JSON/2)return;try{data.put("arguments",CapabilityContract.arguments(published.getJSONObject("inputSchema"),data.getJSONObject("arguments")));}catch(Exception invalid){return;}capabilityRequests.put(requestId,expiry);}
    if(type.equals("messaging-request")){long now=System.currentTimeMillis();messagingRequests.entrySet().removeIf(entry->entry.getValue()<=now);String requestId=data.optString("requestId"),method=data.optString("method");long expiry=data.optLong("expiresAt");if(!messagingAllowed||!ExtensionContract.token(requestId)||messagingRequests.containsKey(requestId)||messagingRequests.size()>=32||expiry<=now||expiry>now+30000||!java.util.Arrays.asList("status","search","resolve","history","send","operation").contains(method)||data.optJSONObject("params")==null)return;messagingRequests.put(requestId,expiry);}
+   if(type.equals("capabilities")){
+    glanceRegistrySupported=data.optInt("glanceboardRegistry")==1;
+    registerGlanceboardWidgets(registeredGlanceWidgets==null?glanceboardWidgets():registeredGlanceWidgets);
+   }
    onControlEvent(event);
    if(type.equals("open")||type.equals("resize"))windowState.replay();
   }catch(Exception ignored){}
@@ -293,7 +297,7 @@ public abstract class FaceclawAppService extends Service {
   notificationReplyAllowed=false; notificationReplies.clear();
   if(host!=null) {
    IFaceclawHostSession previous=host;if(notifyHost)try{previous.close(info);}catch(Exception ignored){}
-   if(death!=null)previous.asBinder().unlinkToDeath(death,0);host=null;hostIdentity="";wireSession="";hostUid=-1;if(faceclawSession!=null){if(info.recoverable)faceclawSession.detach();else{faceclawSession.closeSilently();faceclawSession=null;}}boolean permanent=info.reason==DisconnectInfo.Reason.IDENTITY_CHANGED||info.reason==DisconnectInfo.Reason.REVOKED||info.reason==DisconnectInfo.Reason.UPDATE_REQUIRED||info.reason==DisconnectInfo.Reason.PROTOCOL_ABUSE;connectionState=info.recoverable?ConnectionState.RECOVERING:permanent?ConnectionState.PERMANENTLY_REJECTED:ConnectionState.DISCOVERED;onSessionLost(info);
+   if(death!=null)previous.asBinder().unlinkToDeath(death,0);host=null;glanceRegistrySupported=false;sentGlanceRegistry="";hostIdentity="";wireSession="";hostUid=-1;if(faceclawSession!=null){if(info.recoverable)faceclawSession.detach();else{faceclawSession.closeSilently();faceclawSession=null;}}boolean permanent=info.reason==DisconnectInfo.Reason.IDENTITY_CHANGED||info.reason==DisconnectInfo.Reason.REVOKED||info.reason==DisconnectInfo.Reason.UPDATE_REQUIRED||info.reason==DisconnectInfo.Reason.PROTOCOL_ABUSE;connectionState=info.recoverable?ConnectionState.RECOVERING:permanent?ConnectionState.PERMANENTLY_REJECTED:ConnectionState.DISCOVERED;onSessionLost(info);
   }
  }
  private boolean send(String type,JSONObject data) {
@@ -308,6 +312,31 @@ public abstract class FaceclawAppService extends Service {
   if(id==null||id.isEmpty()||id.length()>128||target==null||target.isEmpty()||target.length()>512||title==null||title.length()>160||text==null||text.length()>4096||replyToken==null||replyToken.length()>128) return;
   notificationReplies.publish(id,target,replyToken,expiresAtMs,System.currentTimeMillis());
   send("notification",Protocol.object("id",id,"target",target,"title",title,"text",text,"expiresAt",expiresAtMs,"replyToken",replyToken));
+ }
+ /** Publish a replacement passive snapshot. Hosts request fresh content with glanceboard-request. */
+ private JSONObject registeredGlanceWidgets;
+ private boolean glanceRegistrySupported;
+ private String sentGlanceRegistry="";
+ /** Override for static native-app declarations. JavaScript clients can register dynamically. */
+ protected JSONObject glanceboardWidgets(){return Protocol.object("version",1,"widgets",new org.json.JSONArray());}
+ public final boolean registerGlanceboardWidgets(JSONObject registry) {
+  registeredGlanceWidgets=GlanceboardContract.registry(registry);
+  if(!glanceRegistrySupported)return false;
+  String key=registeredGlanceWidgets.toString();if(key.equals(sentGlanceRegistry))return true;
+  if(send("glanceboard-register",registeredGlanceWidgets)){sentGlanceRegistry=key;return true;}return false;
+ }
+ public final boolean publishGlanceboardWidget(JSONObject content) {
+  if(registeredGlanceWidgets==null)return false;
+  JSONObject clean=GlanceboardContract.content(content,registeredGlanceWidgets,System.currentTimeMillis());
+  if(glanceRegistrySupported)return send("glanceboard-widget-content",clean);
+  if("default".equals(clean.optString("widgetId")) && clean.has("entries")){
+   try{clean.put("version",1);clean.remove("widgetId");}catch(org.json.JSONException ignored){return false;}
+   return send("glanceboard-content",clean);
+  }
+  return false;
+ }
+ public final boolean publishGlanceboard(JSONObject content) {
+  return send("glanceboard-content",GlanceboardContract.validate(content,System.currentTimeMillis()));
  }
  public final void removeNotification(String id) { notificationReplies.remove(id); send("remove-notification",Protocol.object("id",id)); }
  /** Report one bounded, content-free outcome for a consumed action in this session. */

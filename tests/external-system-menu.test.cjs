@@ -49,6 +49,7 @@ test('external menu handoff finishes input ownership on every no-render return',
  const shell = { registerWindow: window => windows.push(window), focusWindow() {}, foregroundWindow: () => undefined,
   isScreenOn: () => true, openSystemMenu() {}, canShowExtensionOverlay: () => true };
  const imports = {
+  '../glanceboard/app-content': {configureAppGlanceRequest() {}, clearAppGlance() {}, applyAppGlanceRegistry() {}},
   './extension-platform': { ExtensionPlatform }, './extension-policy': {}, '@nativescript/core': { Application: { android: {} }, Utils: { android: { getApplicationContext: () => ({}) } } },
   '../../ui/shell/shell': { shell }, '../../ui/shell/chrome-layer': { windowIcon: () => ({}) }, '../../ui/shell/geometry': { appViewportSize: () => ({ width: 576, height: 452 }) },
   '../../native/notification-icons': { publishExternalNotificationPosted() {} }, '../../native/external-notifications': { configureExternalNotifications() {}, configureExternalNotificationReplies() {}, expireExternalNotifications: () => false },

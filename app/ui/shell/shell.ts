@@ -950,7 +950,7 @@ class Shell {
     // first), which answers with its own menu or asks for the system menu
     // when it has none.
     if (event.type === "short-then-long-press") {
-      if (navigationPolicy().tapHold === "switcher") {
+      if (navigationPolicy().tapHold === "switcher" || navigationPolicy().tapHold === "glanceboard") {
         this.stack.clearToBase();
         const foreground = this.foregroundWindow();
         await foreground?.handleInput(makeInputEvent({ type: "system-menu-opened" }), frameId);
@@ -1890,7 +1890,7 @@ class Shell {
     // when the app has one (otherwise it opens this very menu, not worth a
     // hint).
     if (grouped && !hasOverlay && foreground.hasAppMenu?.()) items.push({ label: "App actions", onSelect: async ctx => { ctx.stack.pop(); await this.openAppActions(); } });
-    const footer = navigationPolicy().tapHold === "switcher"
+    const footer = ["switcher", "glanceboard"].includes(navigationPolicy().tapHold)
       ? gestureHints([[GESTURE_SHORT_THEN_LONG_PRESS, "app switcher"]])
       : foreground.hasAppMenu?.() && !foreground.holdToTalk
         ? gestureHints([[GESTURE_SHORT_THEN_LONG_PRESS, "app menu"]])

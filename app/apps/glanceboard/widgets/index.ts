@@ -1,3 +1,5 @@
+import { AppGlanceWidget } from './app-widget';
+import { appGlanceSources } from '../app-content';
 import { type GlanceWidgetDefinition, type GlanceWidgetId } from "../widget";
 import { CalendarWidget } from "./calendar-widget";
 import { CompassWidget } from "./compass-widget";
@@ -17,6 +19,10 @@ export const GLANCE_WIDGETS: readonly GlanceWidgetDefinition[] = [
 ];
 
 export function findGlanceWidget(id: GlanceWidgetId | string): GlanceWidgetDefinition | null {
+  if (id.startsWith('app:')) {
+    const key = id.slice(4), source = appGlanceSources().find(source => source.key === key);
+    return { id: id as GlanceWidgetId, label: source?.label || 'Unavailable widget', tall: source?.rows === 2, create: () => new AppGlanceWidget(key) };
+  }
   return GLANCE_WIDGETS.find((widget) => widget.id === id) ?? null;
 }
 

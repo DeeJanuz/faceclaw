@@ -1,3 +1,4 @@
+import { appGlanceSources } from './app-content';
 import { ConfigSettingBoolean, ConfigSettingEnum } from "../../ui/dashboard-settings";
 import { QUADRANT_LAYOUT, SIX_SLOT_LAYOUT, slotsVerticallyAdjacent, type GlanceLayout } from "./layout";
 import { type GlanceWidgetId } from "./widget";
@@ -7,7 +8,7 @@ export type GlanceSlotChoice = GlanceWidgetId | "none";
 
 const SLOT_CHOICES: readonly GlanceSlotChoice[] = ["none", "system-card", "calendar", "terminal", "nightscout", "compass", "music"];
 
-const SLOT_CHOICE_LABELS: Record<GlanceSlotChoice, string> = {
+const SLOT_CHOICE_LABELS: Partial<Record<GlanceSlotChoice, string>> = {
   none: "Empty",
   "system-card": "System card",
   calendar: "Calendar",
@@ -18,14 +19,14 @@ const SLOT_CHOICE_LABELS: Record<GlanceSlotChoice, string> = {
 };
 
 export function glanceSlotChoiceLabel(choice: GlanceSlotChoice): string {
-  return SLOT_CHOICE_LABELS[choice] ?? choice;
+  return SLOT_CHOICE_LABELS[choice] ?? appGlanceSources().find(source => `app:${source.key}` === choice)?.title ?? choice;
 }
 
 /**
  * Slot order follows QUADRANT_LAYOUT: top left, top right, bottom left, bottom
  * right. Calendar in both right slots merges into one double-height region.
  */
-const DEFAULT_QUADRANT_CHOICES: readonly GlanceSlotChoice[] = ["system-card", "calendar", "music", "calendar"];
+const DEFAULT_QUADRANT_CHOICES: readonly GlanceSlotChoice[] = ["system-card", "calendar", "none", "calendar"];
 
 export const glanceLayoutSetting = new ConfigSettingEnum<"2x2" | "2x3">({
   id: "glanceboard-layout",
@@ -126,7 +127,7 @@ export function glanceSlotSettings(layout: GlanceLayout = glanceLayout()): Confi
         label: slot.label,
         storageKey: `glanceboard.${storageId}.slot.${index}`,
         defaultValue: (grid ? DEFAULT_QUADRANT_CHOICES[index] : undefined) ?? "none",
-        values: SLOT_CHOICES,
+        values: [...SLOT_CHOICES, ...appGlanceSources().map(source => `app:${source.key}` as GlanceSlotChoice)],
         formatValue: glanceSlotChoiceLabel,
         description: `Which widget fills the ${slot.label.toLowerCase()} slot of the Glanceboard.`,
       }),

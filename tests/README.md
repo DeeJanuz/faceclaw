@@ -37,3 +37,17 @@ intervals and animation callbacks still fire, and cancelled timers stay cancelle
 A short UIKit background task keeps the test process running without glasses.
 This covers the ticker's background behavior; sustained execution with BLE and a
 locked physical phone still requires device testing.
+
+## Writing host tests
+
+Tests that exercise NativeScript-facing TypeScript load the production file in
+a `vm` context with its imports stubbed. Use `transpile(path)` from
+`helpers/transpile.cjs` to compile a file once per run, or `transpileSource`
+for an extracted snippet. Assert on behavior (calls, state, output), not on
+source text; configuration files such as manifests and layout XML are the
+exception.
+
+Format test files before committing:
+
+    npx prettier@3 --print-width 120 --single-quote --write <files>
+    java -jar google-java-format-1.23.0-all-deps.jar --aosp --replace <files>

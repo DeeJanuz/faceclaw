@@ -49,9 +49,9 @@ public final class Pcm16StreamAdapterCheck {
         short[] empty = Pcm16StreamAdapter.process(new short[] {1}, 1, ignored -> new byte[0]);
         assertEquals(0, empty.length, "empty output");
 
-        short[] larger = Pcm16StreamAdapter.process(
-                new short[] {1, 2}, 2,
-                ignored -> toBytes(new short[] {10, 20, 30, 40}));
+        short[] larger =
+                Pcm16StreamAdapter.process(
+                        new short[] {1, 2}, 2, ignored -> toBytes(new short[] {10, 20, 30, 40}));
         assertArrayEquals(new short[] {10, 20, 30, 40}, larger, "larger output");
     }
 

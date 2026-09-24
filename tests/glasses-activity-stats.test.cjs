@@ -7,7 +7,9 @@ const { execFileSync } = require('node:child_process');
 test('glasses activity snapshot keeps bounded traffic, event, and state totals', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'faceclaw-battery-stats-'));
   try {
-    execFileSync('javac', ['-d', dir,
+    execFileSync('javac', [
+      '-d',
+      dir,
       'App_Resources/Android/src/main/java/com/faceclaw/app/GlassesActivityStats.java',
       'tests/fixtures/GlassesActivityStatsCheck.java',
     ]);

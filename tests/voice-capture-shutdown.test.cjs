@@ -6,7 +6,7 @@ const Module = require('node:module');
 const ts = require('typescript');
 
 const originalLoad = Module._load;
-Module._load = function(request, parent, isMain) {
+Module._load = function (request, parent, isMain) {
   switch (request) {
     case '@nativescript/core':
       return { Utils: { android: { getApplicationContext: () => ({}) } } };
@@ -20,7 +20,14 @@ Module._load = function(request, parent, isMain) {
     case './reconnecting-stt':
       return { ReconnectingSttClient: class {} };
     case './speech-pause':
-      return { SpeechPauseDetector: class { reset() {} accept() { return false; } } };
+      return {
+        SpeechPauseDetector: class {
+          reset() {}
+          accept() {
+            return false;
+          }
+        },
+      };
     case './elevenlabs-stt':
       return { ElevenLabsSttClient: class {} };
     case './openai-stt':
@@ -43,7 +50,9 @@ class FakeController {
     this.capturing = false;
     this.captureIds = [];
   }
-  setListener(listener) { this.listener = listener; }
+  setListener(listener) {
+    this.listener = listener;
+  }
   setCommunicator() {}
   setUsePhoneMic() {}
   setSaveRecordings() {}
@@ -53,12 +62,28 @@ class FakeController {
   setOnboardModelKind() {}
   clearSpeakerVerification() {}
   setSpeakerVerification() {}
-  hasOnboardModel() { return true; }
-  isCapturing() { return this.capturing; }
-  start(mode, captureId = 0) { this.starts.push(mode); this.captureIds.push(captureId); this.capturing = true; }
-  stop() { this.stopCalls++; this.capturing = false; }
-  abort() { this.abortCalls++; this.capturing = false; }
-  finish() { this.listener.onStopped(this.captureIds.at(-1) ?? 0); }
+  hasOnboardModel() {
+    return true;
+  }
+  isCapturing() {
+    return this.capturing;
+  }
+  start(mode, captureId = 0) {
+    this.starts.push(mode);
+    this.captureIds.push(captureId);
+    this.capturing = true;
+  }
+  stop() {
+    this.stopCalls++;
+    this.capturing = false;
+  }
+  abort() {
+    this.abortCalls++;
+    this.capturing = false;
+  }
+  finish() {
+    this.listener.onStopped(this.captureIds.at(-1) ?? 0);
+  }
 }
 
 global.isAndroid = true;
@@ -67,13 +92,17 @@ global.com = {
     app: {
       FaceclawVoiceController: FakeController,
       FaceclawVoiceControllerListener: class {
-        constructor(implementation) { return implementation; }
+        constructor(implementation) {
+          return implementation;
+        }
       },
     },
   },
 };
 global.Array = Object.assign(Array, {
-  create(_type, length) { return new Array(length).fill(0); },
+  create(_type, length) {
+    return new Array(length).fill(0);
+  },
 });
 
 const sourcePath = path.resolve('app/native/voice-control.ts');
@@ -89,7 +118,6 @@ voiceModule._compile(compiled, sourcePath);
 Module._load = originalLoad;
 const { FaceclawVoiceControlBridge } = voiceModule.exports;
 
-
 const options = {
   communicator: {},
   provider: 'onboard',
@@ -104,7 +132,7 @@ test('the TypeScript voice proxy implements every Kotlin listener callback', () 
     'native/kotlin/shared/src/commonMain/kotlin/com/faceclaw/app/callbacks/FaceclawVoiceControllerListener.kt',
     'utf8',
   );
-  const callbacks = [...listenerSource.matchAll(/\bfun (\w+)\(/g)].map(match => match[1]);
+  const callbacks = [...listenerSource.matchAll(/\bfun (\w+)\(/g)].map((match) => match[1]);
   assert.ok(callbacks.includes('onStopped'));
   new FaceclawVoiceControlBridge().startPushToTalk(options);
   for (const name of callbacks) assert.equal(typeof FakeController.instance.listener[name], 'function', name);
@@ -117,9 +145,15 @@ test('cloud finalization waits for native final PCM', () => {
   const events = [];
   bridge.cloudClient = {
     start() {},
-    acceptPcm(bytes) { events.push(`pcm:${bytes.length}`); },
-    finish() { events.push('finish'); },
-    stop() { events.push('stop'); },
+    acceptPcm(bytes) {
+      events.push(`pcm:${bytes.length}`);
+    },
+    finish() {
+      events.push('finish');
+    },
+    stop() {
+      events.push('stop');
+    },
   };
 
   controller.listener.onPcm(Uint8Array.from([1, 2]));
@@ -175,7 +209,12 @@ test('an abort stops cloud work immediately and cannot restart stale capture', (
   const controller = FakeController.instance;
   let cloudStops = 0;
   bridge.cloudClient = {
-    start() {}, acceptPcm() {}, finish() {}, stop() { cloudStops++; },
+    start() {},
+    acceptPcm() {},
+    finish() {},
+    stop() {
+      cloudStops++;
+    },
   };
 
   bridge.stop();

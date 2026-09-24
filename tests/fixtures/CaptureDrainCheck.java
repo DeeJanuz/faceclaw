@@ -17,17 +17,19 @@ public final class CaptureDrainCheck {
         DrainableAudioQueue<Integer> queue = new DrainableAudioQueue<>(16);
         queue.open();
         List<Integer> consumed = new ArrayList<>();
-        Thread consumer = new Thread(() -> {
-            try {
-                Integer value;
-                while ((value = queue.take()) != null) {
-                    consumed.add(value);
-                    Thread.sleep(2);
-                }
-            } catch (InterruptedException error) {
-                throw new AssertionError(error);
-            }
-        });
+        Thread consumer =
+                new Thread(
+                        () -> {
+                            try {
+                                Integer value;
+                                while ((value = queue.take()) != null) {
+                                    consumed.add(value);
+                                    Thread.sleep(2);
+                                }
+                            } catch (InterruptedException error) {
+                                throw new AssertionError(error);
+                            }
+                        });
         consumer.start();
         for (int i = 0; i < 10; i++) assertTrue(queue.offer(i), "accepted before close");
         queue.closeForDrain();
@@ -48,13 +50,15 @@ public final class CaptureDrainCheck {
 
         queue.open();
         final Object[] taken = new Object[1];
-        Thread waiter = new Thread(() -> {
-            try {
-                taken[0] = queue.take();
-            } catch (InterruptedException error) {
-                throw new AssertionError(error);
-            }
-        });
+        Thread waiter =
+                new Thread(
+                        () -> {
+                            try {
+                                taken[0] = queue.take();
+                            } catch (InterruptedException error) {
+                                throw new AssertionError(error);
+                            }
+                        });
         waiter.start();
         Thread.sleep(10);
         queue.abort();

@@ -18,7 +18,8 @@ afterEvaluate {
    create<MavenPublication>("release") {
     from(components["release"])
     artifactId = "sdk"
-    pom { name.set("Faceclaw Android SDK"); url.set("https://github.com/DeeJanuz/faceclaw") }
+    pom { name.set("Faceclaw Android SDK"); url.set("https://github.com/DeeJanuz/faceclaw")
+     licenses { license { name.set("MIT"); url.set("https://opensource.org/licenses/MIT") } } }
    }
   }
  }

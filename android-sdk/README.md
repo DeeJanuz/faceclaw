@@ -187,3 +187,7 @@ Apps register multiple widgets with SDK-owned identities, list or scene content,
 ### Portable widget integration and deployment checks
 
 See [Glanceboard](GLANCEBOARD.md) for the registry, app-owned scene renderer, attention-list semantics, bounded history/layout work, reconnect rules, optional typed media artwork, and the packaged NativeScript APK metadata verifier. The SDK's `decodeMediaArtwork` helper validates and decodes optional artwork without a Faceclaw source dependency. The independent `widget-starter` project demonstrates artifact-only Android integration.
+
+## License
+
+The SDK, its JavaScript bindings, examples, demos and starter projects in this directory are [MIT licensed](LICENSE), so apps built on them can use any license. The Faceclaw host in the rest of this repository remains GPL-3.0. Bundled fonts keep their SIL Open Font License, and test APKs built from `host-tests` include GPL-3.0 host sources.

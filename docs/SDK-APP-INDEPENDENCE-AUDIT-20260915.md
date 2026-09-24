@@ -1,6 +1,6 @@
 # SDK app independence audit
 
-Date: 2026-09-15. Host checkout: `7e64557`, initially clean.
+Date: 2026-09-15. Host checkout: `4cd862c`, initially clean.
 
 ## Conclusion
 

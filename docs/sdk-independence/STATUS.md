@@ -7,8 +7,8 @@ is **not complete**. The user authorized installation over wireless ADB while
 preserving app data and live accounts. No uninstall, data clear, publication, push,
 or live-account operation was performed.
 
-Code: platform `7292fbc`, T3 `19e3e3b`, Signal `a509245`, Spotify `da68177`.
-Bridge remains unchanged at `626700f`. See [candidate handoff](CANDIDATE-HANDOFF.md),
+Code: platform `42ca250`, T3 `ce46a59`, Signal `aa1189a`, Spotify `a9ade3f`.
+Bridge remains unchanged at `76856d4`. See [candidate handoff](CANDIDATE-HANDOFF.md),
 [verification evidence](evidence/candidate-20260915.md), and [device evidence](evidence/device-20260915.md).
 
 ## Implementation against the original plan
@@ -76,7 +76,7 @@ requires a new frozen candidate and rerun of affected acceptance checks.
 
 ## Historical audit correction
 
-`38705ff` also synchronized seven production WindowStateCache methods; review it
+`e70259c` also synchronized seven production WindowStateCache methods; review it
 with P03. `1f2b5fd` is not in the final checkpoint ancestry. The initial P02 fixtures
 were structural, and initial P06 diagnostics did not complete recovery. The audit
 is preserved in workspace `output/sdk-independence/session-dafbe1a9-audit-20260915.md`.

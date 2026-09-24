@@ -27,10 +27,10 @@ or the host compositor inside the SDK is outside this plan.
 
 ## Checkpoints and current evidence
 
-- Audit committed in `faceclaw-app-platform`: `ae09fa4`.
-- Host base at planning time: `ba325c4`, already newer than the audited `7e64557`.
+- Audit committed in `faceclaw-app-platform`: `ba06777`.
+- Host base at planning time: `b2ef68d`, already newer than the audited `4cd862c`.
   Revalidate every finding against the task's actual starting commit.
-- Unrelated dirty bridge work committed in `faceclaw-t3-bridge`: `626700f`.
+- Unrelated dirty bridge work committed in `faceclaw-t3-bridge`: `76856d4`.
   Its required `npm run check:all` passed. Bridge work is outside this plan.
 - Audit-time host checks: 407/412 passed. Two tests could not find `javac`;
   three touch-input assertions failed. Focused external/extension tests: 86/86.

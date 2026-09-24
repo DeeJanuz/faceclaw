@@ -1,7 +1,7 @@
 # Candidate verification evidence, 2026-09-15
 
 Mode: local JVM/Node tests, Android compilation, and a phone smoke pass. Source
-commits: platform `7292fbc`, T3 `19e3e3b`, Signal `a509245`, Spotify `da68177`.
+commits: platform `42ca250`, T3 `ce46a59`, Signal `aa1189a`, Spotify `a9ade3f`.
 See the delivery manifest and [device evidence](device-20260915.md) for full
 hashes and device results.
 

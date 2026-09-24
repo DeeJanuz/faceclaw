@@ -2,7 +2,7 @@
 
 Captured 2026-09-15 in the shared WSL2 checkout. This is a read-only baseline;
 no product source, build configuration, credentials, or device data was changed.
-The evidence addition was accompanied in final commit `38705ff` by synchronization
+The evidence addition was accompanied in final commit `e70259c` by synchronization
 of seven WindowStateCache methods. That runtime change belongs to P03 review.
 
 ## Checkout state
@@ -11,13 +11,13 @@ The task started with these clean repository heads:
 
 | Checkout | Branch | Starting HEAD | Dirty state at task start |
 | --- | --- | --- | --- |
-| `faceclaw-app-platform` | `design/apk-app-platform` | `74cb519bd42462e806679442d7dd26bd6e834a78` | clean |
-| `faceclaw-t3-app` | `main` | `9c89adc09250833a3329f49cd0cccc983fb89c1c` | clean; ahead 14 of `origin/main` |
-| `faceclaw-signal-native` | `feature/native-signal` | `a853885ae648b32a5eb51080d1440f72e6c161d2` | clean |
-| `faceclaw-spotify-native` | `main` | `5bb829aa180e13020722c3c9e71fd81455bee4ae` | clean |
+| `faceclaw-app-platform` | `design/apk-app-platform` | `0808f677bce17927214924c334ee2a7c4db59e56` | clean |
+| `faceclaw-t3-app` | `main` | `c5efbf369648883921fc33185b63f40bbd72980e` | clean; ahead 14 of `origin/main` |
+| `faceclaw-signal-native` | `feature/native-signal` | `a872f89f027a81b0d6adf7e868a9d76b78a055a5` | clean |
+| `faceclaw-spotify-native` | `main` | `98324f109bb5fb1cb57c7b1a172a875bd3c18de5` | clean |
 
 The host checkout subsequently advanced to contract freeze commit
-`bffa22f2d7038390e7567099fef1a1c601af71cd`. At evidence capture it also had an
+`fbc6a6c08bfe85da0a1f3756bc59458e7d49cbbf`. At evidence capture it also had an
 uncommitted `android-sdk/sdk/src/main/java/com/faceclaw/sdk/FaceclawAppService.java`
 change owned by the P03 implementation worker. That file was not staged or
 modified by P00. The other three checkouts remained at the heads above.

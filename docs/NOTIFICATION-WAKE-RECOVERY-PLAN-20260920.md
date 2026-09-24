@@ -2,7 +2,7 @@
 
 ## Objective and boundaries
 
-Fix the host notification-wake readiness stall and repeated layout creation after firmware exit. Preserve notification privacy, genuine sleep/session suspension, bounded transport recovery, and existing wake-lease behavior. Work in the existing `faceclaw-app-platform` checkout, branch `design/apk-app-platform`. Inspected HEAD: `c7195f8a0215c8913f9ae690b02f4f61c48e264d`, with substantial existing uncommitted changes, including dashboard-controller.ts and extension-platform.ts. Preserve those changes. Reinspect the diff before editing.
+Fix the host notification-wake readiness stall and repeated layout creation after firmware exit. Preserve notification privacy, genuine sleep/session suspension, bounded transport recovery, and existing wake-lease behavior. Work in the existing `faceclaw-app-platform` checkout, branch `design/apk-app-platform`. Inspected HEAD: `1ab998cae8fc23ae02baefc1e349ffa7683a8068`, with substantial existing uncommitted changes, including dashboard-controller.ts and extension-platform.ts. Preserve those changes. Reinspect the diff before editing.
 
 This document began as the implementation handoff. The first bounded host-side implementation is now present in the working tree: readiness is split into nonblocking preparation/frame checks, notification wake work is generation-bound, and unexpected firmware exits use one generation-fenced in-place relaunch before reconnect. Android compilation, APK installation, and device acceptance remain pending because this checkout's configured WSL environment has no JDK or Android SDK. No firmware flash, broad BLE rewrite, APK protocol change, notification filtering change, or microphone-permission change is included. No T3 APK changes are needed. Use synthetic notification content for tests. Do not log message bodies, titles, credentials, or raw notification keys.
 
@@ -30,7 +30,7 @@ The prior answer overclaimed three points. The timed-out message was CREATE, not
 
 3. **The proposed active-session guard already exists.** `resumeEvenHubSession` returns true when shutdownRequested=false. It correctly replays prelude for an intentionally suspended plugin even though BLE remains connected. Removing this replay would break wake.
 
-4. **Historical FGS defect is already addressed in current source.** FaceclawForegroundService explicitly requests CONNECTED_DEVICE only; its manifest declares connectedDevice. It catches typed-start SecurityException and handles fallback rejection. Commit `f72f8d1` (September 18, 09:13 MDT) touched this fix, after the last observed microphone startup crash at 09:02. A versionCode of 605 alone cannot identify exact installed source. Verify build provenance rather than adding permissions already declared.
+4. **Historical FGS defect is already addressed in current source.** FaceclawForegroundService explicitly requests CONNECTED_DEVICE only; its manifest declares connectedDevice. It catches typed-start SecurityException and handles fallback rejection. Commit `18084ad` (September 18, 09:13 MDT) touched this fix, after the last observed microphone startup crash at 09:02. A versionCode of 605 alone cannot identify exact installed source. Verify build provenance rather than adding permissions already declared.
 
 ## Implementation work packages
 

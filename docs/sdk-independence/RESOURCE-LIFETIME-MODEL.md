@@ -4,7 +4,7 @@ This note freezes the P21 reference behavior from contract v1. P22 implemented
 host release directly in `ResourceRegistry`, whose regressions live in
 `ResourceRecoveryTest`. The standalone executable model was never wired to the
 host and was removed in the public-release test cleanup; recover it from
-commit `28a60b8` if a differential test is added later.
+commit `e98b38b` if a differential test is added later.
 
 ## Ownership and resident bytes
 

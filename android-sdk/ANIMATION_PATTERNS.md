@@ -92,7 +92,7 @@ equivalent content before attributing differences to built-ins versus APKs.
 
 ## T3 closing investigation — 2026-09-13
 
-Source baseline: host `648426c`, T3 `e38fd9c`. No behavior changes were made during
+Source baseline: host `a06361b`, T3 `86d47a8`. No behavior changes were made during
 this investigation.
 
 Confirmed by source and eight existing targeted T3 tests:

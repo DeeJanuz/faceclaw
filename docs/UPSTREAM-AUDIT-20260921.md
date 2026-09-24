@@ -5,7 +5,7 @@ Audit date: September 21, 2026. Recommendation: take the small pairing/wake fixe
 ## Fetched state and scope
 
 - Fetched `origin`, the upstream repository at https://github.com/jimrandomh/faceclaw. `fork` remains https://github.com/DeeJanuz/faceclaw.
-- Local branch: `design/apk-app-platform`, HEAD `061905f`. Shared base: `9b70880a5b5a2a2ba32400ab1aff8842483a6ce2`.
+- Local branch: `design/apk-app-platform`, HEAD `1a4ca9f`. Shared base: `9b70880a5b5a2a2ba32400ab1aff8842483a6ce2`.
 - Fetched upstream main: `313ccd8` (September 20). Latest fetched release tag: `0.7.2`, `50431c7`; main also contains unreleased 0.7.3 work.
 - Divergence: 81 local-only commits, 133 upstream-only commits. Upstream changes since the shared base span 628 files, 53,211 insertions and 8,473 deletions.
 - `git merge-tree --write-tree --name-only HEAD origin/main` reports 38 conflicted files, including 11 modify/delete conflicts. This computes a trial merge without changing the checkout or index. It excludes uncommitted edits.
@@ -45,7 +45,7 @@ The ordinary pipeline window is already three messages in both trees. This is no
 
 Upstream does add useful transport recovery: `CfwMessageWindow` uses a 500 ms ACK timeout, waits for both lenses, completes messages in order and replays the unresolved custom-message window after a NACK/missing ACK, with at most three retries before transport failure. Compression resets accompany replay. This could reduce reconnects caused by recoverable message failures, but does not prove that the original firmware exit or any hardware crash is fixed.
 
-Our [965059a](https://github.com/DeeJanuz/faceclaw/commit/965059a) recovery is ahead of upstream in another respect. Upstream's exit handler still clears layout readiness and messages on foreground/abnormal/system exit; it lacks our `SessionRecoveryPolicy`. Preserve our generation fencing, coalescing of paired exit events, single in-place prelude/layout/frame relaunch, bounded reconnect fallback, asynchronous notification readiness and transport-owner isolation. Porting upstream's communicator wholesale would lose these protections.
+Our [42a0fb5](https://github.com/DeeJanuz/faceclaw/commit/42a0fb5) recovery is ahead of upstream in another respect. Upstream's exit handler still clears layout readiness and messages on foreground/abnormal/system exit; it lacks our `SessionRecoveryPolicy`. Preserve our generation fencing, coalescing of paired exit events, single in-place prelude/layout/frame relaunch, bounded reconnect fallback, asynchronous notification readiness and transport-owner isolation. Porting upstream's communicator wholesale would lose these protections.
 
 Firmware is distributed here as byte patches and hashes. Descriptions and host source support the protocol findings, but do not provide a complete firmware-source crash audit or hardware proof.
 

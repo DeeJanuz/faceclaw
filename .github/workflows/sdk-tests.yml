@@ -1,0 +1,58 @@
+name: SDK and native tests
+
+# Suites that upstream's tests.yml does not run: the Android SDK (JVM unit
+# tests, instrumentation compile, JavaScript bindings) and the shared Kotlin
+# module. Kept in its own file so upstream workflow changes merge cleanly.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  sdk-javascript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm test
+        working-directory: android-sdk/javascript
+
+  android-sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Unit tests and instrumentation compile
+        working-directory: android-sdk
+        run: >-
+          ./gradlew :sdk:testDebugUnitTest
+          :host-tests:compileStandaloneDebugAndroidTestJavaWithJavac
+          :host-tests:compileUpstreamDebugAndroidTestJavaWithJavac
+          :host-tests:compileT3DebugAndroidTestJavaWithJavac
+          :priority-demo:compileAlphaDebugAndroidTestJavaWithJavac
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-test-reports
+          path: android-sdk/sdk/build/reports/tests
+
+  shared-kotlin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+      - run: bash scripts/test-kotlin.sh

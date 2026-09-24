@@ -89,14 +89,6 @@ voiceModule._compile(compiled, sourcePath);
 Module._load = originalLoad;
 const { FaceclawVoiceControlBridge } = voiceModule.exports;
 
-test('Android stop completion uses the Kotlin capture-id callback boundary', () => {
-  const listenerSource = fs.readFileSync(
-    'native/kotlin/shared/src/commonMain/kotlin/com/faceclaw/app/callbacks/FaceclawVoiceControllerListener.kt',
-    'utf8',
-  );
-  assert.match(listenerSource, /\bfun\s+onStopped\s*\(\s*captureId:\s*Int\s*\)/);
-  assert.doesNotMatch(listenerSource, /onCaptureStopped/);
-});
 
 const options = {
   communicator: {},
@@ -106,6 +98,17 @@ const options = {
   sonioxApiKey: '',
   saveRecording: false,
 };
+
+test('the TypeScript voice proxy implements every Kotlin listener callback', () => {
+  const listenerSource = fs.readFileSync(
+    'native/kotlin/shared/src/commonMain/kotlin/com/faceclaw/app/callbacks/FaceclawVoiceControllerListener.kt',
+    'utf8',
+  );
+  const callbacks = [...listenerSource.matchAll(/\bfun (\w+)\(/g)].map(match => match[1]);
+  assert.ok(callbacks.includes('onStopped'));
+  new FaceclawVoiceControlBridge().startPushToTalk(options);
+  for (const name of callbacks) assert.equal(typeof FakeController.instance.listener[name], 'function', name);
+});
 
 test('cloud finalization waits for native final PCM', () => {
   const bridge = new FaceclawVoiceControlBridge();

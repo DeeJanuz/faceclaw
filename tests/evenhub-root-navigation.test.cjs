@@ -88,9 +88,30 @@ test("quit and other shutdown modes retain their existing close semantics", asyn
   }
 });
 
-test("the window adapter exposes separate semantic root-back and switcher hooks", () => {
-  assert.match(windowSource, /focusSwitcher:\s*\(\) => shell\.yieldFocusToSidebar\(\)/);
-  assert.match(windowSource, /returnFromAppRoot:\s*\(\) => shell\.returnFromAppRoot\(\)/);
-  assert.match(sessionSource, /this\.windowHooks\?\.returnFromAppRoot\(\)/);
-  assert.match(sessionSource, /case "returnToAppSwitcher":[\s\S]*?this\.windowHooks\?\.focusSwitcher\(\)/);
+test("the window adapter routes root-back and switcher hooks to their own shell actions", () => {
+  const calls = [];
+  let hooks;
+  const module = { exports: {} };
+  const imports = {
+    "../../ui/shell/in-process-window": {
+      createInProcessWindow: () => ({ requestRender() {}, stack: { push() {} }, setHeightMode() {}, window: {} }),
+    },
+    "../../ui/shell/shell": {
+      shell: {
+        yieldFocusToSidebar: () => calls.push("switcher"),
+        returnFromAppRoot: () => calls.push("root-back"),
+        closeWindow: () => calls.push("close"),
+      },
+    },
+    "../../ui/shell/chrome-layer": { makeImageWindowIcon: () => () => {}, windowIcon: () => ({}) },
+  };
+  vm.runInNewContext(
+    ts.transpileModule(windowSource, { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS } }).outputText,
+    { module, exports: module.exports, require: name => imports[name] || {} },
+  );
+  const session = { manifest: { name: "Demo", packageId: "demo" }, attachWindow: value => { hooks = value; } };
+  module.exports.createEvenHubWindow("window", "app", session, { actions: {}, onClosed() {} }, () => {});
+  hooks.returnFromAppRoot();
+  hooks.focusSwitcher();
+  assert.deepEqual(calls, ["root-back", "switcher"]);
 });

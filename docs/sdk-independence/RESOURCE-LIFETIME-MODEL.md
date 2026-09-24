@@ -1,11 +1,10 @@
 # Resource lifetime reference model
 
-This note freezes the P21 reference behavior from contract v1. The executable
-model is test-only at
-`android-sdk/sdk/src/test/java/com/faceclaw/sdk/reference/ResourceLifetimeModel.java`.
-It has no Android or Binder dependency and is deliberately separate from the
-host's real resource storage. P22 should wire the host to these transitions and
-run the same adversarial cases against the real compositor boundary.
+This note freezes the P21 reference behavior from contract v1. P22 implemented
+host release directly in `ResourceRegistry`, whose regressions live in
+`ResourceRecoveryTest`. The standalone executable model was never wired to the
+host and was removed in the public-release test cleanup; recover it from
+commit `28a60b8` if a differential test is added later.
 
 ## Ownership and resident bytes
 

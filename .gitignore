@@ -72,3 +72,4 @@ tests/kotlin/build/
 # Python SDK tooling bytecode
 __pycache__/
 *.pyc
+__pycache__/

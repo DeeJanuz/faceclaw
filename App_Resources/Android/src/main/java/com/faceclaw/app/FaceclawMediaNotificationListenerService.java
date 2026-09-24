@@ -32,14 +32,13 @@ import org.json.JSONObject;
 
 public class FaceclawMediaNotificationListenerService extends NotificationListenerService {
     private static final String TAG = "FaceclawNotify";
-    private static final String DIAGNOSTICS_PACKAGE = "com.faceclaw.diagnostics";
     private static final double NOTIFICATION_ICON_GAMMA = 1.6;
     private static final String EXTRA_SUBSTITUTE_APP_NAME = "android.substName";
 
     private static volatile FaceclawMediaNotificationListenerService activeService;
     private static final Handler mainHandler = new Handler(Looper.getMainLooper());
     private static final Set<FaceclawNotificationListener> notificationListeners = new CopyOnWriteArraySet<>();
-    private static final Set<String> sentReplies = new HashSet<>();
+    private static final NotificationDispatchGate dispatchGate = new NotificationDispatchGate();
     private static final Set<String> activeNotificationWakeKeys = new HashSet<>();
 
     @Override
@@ -289,10 +288,8 @@ public class FaceclawMediaNotificationListenerService extends NotificationListen
     public static synchronized boolean invokeNotificationActionAtVersion(String key, int actionIndex, long postTime) {
         StatusBarNotification sbn = findActiveNotificationByKey(activeService, key);
         if (sbn == null || sbn.getPostTime() != postTime) return false;
-        String receipt = key + ":" + postTime + ":action:" + actionIndex;
-        if (sentReplies.contains(receipt) || sentReplies.size() >= 4096) return false;
-        sentReplies.add(receipt);
-        return invokeActionSnapshot(sbn, actionIndex);
+        return dispatchGate.dispatchOnce(NotificationDispatchGate.actionReceipt(key, postTime, actionIndex),
+                () -> invokeActionSnapshot(sbn, actionIndex));
     }
 
     public static boolean invokeNotificationAction(String key, int actionIndex) {
@@ -310,7 +307,7 @@ public class FaceclawMediaNotificationListenerService extends NotificationListen
         RemoteInput[] inputs = actions[actionIndex].getRemoteInputs();
         if (inputs != null) for (RemoteInput input : inputs) if (input.getAllowFreeFormInput()) return false;
         PendingIntent intent = actions[actionIndex].actionIntent;
-        if (intent == null || !statusBarNotification.getPackageName().equals(intent.getCreatorPackage())) return false;
+        if (intent == null || !NotificationDispatchGate.trustedIntent(statusBarNotification.getPackageName(), intent.getCreatorPackage())) return false;
         try {
             intent.send();
             return true;
@@ -325,31 +322,28 @@ public class FaceclawMediaNotificationListenerService extends NotificationListen
 
     /** Re-read the active notification at send time and reject stale or duplicate replies. */
     public static synchronized boolean replyToNotification(String key, int actionIndex, long expectedPostTime, String text) {
-        if (text == null || text.trim().isEmpty() || text.length() > 20000) return false;
+        if (!NotificationDispatchGate.acceptableReplyText(text)) return false;
         FaceclawMediaNotificationListenerService service = activeService;
         StatusBarNotification sbn = findActiveNotificationByKey(service, key);
         if (sbn == null || sbn.getPostTime() != expectedPostTime || !shouldShowNotificationInList(service, sbn)) return false;
         Notification.Action[] actions = sbn.getNotification().actions;
         if (actions == null || actionIndex < 0 || actionIndex >= actions.length) return false;
         Notification.Action action = actions[actionIndex];
-        if (action == null || action.actionIntent == null || !sbn.getPackageName().equals(action.actionIntent.getCreatorPackage())) return false;
+        if (action == null || action.actionIntent == null || !NotificationDispatchGate.trustedIntent(sbn.getPackageName(), action.actionIntent.getCreatorPackage())) return false;
         RemoteInput[] inputs = action.getRemoteInputs();
         if (inputs == null) return false;
         RemoteInput input = null;
         for (RemoteInput candidate : inputs) if (candidate.getAllowFreeFormInput()) { input = candidate; break; }
         if (input == null) return false;
-        String receipt = key + ":" + expectedPostTime + ":" + actionIndex;
-        if (sentReplies.contains(receipt) || sentReplies.size() >= 4096) return false;
-        // Mark before dispatch. An uncertain send must never be automatically replayed.
-        sentReplies.add(receipt);
-        try {
-            Bundle results = new Bundle(); results.putCharSequence(input.getResultKey(), text);
+        RemoteInput replyInput = input;
+        return dispatchGate.dispatchOnce(NotificationDispatchGate.replyReceipt(key, expectedPostTime, actionIndex), () -> {
+            Bundle results = new Bundle(); results.putCharSequence(replyInput.getResultKey(), text);
             Intent fillIn = new Intent();
             RemoteInput.addResultsToIntent(inputs, fillIn, results);
             RemoteInput.setResultsSource(fillIn, RemoteInput.SOURCE_FREE_FORM_INPUT);
             action.actionIntent.send(service, 0, fillIn);
             return true;
-        } catch (Exception e) { return false; }
+        });
     }
 
     public static boolean dismissNotification(String key) {
@@ -473,11 +467,7 @@ public class FaceclawMediaNotificationListenerService extends NotificationListen
             return false;
         }
         if (android.os.Process.myUserHandle().equals(statusBarNotification.getUser()) && FaceclawExternalApps.get(service).isSourceSuppressed(statusBarNotification.getPackageName())) return false;
-        // Internal service notifications stay out of the mirror. In particular,
-        // mirroring the diagnostics foreground-service notification creates a
-        // feedback loop where an invisible shell overlay consumes glasses input.
-        String packageName = statusBarNotification.getPackageName();
-        if (service.getPackageName().equals(packageName) || DIAGNOSTICS_PACKAGE.equals(packageName)) {
+        if (!NotificationDispatchGate.mirrorsPackage(service.getPackageName(), statusBarNotification.getPackageName())) {
             return false;
         }
         Notification notification = statusBarNotification.getNotification();

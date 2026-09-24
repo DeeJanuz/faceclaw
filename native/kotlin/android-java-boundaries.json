@@ -133,7 +133,8 @@
       "com/faceclaw/app/Pcm16StreamAdapter.java",
       "com/faceclaw/app/RenderBroker.java",
       "com/faceclaw/app/RenderCadence.java",
-      "com/faceclaw/app/g2protocol/SessionRecoveryPolicy.java"
+      "com/faceclaw/app/g2protocol/SessionRecoveryPolicy.java",
+      "com/faceclaw/app/NotificationDispatchGate.java"
     ]
   },
   {

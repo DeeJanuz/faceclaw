@@ -5,7 +5,7 @@
   "types": "index.d.ts",
   "license": "MIT",
   "scripts": {
-    "test": "node --test test.cjs glanceboard.test.cjs media.test.cjs && python3 -m unittest test_verify_apk.py"
+    "test": "node --test *.test.cjs test.cjs && python3 -m unittest test_verify_apk.py"
   },
   "bin": {
     "faceclaw-widget": "glanceboard-cli.js"

@@ -1,6 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 const vm = require('node:vm');
 const ts = require('typescript');
 function load(path, imports = {}, globals = {}) {
@@ -71,11 +74,24 @@ test('review layer cleanup during sleep cannot turn the display back on', async 
   assert.equal(shell.screenOn, false); assert.deepEqual(screen, [false]);
 });
 
-test('native removal contract requires every Kotlin proxy callback', () => {
+test('the TypeScript proxy implements every callback the Kotlin listener declares', () => {
   const contract = fs.readFileSync('native/kotlin/shared/src/commonMain/kotlin/com/faceclaw/app/callbacks/FaceclawNotificationListener.kt', 'utf8');
-  assert.match(contract, /\bfun onNotificationRemoved\(key: String\?\)/);
-  assert.match(contract, /\bfun onNotificationsChanged\(\)/);
-  assert.doesNotMatch(contract, /=\s*Unit/);
+  const callbacks = [...contract.matchAll(/\bfun (\w+)\(/g)].map(match => match[1]);
+  assert.ok(callbacks.includes('onNotificationRemoved') && callbacks.includes('onNotificationsChanged'));
+  let proxy;
+  const api = load('app/native/notification-icons.ts', {
+    '../graphics/icons': { renderIcon: () => null },
+    './external-notifications': { externalNotifications: () => [], invokeExternalNotification: () => false, dismissExternalNotification: () => false },
+    './notification-sources': { rememberNotificationSources() {} },
+    '../graphics/image': { GrayImage: class {} }, './frame-timings': { logCurrent() {}, spanCurrent: (_label, run) => run() },
+    '../util/array-util': { toUint8Array: value => value },
+  }, { global: { isAndroid: true }, com: { faceclaw: { app: {
+    FaceclawNotificationListener: function(listener) { proxy = listener; return listener; },
+    FaceclawMediaNotificationListenerService: { addNotificationListener() {}, removeNotificationListener() {} },
+  } } } });
+  const off = api.onAndroidNotificationsChanged(() => {});
+  for (const name of callbacks) assert.equal(typeof proxy?.[name], 'function', name);
+  off();
 });
 
 test('native snapshot changes invalidate icons and notify all observers without fake arrivals', async () => {
@@ -103,19 +119,17 @@ test('native snapshot changes invalidate icons and notify all observers without 
   offPosted(); offBroken(); assert.equal(detached, 0); offChanged(); assert.equal(detached, 1);
 });
 
-test('native reply dispatch retains access, freshness, creator and duplicate checks', () => {
-  const source = fs.readFileSync('App_Resources/Android/src/main/java/com/faceclaw/app/FaceclawMediaNotificationListenerService.java', 'utf8');
-  const reply = source.slice(source.indexOf('public static synchronized boolean replyToNotification'), source.indexOf('public static boolean dismissNotification('));
-  for (const guard of ['sbn.getPostTime() != expectedPostTime', '!shouldShowNotificationInList(service, sbn)',
-    'getCreatorPackage()', 'getAllowFreeFormInput()', 'sentReplies.contains(receipt)', 'sentReplies.add(receipt)']) assert.ok(reply.includes(guard), guard);
-  assert.ok(reply.indexOf('sentReplies.add(receipt)') < reply.indexOf('action.actionIntent.send('));
-});
-
-test('diagnostics foreground notification cannot enter the glasses notification overlay', () => {
-  const source = fs.readFileSync('App_Resources/Android/src/main/java/com/faceclaw/app/FaceclawMediaNotificationListenerService.java', 'utf8');
-  const filter = source.slice(source.indexOf('private static boolean shouldShowNotificationInList'), source.indexOf('private static String getNotificationDedupeGroupKey'));
-  assert.ok(source.includes('private static final String DIAGNOSTICS_PACKAGE = "com.faceclaw.diagnostics";'));
-  assert.ok(filter.includes('DIAGNOSTICS_PACKAGE.equals(packageName)'));
+test('native notification dispatch gate rejects foreign intents, stale text, replays and mirrored diagnostics', () => {
+  const classes = fs.mkdtempSync(path.join(os.tmpdir(), 'faceclaw-dispatch-gate-'));
+  try {
+    execFileSync('javac', ['-d', classes,
+      'App_Resources/Android/src/main/java/com/faceclaw/app/NotificationDispatchGate.java',
+      'tests/fixtures/NotificationDispatchGateCheck.java'], { encoding: 'utf8', stdio: 'pipe' });
+    assert.equal(execFileSync('java', ['-cp', classes, 'com.faceclaw.app.NotificationDispatchGateCheck'],
+      { encoding: 'utf8', stdio: 'pipe' }), '');
+  } finally {
+    fs.rmSync(classes, { recursive: true, force: true });
+  }
 });
 
 test('phone removal invalidates cached icons and reaches every removal observer', async () => {

@@ -8,6 +8,7 @@ function harness() {
     granted = true,
     calls = 0,
     fail = false,
+    locationTime,
     pending;
   const intervals = new Map();
   const imports = {
@@ -17,7 +18,7 @@ function harness() {
         calls++;
         if (pending) await pending;
         if (fail) throw new Error('No location');
-        return { latitude: 40, longitude: -105 };
+        return { latitude: 40, longitude: -105, timestampMs: locationTime };
       },
     },
     '../version': { USER_AGENT: 'test' },
@@ -74,6 +75,8 @@ function harness() {
     advance: (ms) => (now += ms),
     grant: (v) => (granted = v),
     fail: (v) => (fail = v),
+    locationAt: (ms) => (locationTime = ms),
+    now: () => now,
     hold: () => {
       let release;
       pending = new Promise((resolve) => (release = resolve));
@@ -176,4 +179,64 @@ test('reentrant dashboard consumers cannot start overlapping location requests',
   await flush();
   assert.equal(h.calls(), 1);
   assert.equal(h.bridge.snapshot().phase, 'ready');
+});
+
+test('weather from an old saved location says how old it is and how to update it', async () => {
+  const h = harness();
+  h.advance(10 * 24 * 60 * 60 * 1000);
+  h.locationAt(h.now() - 3 * 24 * 60 * 60 * 1000);
+  await h.bridge.refreshNow();
+  const stale = h.bridge.snapshot();
+  assert.equal(stale.phase, 'ready');
+  assert.equal(stale.locationName, 'Test, CO · location from 3 days ago');
+  assert.match(stale.status, /where your phone was 3 days ago\. Open Faceclaw on your phone/);
+  assert.equal(stale.locationTimestampMs, h.now() - 3 * 24 * 60 * 60 * 1000);
+  h.locationAt(h.now() - 5 * 60 * 60 * 1000);
+  await h.bridge.refreshNow();
+  assert.equal(h.bridge.snapshot().locationName, 'Test, CO · location from 5 hours ago');
+  h.locationAt(h.now() - 5 * 60 * 1000);
+  await h.bridge.refreshNow();
+  assert.equal(h.bridge.snapshot().locationName, 'Test, CO');
+  assert.equal(h.bridge.snapshot().status, 'Weather updated.');
+});
+
+test('opening Faceclaw refreshes an old or failed location but not a fresh one', async () => {
+  const h = harness();
+  h.locationAt(h.now() - 60 * 1000);
+  await h.bridge.refreshNow();
+  assert.equal(h.calls(), 1);
+  h.bridge.refreshIfLocationStale();
+  await flush();
+  assert.equal(h.calls(), 1, 'a fix from a minute ago is kept');
+  h.advance(11 * 60 * 1000);
+  h.bridge.refreshIfLocationStale();
+  await flush();
+  assert.equal(h.calls(), 2, 'an older fix is refreshed while the screen is open');
+  h.fail(true);
+  await h.bridge.refreshNow();
+  assert.equal(h.bridge.snapshot().phase, 'error');
+  h.fail(false);
+  h.locationAt(h.now());
+  h.bridge.refreshIfLocationStale();
+  await flush();
+  assert.equal(h.bridge.snapshot().phase, 'ready');
+  h.grant(false);
+  const before = h.calls();
+  h.bridge.refreshIfLocationStale();
+  await flush();
+  assert.equal(h.calls(), before, 'no permission means no location request');
+});
+
+test('a location with no known or implausible timestamp is never labelled old', async () => {
+  const h = harness();
+  await h.bridge.refreshNow();
+  assert.equal(h.bridge.snapshot().locationName, 'Test, CO');
+  assert.equal(h.bridge.snapshot().locationTimestampMs, null);
+  h.advance(40 * 24 * 60 * 60 * 1000);
+  for (const timestampMs of [1234, h.now() + 60 * 60 * 1000]) {
+    h.locationAt(timestampMs);
+    await h.bridge.refreshNow();
+    assert.equal(h.bridge.snapshot().locationName, 'Test, CO');
+    assert.equal(h.bridge.snapshot().locationTimestampMs, null);
+  }
 });

@@ -34,6 +34,8 @@ export type WeatherState = {
   current: CurrentWeather | null;
   forecast: ForecastPeriod[];
   lastUpdatedMs: number | null;
+  /** When the phone's location fix was taken; null when unknown. */
+  locationTimestampMs: number | null;
 };
 
 type NwsPointResponse = {
@@ -93,6 +95,14 @@ const NWS_HEADERS = {
   "User-Agent": `${USER_AGENT} (https://github.com/jimrandomh/faceclaw)`,
 };
 const WEATHER_REFRESH_MS = 30 * 60 * 1000;
+// Android only produces fresh fixes while the Faceclaw screen is open, so a
+// glasses-only day falls back to the saved fix. Label weather once it is old.
+const STALE_LOCATION_MS = 60 * 60 * 1000;
+// Opening Faceclaw is the chance to take a fresh fix; skip it when recent.
+const FOREGROUND_LOCATION_REFRESH_MS = 10 * 60 * 1000;
+// Saved fixes expire after a week; anything far older or in the future is a
+// clock or provider artifact, not a real location age.
+const MAX_PLAUSIBLE_LOCATION_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 20_000;
 const MAX_FORECAST_PERIODS = 14;
 
@@ -103,6 +113,7 @@ const DEFAULT_STATE: WeatherState = {
   current: null,
   forecast: [],
   lastUpdatedMs: null,
+  locationTimestampMs: null,
 };
 
 /** Shared weather state for the Weather app and visible external dashboards. */
@@ -153,6 +164,14 @@ export class WeatherBridge {
     }
   }
 
+  /** Called when the Faceclaw screen opens, the only time Android gives fresh fixes. */
+  refreshIfLocationStale(): void {
+    if (this.refreshInFlight || !hasLocationPermission()) return;
+    const fixedAt = this.state.locationTimestampMs;
+    if (this.state.phase === "ready" && fixedAt !== null && Date.now() - fixedAt < FOREGROUND_LOCATION_REFRESH_MS) return;
+    void this.refreshNow();
+  }
+
   async refreshNow(): Promise<void> {
     if (this.refreshInFlight) return this.refreshInFlight;
     if (!hasLocationPermission()) {
@@ -193,13 +212,21 @@ export class WeatherBridge {
         this.emit();
         return;
       }
+      const fixAgeMs = Date.now() - location.timestampMs;
+      const locationTimestampMs = Number.isFinite(fixAgeMs) && fixAgeMs >= 0 && fixAgeMs <= MAX_PLAUSIBLE_LOCATION_AGE_MS
+        ? location.timestampMs : null;
+      const locationAgeMs = locationTimestampMs === null ? 0 : Date.now() - locationTimestampMs;
+      const stale = locationAgeMs >= STALE_LOCATION_MS;
       this.state = {
         phase: "ready",
-        status: "Weather updated.",
-        locationName: weather.locationName,
+        status: stale
+          ? `Weather for where your phone was ${formatAge(locationAgeMs)} ago. Open Faceclaw on your phone to update your location.`
+          : "Weather updated.",
+        locationName: stale ? `${weather.locationName} · location from ${formatAge(locationAgeMs)} ago` : weather.locationName,
         current: weather.current,
         forecast: weather.forecast,
         lastUpdatedMs: Date.now(),
+        locationTimestampMs,
       };
       this.emit();
     } catch (error) {
@@ -391,6 +418,13 @@ function friendlyWeatherError(error: unknown): string {
     return "Couldn't reach the National Weather Service. Check the phone's connection and retry.";
   }
   return message;
+}
+
+function formatAge(ms: number): string {
+  const hours = Math.floor(ms / (60 * 60 * 1000));
+  if (hours < 48) return `${hours} hour${hours === 1 ? "" : "s"}`;
+  const days = Math.floor(hours / 24);
+  return `${days} days`;
 }
 
 function cloneState(state: WeatherState): WeatherState {

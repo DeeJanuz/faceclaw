@@ -27,7 +27,12 @@ public final class FaceclawLocationProvider implements LocationListener {
     private static final String CACHE_TIMESTAMP = "timestamp";
     private static final String CACHE_PROVIDER = "faceclaw-weather-cache";
     private static final long FRESH_CACHE_MS = 10L * 60L * 1000L;
-    private static final long MAX_CACHE_MS = 24L * 60L * 60L * 1000L;
+    // Android's own last-known fixes are only trusted for a day.
+    private static final long MAX_PROVIDER_CACHE_MS = 24L * 60L * 60L * 1000L;
+    // With while-in-use permission, Android only produces fixes while the
+    // Faceclaw screen is open. Keep the rounded weather fix for a week so a
+    // glasses-only week still has local weather; callers label its age.
+    static final long MAX_SAVED_WEATHER_LOCATION_MS = 7L * 24L * 60L * 60L * 1000L;
     private static final long TIMEOUT_MS = 15L * 1000L;
     private static final double WEATHER_COORDINATE_SCALE = 100.0;
 
@@ -81,7 +86,7 @@ public final class FaceclawLocationProvider implements LocationListener {
 
         String provider = chooseProvider();
         if (provider == null) {
-            if (isRecent(cachedLocation, MAX_CACHE_MS)) {
+            if (isUsableFallback(cachedLocation)) {
                 deliverLocation(cachedLocation);
             } else {
                 deliverError("Turn on Location on your phone, then retry.");
@@ -120,7 +125,8 @@ public final class FaceclawLocationProvider implements LocationListener {
             List<String> providers = locationManager.getProviders(true);
             for (String provider : providers) {
                 Location candidate = locationManager.getLastKnownLocation(provider);
-                if (candidate != null && (newest == null || candidate.getTime() > newest.getTime())) {
+                if (candidate != null && isRecent(candidate, MAX_PROVIDER_CACHE_MS)
+                        && (newest == null || candidate.getTime() > newest.getTime())) {
                     newest = candidate;
                 }
             }
@@ -132,6 +138,12 @@ public final class FaceclawLocationProvider implements LocationListener {
         return newest;
     }
 
+    static boolean isUsableFallback(Location location) {
+        if (location == null) return false;
+        return isRecent(location, CACHE_PROVIDER.equals(location.getProvider())
+                ? MAX_SAVED_WEATHER_LOCATION_MS : MAX_PROVIDER_CACHE_MS);
+    }
+
     private static boolean isRecent(Location location, long maximumAgeMs) {
         if (location == null || location.getTime() <= 0L) {
             return false;
@@ -141,10 +153,10 @@ public final class FaceclawLocationProvider implements LocationListener {
     }
 
     private void onTimeout() {
-        if (isRecent(cachedLocation, MAX_CACHE_MS)) {
+        if (isUsableFallback(cachedLocation)) {
             finish(cachedLocation, null);
         } else {
-            finish(null, "Couldn't get your current location. Tap to retry.");
+            finish(null, "Couldn't get your location. Open Faceclaw on your phone to update it.");
         }
     }
 
@@ -229,7 +241,7 @@ public final class FaceclawLocationProvider implements LocationListener {
         location.setLatitude(Double.longBitsToDouble(preferences.getLong(CACHE_LATITUDE, 0L)));
         location.setLongitude(Double.longBitsToDouble(preferences.getLong(CACHE_LONGITUDE, 0L)));
         location.setTime(preferences.getLong(CACHE_TIMESTAMP, 0L));
-        if (!isValidLocation(location) || !isRecent(location, MAX_CACHE_MS)) {
+        if (!isValidLocation(location) || !isRecent(location, MAX_SAVED_WEATHER_LOCATION_MS)) {
             preferences.edit().clear().apply();
             return null;
         }

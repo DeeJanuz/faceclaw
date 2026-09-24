@@ -32,7 +32,18 @@ Then add the stable dependency:
 implementation("com.faceclaw:sdk:1.0.0")
 ```
 
-The generated AARs under `sdk/build/outputs/aar/` are local verification artifacts. This repository does not publish them remotely.
+The generated AARs under `sdk/build/outputs/aar/` are local verification artifacts.
+
+To consume a tagged release without a local checkout, use JitPack, which builds
+the SDK from the fork's tag via `jitpack.yml`:
+
+```kotlin
+repositories { maven("https://jitpack.io") }
+dependencies { implementation("com.github.DeeJanuz.faceclaw:sdk:<tag>") }
+```
+
+`./gradlew :sdk:publishToMavenLocal` installs the same publication locally
+(`-PsdkGroup` and `-PsdkVersion` override the default `com.faceclaw:sdk:1.0.0`).
 
 Declare one exported SDK service. Keeping the discovery action and component stable preserves an approval only when Android user, package, component, and complete signing identity also match.
 

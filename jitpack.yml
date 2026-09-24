@@ -1,0 +1,5 @@
+# JitPack builds the Android SDK from a tag: com.github.DeeJanuz.faceclaw:sdk:<tag>
+jdk:
+  - openjdk21
+install:
+  - cd android-sdk && ./gradlew :sdk:publishReleasePublicationToMavenLocal -PsdkGroup=com.github.DeeJanuz.faceclaw -PsdkVersion=$VERSION

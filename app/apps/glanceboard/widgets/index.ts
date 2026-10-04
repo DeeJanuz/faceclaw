@@ -4,6 +4,7 @@ import { CompassWidget } from "./compass-widget";
 import { MusicWidget } from "./music-widget";
 import { NightscoutWidget } from "./nightscout-widget";
 import { SystemCardWidget } from "./system-card";
+import { T3CodeWidget } from "./t3code-widget";
 import { TerminalWidget } from "./terminal-widget";
 
 /** Every widget a board slot can hold. */
@@ -11,6 +12,7 @@ export const GLANCE_WIDGETS: readonly GlanceWidgetDefinition[] = [
   { id: "system-card", label: "System card", create: () => new SystemCardWidget() },
   { id: "calendar", label: "Calendar", tall: true, create: () => new CalendarWidget() },
   { id: "terminal", label: "Terminal", tall: true, create: () => new TerminalWidget() },
+  { id: "t3code", label: "T3 Code", tall: true, create: () => new T3CodeWidget() },
   { id: "nightscout", label: "Nightscout", create: () => new NightscoutWidget() },
   { id: "compass", label: "Compass", create: () => new CompassWidget() },
   { id: "music", label: "Music", create: () => new MusicWidget() },

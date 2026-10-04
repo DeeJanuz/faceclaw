@@ -261,6 +261,27 @@ export function threadStatusLabel(status: T3ThreadStatus): string {
   }
 }
 
+const STATUS_MARKERS: Record<T3ThreadStatus, { marker: string; value: number }> = {
+  approval: { marker: "!", value: 255 },
+  input: { marker: "?", value: 255 },
+  working: { marker: "…", value: 210 },
+  waiting: { marker: "…", value: 130 },
+  failed: { marker: "x", value: 200 },
+  limited: { marker: "x", value: 160 },
+  ready: { marker: "", value: 0 },
+};
+
+/**
+ * The one-glyph status mark drawn left of a thread title (in the app's list
+ * and on the Glanceboard), with its gray level: ! approval, ? question,
+ * … working, x failed, ● finished since last visited, ✓ settled.
+ */
+export function threadMarker(status: T3ThreadStatus, flags: { settled?: boolean; unread?: boolean } = {}): { marker: string; value: number } {
+  if (status === "ready" && flags.settled) return { marker: "✓", value: 110 };
+  if (status === "ready" && flags.unread) return { marker: "●", value: 220 };
+  return STATUS_MARKERS[status];
+}
+
 function timeMs(value: string | null | undefined): number {
   if (!value) return 0;
   const parsed = Date.parse(value);

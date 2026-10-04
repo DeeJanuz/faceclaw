@@ -19,8 +19,11 @@
  * Double-click backs out a level, and from the list yields focus.
  *
  * Connections (one T3EnvironmentClient per paired environment) live while the
- * window is open. Frames are painted here and submitted straight to the
- * compositor from this worker's thread.
+ * window is open, and also with no window while the Glanceboard shows the
+ * T3 Code widget (the app's boot hook spawns this worker for it). Either way
+ * the worker publishes a thread-list snapshot for that widget. Frames are
+ * painted here and submitted straight to the compositor from this worker's
+ * thread.
  */
 import "@nativescript/core/globals";
 import { finishWorkerShutdown } from "../../ui/shell/worker-lifecycle";
@@ -49,6 +52,8 @@ import {
 import { exchangePairingCredential, fetchEnvironmentDescriptor, T3_ORCHESTRATION_PROTOCOL, type T3Fetch } from "./t3-auth";
 import { errorMessage, T3EnvironmentClient, type StoredEnvironment, type ThreadHandle } from "./t3-client";
 import { loadEnvironments, removeEnvironment, T3_ENVIRONMENTS_KEY, upsertEnvironment } from "./t3-environments";
+import { hasT3BackgroundWork } from "./background";
+import { buildGlanceSnapshot, glanceSummary, T3_GLANCE_STATE_KEY } from "./t3-glance";
 import {
   approvalOptions,
   approvalResponseCommand,
@@ -67,6 +72,7 @@ import {
   sectionThreads,
   settleCommand,
   threadActivityMs,
+  threadMarker,
   threadStatus,
   threadStatusLabel,
   timelineEntries,
@@ -296,7 +302,7 @@ global.onmessage = (event: { data: WorkerAppMessage }) => {
   const message = event.data;
   switch (message.type) {
     case "check-idle":
-      if (!window) post({ type: "worker-idle" });
+      reportIdle();
       break;
     case "shutdown":
       stopAllClients();
@@ -334,7 +340,8 @@ global.onmessage = (event: { data: WorkerAppMessage }) => {
       window = null;
       closeThreadView();
       screen = { kind: "list" };
-      stopAllClients();
+      // The Glanceboard widget may still want the connections.
+      if (!hasT3BackgroundWork()) stopAllClients();
       updateListRefreshTimer();
       break;
     case "input":
@@ -392,8 +399,20 @@ function inferForeground(focused: boolean): void {
 }
 
 onSettingsStoreChanged((key) => {
+  if (key.startsWith("glanceboard.")) {
+    // The widget was added or removed, or the board switched on or off.
+    if (!window) {
+      if (hasT3BackgroundWork()) syncClients();
+      else {
+        stopAllClients();
+        reportIdle();
+      }
+    }
+    return;
+  }
   if (key === T3_ENVIRONMENTS_KEY) {
-    if (window) syncClients();
+    if (window || hasT3BackgroundWork()) syncClients();
+    else reportIdle();
     render();
   } else if (key === PAIRING_DRAFT_KEY) {
     // Live keystrokes from the phone editor.
@@ -435,13 +454,54 @@ function syncClients(): void {
       client.updateConfig(environment);
     }
     persistedLabels.set(environment.id, environment.label);
-    if (environment.enabled && window) client.start();
+    if (environment.enabled && (window || hasT3BackgroundWork())) client.start();
     else if (!environment.enabled) client.stop();
   }
+  schedulePublish();
 }
 
 function stopAllClients(): void {
   for (const client of clients.values()) client.stop();
+  schedulePublish();
+}
+
+/** Let the host shut this worker down once neither a window nor the widget needs it. */
+function reportIdle(): void {
+  if (!window && !hasT3BackgroundWork()) post({ type: "worker-idle" });
+}
+
+// ---------------------------------------------------------------------------
+// Glanceboard snapshot
+
+const PUBLISH_COALESCE_MS = 300;
+let publishTimer: ReturnType<typeof setTimeout> | null = null;
+let lastPublishedSnapshot = "";
+
+/** Publish soon; agents can change the thread list many times a second. */
+function schedulePublish(): void {
+  if (publishTimer) return;
+  publishTimer = setTimeout(() => {
+    publishTimer = null;
+    publishGlanceSnapshot();
+  }, PUBLISH_COALESCE_MS);
+}
+
+/** The thread list for the Glanceboard widget, posted only when its JSON changed. */
+function publishGlanceSnapshot(): void {
+  const snapshot = buildGlanceSnapshot(
+    [...clients.values()].map((client) => ({
+      id: client.config.id,
+      ready: client.ready,
+      phase: client.phase,
+      enabled: client.config.enabled,
+      threads: client.shell.threads.values(),
+    })),
+    Date.now(),
+  );
+  const encoded = JSON.stringify(snapshot);
+  if (encoded === lastPublishedSnapshot) return;
+  lastPublishedSnapshot = encoded;
+  post({ type: "publish-state", key: T3_GLANCE_STATE_KEY, state: snapshot });
 }
 
 function onClientChanged(client: T3EnvironmentClient): void {
@@ -453,6 +513,7 @@ function onClientChanged(client: T3EnvironmentClient): void {
   }
   noteAttention(client);
   if (screen.kind === "thread" && threadView && threadView.envId === client.config.id) maybeVisitThread(false);
+  schedulePublish();
   scheduleRender();
 }
 
@@ -1152,26 +1213,8 @@ function selectionIndex(items: readonly ListItem[]): number | undefined {
   return index >= 0 ? index : undefined;
 }
 
-const STATUS_MARKERS: Record<T3ThreadStatus, { marker: string; value: number }> = {
-  approval: { marker: "!", value: 255 },
-  input: { marker: "?", value: 255 },
-  working: { marker: "…", value: 210 },
-  waiting: { marker: "…", value: 130 },
-  failed: { marker: "x", value: 200 },
-  limited: { marker: "x", value: 160 },
-  ready: { marker: "", value: 0 },
-};
-
 function threadItem(client: T3EnvironmentClient, thread: T3ThreadShell, multiEnv: boolean, nowMs: number): ListItem {
-  const status = threadStatus(thread);
-  let { marker, value } = STATUS_MARKERS[status];
-  if (status === "ready" && isThreadSettled(thread)) {
-    marker = "✓";
-    value = 110;
-  } else if (status === "ready" && isThreadUnread(thread)) {
-    marker = "●";
-    value = 220;
-  }
+  const { marker, value } = threadMarker(threadStatus(thread), { settled: isThreadSettled(thread), unread: isThreadUnread(thread) });
   const project = client.shell.projects.get(thread.projectId)?.title ?? "";
   const where = multiEnv ? [project, environmentName(client)].filter(Boolean).join(" · ") : project;
   const age = formatAge(threadActivityMs(thread), nowMs);
@@ -1370,7 +1413,7 @@ function listStatusLine(): string {
   if (all.every((client) => !client.ready)) {
     return all.some((client) => client.phase === "connecting") ? "Connecting…" : "Not connected";
   }
-  return [needs ? `${needs} need${needs === 1 ? "s" : ""} you` : "", working ? `${working} working` : ""].filter(Boolean).join(" · ");
+  return glanceSummary({ needsYou: needs, working });
 }
 
 function paintList(win: AppWindow, mode: "list" | "environments"): GrayImage {
@@ -1733,3 +1776,9 @@ async function readThreadText({ client, thread }: ThreadMatch): Promise<string> 
     handle.close();
   }
 }
+
+// ---------------------------------------------------------------------------
+// Startup (last, so every module-level binding above is initialized)
+
+// Spawned without a window (by the app's boot hook) for the Glanceboard widget.
+if (hasT3BackgroundWork()) syncClients();

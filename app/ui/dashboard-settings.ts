@@ -929,6 +929,31 @@ export const terminalNewConnectionSetting = new ConfigSettingString({
 });
 
 /**
+ * Staging buffer for the T3 Code app's Pair-environment screen: the phone
+ * text editor types the `t3 pair` link into it, and the app reads it back
+ * when the user confirms on the glasses. Cleared after each attempt (the link
+ * carries a one-time credential).
+ */
+export const t3codePairingLinkSetting = new ConfigSettingString({
+  id: "t3code-pairing-link",
+  label: "T3 Code pairing link",
+  storageKey: "t3code.pairingDraft",
+  defaultValue: "",
+  editorTitle: "T3 Code pairing link (from `t3 pair`)",
+  glassesEditTitle: "Pair T3 Code",
+  normalize: (value) => (value ?? "").replace(/[\x00-\x1f]+/g, " ").trim(),
+});
+
+export const t3codeWakeOnAttentionSetting = new ConfigSettingBoolean({
+  id: "t3code-wake-on-attention",
+  label: "Wake when a thread needs you",
+  storageKey: "t3code.wakeOnAttention",
+  defaultValue: false,
+  description:
+    "When a T3 Code agent asks for approval or asks a question while the glasses are asleep, wake them and show the T3 Code thread list.",
+});
+
+/**
  * Staging buffer for the Developer app's "Load app from URL" flow: the app
  * opens the phone text editor on this setting, the user types (or scans, or
  * dictates) the URL, and the app reads it back when the load is confirmed on

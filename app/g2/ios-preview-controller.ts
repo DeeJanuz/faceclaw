@@ -17,6 +17,7 @@ import { bindCompassSession, receiveCompassEvent } from '../native/compass.ios'
 import { Dialogs, File, knownFolders, path, Utils, type ImageSource } from '@nativescript/core'
 import { iosVoiceInput } from '../native/ios-voice-input'
 import { nightscoutBridge } from '../native/nightscout-bridge'
+import { weatherBridge } from '../native/weather'
 import { FaceclawCommunicatorBridge, resolveIosPeripherals, type CommunicatorState, type RawInputEvent } from '../native/faceclaw-communicator.ios'
 import { PreviewDisplayTarget, type DisplayTarget } from '../native/preview-display.ios'
 import { AncsClient, ANCS_FIRMWARE_VERSION } from './ancs-client'
@@ -296,6 +297,7 @@ export class IosPreviewController {
     for (const window of shell.getWindows()) window.setScreenOn?.(running && shell.isScreenOn())
     if (!running) {
       void nightscoutBridge.stop().catch(error => this.fail(error))
+      weatherBridge.setSessionActive(false)
       this.glance.dismiss()
       void this.display?.setScreenBlanked(!shell.isScreenOn()).catch(error => this.fail(error))
       this.offSettings?.(); this.offSettings = null
@@ -319,6 +321,7 @@ export class IosPreviewController {
     this.handlePhoneLockState(!UIApplication.sharedApplication.protectedDataAvailable)
     this.syncLockSetting()
     void nightscoutBridge.start().catch(error => this.fail(error))
+    weatherBridge.setSessionActive(true)
     for (const name of [UIDeviceBatteryLevelDidChangeNotification, UIDeviceBatteryStateDidChangeNotification]) {
       this.batteryObservers.push(NSNotificationCenter.defaultCenter.addObserverForNameObjectQueueUsingBlock(name, null, NSOperationQueue.mainQueue, () => this.requestShellRender()))
     }

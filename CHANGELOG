@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.3 - Future
+
+* Weather app shows an icon for current conditions, and can add the weather to the status bar and the Glanceboard system card (Weather menu > Settings)
+
 ## 0.8.2 - 2026-10-03
 
 ### User Interface Customization

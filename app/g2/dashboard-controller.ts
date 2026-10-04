@@ -14,6 +14,7 @@ import * as frameTimings from "../native/frame-timings";
 import { startForegroundNotification, stopForegroundNotification, updateForegroundNotification } from "../native/foreground-service";
 import { mediaControllerBridge } from "../native/media-controller";
 import { nightscoutBridge } from "../native/nightscout-bridge";
+import { weatherBridge } from "../native/weather";
 import { ALL_NOTIFICATIONS, onAndroidNotificationPosted, readActiveNotifications } from "../native/notification-icons";
 import { shouldShowNotificationOnGlasses } from "../native/notification-sources";
 import { openEvenAppSettings, readEvenAppNotificationState } from "../native/even-app-conflict";
@@ -1626,6 +1627,7 @@ class DashboardController {
 
       await mediaControllerBridge.start();
       await nightscoutBridge.start();
+      weatherBridge.setSessionActive(true);
       // Register the compositor surfaces: the shell chrome above all windows,
       // and a surface per live window (only the foreground one is composited).
       await communicator.configureSurface(SHELL_SURFACE_ID, {
@@ -1693,6 +1695,7 @@ class DashboardController {
       this.offVoiceStatus = null;
       await mediaControllerBridge.stop().catch(() => {});
       await nightscoutBridge.stop().catch(() => {});
+      weatherBridge.setSessionActive(false);
       voiceControlBridge.stop();
       if (communicator) {
         await communicator.setFaceclawWakeLeaseEnabled(false).catch(() => false);
@@ -1835,6 +1838,7 @@ class DashboardController {
       // Faceclaw's final BLE message before the transport closes.
       await mediaControllerBridge.stop().catch(() => {});
       await nightscoutBridge.stop().catch(() => {});
+      weatherBridge.setSessionActive(false);
       voiceControlBridge.handleSessionEnded();
 
       const cleanupAcked = skipFirmwareCleanup

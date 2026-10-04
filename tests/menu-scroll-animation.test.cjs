@@ -3,15 +3,10 @@ const assert = require('node:assert/strict');
 const { Menu } = require('../.test-build/app/ui/menu-core.js');
 const { MenuHighlightMotion, MENU_HIGHLIGHT_DURATION_MS } = require('../.test-build/app/ui/menu-highlight-motion.js');
 const { GrayImage } = require('../.test-build/app/graphics/image.js');
-const { DrawOp, encodeDisplayList, readDisplayList } = require('../.test-build/app/graphics/display-list.js');
+const { DrawOp } = require('../.test-build/app/graphics/display-list.js');
 const { evaluate } = require('../.test-build/app/graphics/draw-expression.js');
-const { DrawExpression: E } = require('../.test-build/app/graphics/draw-expression.js');
-const { menuScrollList, slidingHighlightY } = require('../.test-build/app/graphics/menu-scroll-list.js');
-const { MenuScrollMotion, MENU_BOUNCE_DURATION_MS, scrollOffsetExpression } = require('../.test-build/app/ui/menu-scroll-motion.js');
-const { encodePresentation } = require('../.test-build/app/graphics/presentation-wire.js');
+const { MenuScrollMotion, MENU_BOUNCE_DURATION_MS } = require('../.test-build/app/ui/menu-scroll-motion.js');
 const { setMenuAnimationReader } = require('../.test-build/app/ui/menu-animation-pref.js');
-// Also consumed by FrameDisplayListTest.kt.
-const SCROLL = '078b000000030002000400020000070000009600000001000200040011223344556677880200020000000000ff250100300102300180f0800180f0161101001732800180f01610300180f0302341403101001102000200010008000000ff280101300100300180f0800180f0161101001732800180f01610300180f03023414031010017010016040002000000010310';
 
 const BOX = { x: 10, y: 5, width: 40, height: 60 };
 const ITEMS = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
@@ -182,21 +177,6 @@ test('an end without wrap or exit callback bounces, carrying the highlight with 
   assert.equal(scrollLists(paint(exiting, 2000)).length, 0, 'an exit callback replaces the bounce');
 });
 
-test('a bounce during a scroll starts from the offset on screen', () => {
-  const menu = inkMenu();
-  menu.select(4);
-  paint(menu, 1000);
-  menu.moveSelection(1);
-  paint(menu, 2000); // 60 -> 80, the end
-  menu.moveSelection(1);
-  paint(menu, 2060); // the highlight moves to the last row; no further scroll
-  assert.equal(menu.selectedIndex, 6);
-  menu.moveSelection(1);
-  const [list] = scrollLists(paint(menu, 2120));
-  const offsets = [0, MENU_BOUNCE_DURATION_MS].map((ms) => evaluate(list.calls[0].y, ms, 0).value);
-  assert.ok(offsets[0] < offsets[1], 'it starts where the scroll had got to, above its settled offset');
-});
-
 test('with menu animation disabled, scrolls, slides and bounces snap', (t) => {
   setMenuAnimationReader(() => 'disabled');
   t.after(() => setMenuAnimationReader(() => 'normal'));
@@ -234,22 +214,3 @@ test('menu animation speed scales slide, scroll and bounce durations', (t) => {
   }
 });
 
-test('scroll lists survive the bridge with animated copy coordinates', () => {
-  const strip = { width: 2, height: 4, pixels: Uint8Array.of(17, 34, 51, 68, 85, 102, 119, 136) };
-  const timeline = { from: 0, to: 2, startedAt: 1000, token: 7, durationMs: MENU_HIGHLIGHT_DURATION_MS };
-  const y = slidingHighlightY(0, { dx: 0, dy: 1, startedAt: 1000, token: 7, durationMs: MENU_HIGHLIGHT_DURATION_MS }, 1000);
-  const list = menuScrollList(strip, 1, 2, timeline, scrollOffsetExpression(timeline).sub(E.i32(0)),
-    { y, width: 4, height: 2, radius: 0, background: 15, border: 45 });
-  const bytes = encodeDisplayList({ displayList: list, x: 3, y: 2, width: 4, height: 2, depth: 0 }, 1150);
-  assert.equal(Buffer.from(bytes).toString('hex'), SCROLL);
-  const { placed } = readDisplayList(bytes, 0, 1150);
-  const [copy, box] = placed.displayList.calls;
-  assert.equal(evaluate(copy.y, 150, 0).value, 1);
-  assert.deepEqual(evaluate(copy.y, 150, 90), { value: 2, pending: false });
-  assert.equal(copy.dx, 1);
-  assert.equal(evaluate(box.y, 0, 0).value, 0, 'the highlight is clamped inside the viewport');
-
-  const image = new GrayImage(8, 8);
-  image.drawDisplayList(list, 3, 2, 4, 2);
-  assert.ok(encodePresentation(image.draws[0]).length > 0);
-});

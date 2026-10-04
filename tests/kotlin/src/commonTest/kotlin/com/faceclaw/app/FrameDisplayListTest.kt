@@ -43,7 +43,8 @@ class FrameDisplayListTest {
     }
 
     @Test fun animatedCopySourcesRebindOnPresentAndDestinationsTranslate() {
-        // Emitted by menu-scroll-animation.test.cjs: a menu strip scrolling from row 0 to row 2.
+        // Recorded from a since-removed menu-scroll-animation.test.cjs case (240ms slides):
+        // a menu strip scrolling from row 0 to row 2.
         val list = read(hex(scroll)).translated(10, 10)
         fun copy(elapsed: Long): List<Int> {
             val call = DrawReader(list.calls(intArrayOf(5), 1150).first())

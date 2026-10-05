@@ -1580,13 +1580,26 @@ class GlassesSessionCore(
                         updateSilentModeLocked(false)
                     }
                     if ("sys-event" == decoded.kind) {
-                        if (decoded.eventType == BleProtocol.EVENT_FOREGROUND_EXIT || decoded.eventType == BleProtocol.EVENT_ABNORMAL_EXIT || decoded.eventType == BleProtocol.EVENT_SYSTEM_EXIT) {
+                        if (decoded.eventType == BleProtocol.EVENT_ABNORMAL_EXIT || decoded.eventType == BleProtocol.EVENT_SYSTEM_EXIT) {
                             if (shutdownRequested) {
                                 lastShutdownExitAtMs = now()
                             }
                             fixedLayoutCreated = false
                             displayedFingerprint = ""
                             clearAllMessagesLocked("firmware exit event")
+                        } else if (decoded.eventType == BleProtocol.EVENT_FOREGROUND_ENTER) {
+                            logLine("firmware overlay opened over the EvenHub page")
+                        } else if (decoded.eventType == BleProtocol.EVENT_FOREGROUND_EXIT) {
+                            // Despite its name this does not end the page: stock
+                            // evenhub_page_event_handler sends it when a firmware
+                            // overlay announced by FOREGROUND_ENTER closes, and
+                            // restores the page and its keepalive. Teardown is
+                            // always SYSTEM_EXIT/ABNORMAL_EXIT. Re-creating the
+                            // layout here sent a create the firmware ignores while
+                            // the page exists, so the session timed out (#42).
+                            // Re-present over whatever the overlay left instead.
+                            logLine("firmware overlay closed; re-presenting")
+                            lastEnqueuedFingerprint = ""
                         }
                     }
                 }

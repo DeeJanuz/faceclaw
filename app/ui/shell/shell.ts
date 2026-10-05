@@ -50,6 +50,9 @@ import {
 import { onAmbientCardsChanged } from "./ambient-cards";
 import { ShellChromeLayer, sidebarContentSpan, type ShellChromeState, type ShellChromeWindow } from "./chrome-layer";
 import { ShellModalLayer } from "./modal-layer";
+import { NotificationModalQueue } from "./notification-modal-queue";
+import { ALL_NOTIFICATIONS, readActiveNotifications } from "../../native/notification-icons";
+import { shouldShowNotificationOnGlasses } from "../../native/notification-sources";
 import { ToolDebugMenuLayer } from "./tool-debug-layer";
 import type { InProcessWindow } from "./in-process-window";
 import { BrightnessPickerLayer } from "./brightness-picker-layer";
@@ -399,6 +402,14 @@ class Shell {
   private readonly trayIcons = new Map<string, GrayImage>();
   private activeVoiceLayer: VoiceInputLayer | null = null;
   private activeKeyboardLayer: KeyboardInputLayer | null = null;
+  private readonly notificationModals = new NotificationModalQueue<ShellModalLayer>({
+    open: (notificationKey) => this.pushNotificationModal(notificationKey),
+    isAvailable: (notificationKey) => {
+      const notification = readActiveNotifications(ALL_NOTIFICATIONS).find((item) => item.key === notificationKey);
+      return !!notification && shouldShowNotificationOnGlasses(notification.packageName);
+    },
+    sleep: () => this.sleep(),
+  });
   private conversations: AssistantConversations | null = null;
   private get assistantSession(): AssistantSession | null {
     return this.conversations?.current().session ?? null;
@@ -762,28 +773,36 @@ class Shell {
   }
 
   /**
-   * Show a new notification in a shell modal over the app viewport. If the
-   * notification woke the screen, closing the modal goes back to sleep
+   * Show a new notification in a shell modal over the app viewport, or queue
+   * it behind the one already open (see NotificationModalQueue). If
+   * notifications woke the screen, closing the last modal goes back to sleep
    * (matching the old sleep-popup behavior).
    */
   openNotificationModal(notificationKey: string, wokeScreen: boolean): void {
     if (!this.screenOn) return;
-    const modal: ShellModalLayer = new ShellModalLayer(
-      new SingleNotificationLayer(notificationKey, {
-        origin: "new-notification-modal",
-        onClose: () => this.closeNotificationModal(modal, wokeScreen),
-      }),
-      this.config.actions,
-    );
-    this.stack.push(modal);
+    this.notificationModals.post(notificationKey, wokeScreen);
     this.config.requestShellRender();
   }
 
-  private closeNotificationModal(modal: ShellModalLayer, wokeScreen: boolean): void {
-    this.stack.popIfTop((layer) => layer === modal);
-    if (wokeScreen) {
-      this.sleep();
-    }
+  private pushNotificationModal(notificationKey: string): ShellModalLayer {
+    const modal: ShellModalLayer = new ShellModalLayer(
+      new SingleNotificationLayer(notificationKey, {
+        origin: "new-notification-modal",
+        onClose: () => this.closeNotificationModal(modal),
+      }),
+      this.config.actions,
+      () => this.notificationModals.removed(modal, this.screenOn),
+    );
+    this.stack.push(modal);
+    return modal;
+  }
+
+  private closeNotificationModal(modal: ShellModalLayer): void {
+    // The queue first: it opens the next notification or puts the screen back
+    // to sleep, and then ignores the removal below. remove() rather than a
+    // pop, so a menu opened over the modal doesn't leave it stuck.
+    this.notificationModals.closed(modal);
+    this.stack.remove(modal);
     this.config.requestShellRender();
   }
 

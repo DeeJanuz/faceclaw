@@ -114,6 +114,7 @@ test('system menu hides brightness in Auto and opens its picker between Voice in
     '../../graphics/image': graphics, '../layers': layers, '../menu': menu, '../gestures': gestures,
     '../dashboard-settings': f.settings, './geometry': f.geometry, './brightness-picker-layer': f.picker,
     './chrome-layer': { ShellChromeLayer: class {} },
+    './notification-modal-queue': load('app/ui/shell/notification-modal-queue.ts'),
   });
   shell.registerWindow({ windowId: 'test', appId: 'test', closeable: true, handleInput() {} });
   shell.openSystemMenu('test');

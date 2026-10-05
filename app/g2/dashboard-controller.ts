@@ -2291,7 +2291,6 @@ class DashboardController {
         this.lastSys = `${sourceName(event.eventSource)}/${eventName(event.eventType)}`;
         this.appendLog(`sys-event ${this.lastSys}`);
         if (
-          event.eventType === OsEventTypeList.FOREGROUND_EXIT_EVENT ||
           event.eventType === OsEventTypeList.ABNORMAL_EXIT_EVENT ||
           event.eventType === OsEventTypeList.SYSTEM_EXIT_EVENT
         ) {

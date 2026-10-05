@@ -45,15 +45,34 @@ class ShellScene(val layers: List<Layer>, val selections: List<RetainedDrawing> 
 
     fun preview(screenGray: ByteArray, width: Int, height: Int, rightLens: Boolean = false): ByteArray {
         val screen = BmpUtil.pack4bppFromGray8(screenGray, width, height)
-        val output = ByteArray(screen.size); val resources = HashMap<Int, ByteArray>()
+        val output = ByteArray(screen.size)
+        DisplayListRenderer(rendererResources(width, height), rightLens = rightLens).render(511, DisplayListRenderer.Target(screen, width, height), DisplayListRenderer.Target(output, width, height))
+        val target = DisplayListRenderer.Target(output, width, height)
+        return ByteArray(width * height) { (target.get(it % width, it / width) * 16).toByte() }
+    }
+
+    /**
+     * [screen] (packed 4bpp) with this scene's own retained drawings and its bottom [layerCount]
+     * layers drawn in, for a frame whose shell exceeds the resource budget (see ScenePlanner.plan).
+     * Both lenses share the result, so stereo depth is dropped, and animations are drawn settled.
+     */
+    fun flatten(screen: ByteArray, width: Int, height: Int, layerCount: Int): ByteArray {
+        val baked = ShellScene(layers.take(layerCount), selections)
+        val output = ByteArray(screen.size)
+        DisplayListRenderer(baked.rendererResources(width, height), flat = true).render(511,
+            DisplayListRenderer.Target(screen, width, height), DisplayListRenderer.Target(output, width, height), SETTLED_MS)
+        return output
+    }
+
+    /** Layer surfaces, then retained resources, by index, and the root list at 511. */
+    private fun rendererResources(width: Int, height: Int): HashMap<Int, ByteArray> {
+        val resources = HashMap<Int, ByteArray>()
         val surfaces = IntArray(layers.size) { id ->
             val layer = layers[id]; resources[id] = DrawProtocol.rawImage(layer.width, layer.height, layer.packed); id
         }
         val rows = IntArray(retainedResources.size) { id -> resources[id + layers.size] = retainedResources[id].bytes; id + layers.size }
         resources[511] = DrawProtocol.displayList(calls(width, height, surfaces, rows))
-        DisplayListRenderer(resources, rightLens = rightLens).render(511, DisplayListRenderer.Target(screen, width, height), DisplayListRenderer.Target(output, width, height))
-        val target = DisplayListRenderer.Target(output, width, height)
-        return ByteArray(width * height) { (target.get(it % width, it / width) * 16).toByte() }
+        return resources
     }
     internal class AnimatedPreview(val player: DisplayListPlayer, var pixels: ByteArray)
 
@@ -63,20 +82,9 @@ class ShellScene(val layers: List<Layer>, val selections: List<RetainedDrawing> 
     ): AnimatedPreview {
         val screen = BmpUtil.pack4bppFromGray8(screenGray, width, height)
         val output = ByteArray(screen.size)
-        val resources = HashMap<Int, ByteArray>()
-        val surfaces = IntArray(layers.size) { id ->
-            val layer = layers[id]
-            resources[id] = DrawProtocol.rawImage(layer.width, layer.height, layer.packed)
-            id
-        }
-        val rows = IntArray(retainedResources.size) { id ->
-            resources[id + layers.size] = retainedResources[id].bytes
-            id + layers.size
-        }
-        resources[511] = DrawProtocol.displayList(calls(width, height, surfaces, rows))
         val target = DisplayListRenderer.Target(output, width, height)
         lateinit var preview: AnimatedPreview
-        val player = DisplayListPlayer(DisplayListRenderer(resources),
+        val player = DisplayListPlayer(DisplayListRenderer(rendererResources(width, height)),
             DisplayListRenderer.Target(screen, width, height), target,
             clock = { drawAnimationTimeMs() }, schedule = schedule,
             displayed = { preview.pixels = ByteArray(width * height) { (target.get(it % width, it / width) * 16).toByte() } })
@@ -87,6 +95,8 @@ class ShellScene(val layers: List<Layer>, val selections: List<RetainedDrawing> 
 
     companion object {
         val EMPTY = ShellScene(emptyList())
+        /** Past every animation's end: TIME counts from PRESENT and clamps to the animation's length. */
+        private const val SETTLED_MS = 3_600_000L
         fun decode(reader: ByteReader): ShellScene {
             val count = reader.getShort().toInt() and 65535; require(count <= 64)
             val layers = ArrayList<Layer>()

@@ -1,10 +1,14 @@
 package com.faceclaw.app
 
-/** Reference interpreter. It uses the firmware's packed rows, clipping, LUT and call grammar. */
+/**
+ * Reference interpreter. It uses the firmware's packed rows, clipping, LUT and call grammar.
+ * [flat] ignores stereo depth, for pixels both lenses share (see ShellScene.flatten).
+ */
 class DisplayListRenderer(
     private val resources: Map<Int, ByteArray>,
     private val builtin: ((Int, Int) -> BuiltinGlyph)? = null,
     private val rightLens: Boolean = false,
+    private val flat: Boolean = false,
 ) {
     class BuiltinGlyph(val image: ByteArray, val advance: Int, val x: Int = 0, val y: Int = 0)
 
@@ -239,7 +243,8 @@ class DisplayListRenderer(
             target = target(id).shifted(inherited.shiftX)
         }
         if (flags and DRAW_FLAG_DEPTH != 0) {
-            target = target.shifted(DrawProtocol.depthOffset(reader.readS8(), rightLens))
+            val depth = reader.readS8()
+            if (!flat) target = target.shifted(DrawProtocol.depthOffset(depth, rightLens))
         }
         if (flags and DRAW_FLAG_CLIP != 0) {
             target = target.clipped(reader.readS16(), reader.readS16(), reader.readU16(), reader.readU16())

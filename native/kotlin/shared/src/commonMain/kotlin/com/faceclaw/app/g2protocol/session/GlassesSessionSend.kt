@@ -795,9 +795,25 @@ internal fun GlassesSessionCore.enqueueDesiredImageLocked() {
     // Visibility belongs to this immutable composite, not the latest UI request.
     enqueueBrightnessLocked(!fingerprint.startsWith("blanked:"))
     if (customFirmwareDetected && packedFrame.size > 0) {
-        val rendered = scenePlanner.plan(packedFrame, width, height, draws, scene, nextImageFrameId,
-            connectionOptions.TEXTURE_CACHE_FRAMES, connectionOptions.INCREMENTAL_FRAMES,
-            connectionOptions.MULTI_RECT_FRAMES, ConnectionOptions.MULTI_RECT_MAX_RECTS)
+        val rendered = try {
+            scenePlanner.plan(packedFrame, width, height, draws, scene, nextImageFrameId,
+                connectionOptions.TEXTURE_CACHE_FRAMES, connectionOptions.INCREMENTAL_FRAMES,
+                connectionOptions.MULTI_RECT_FRAMES, ConnectionOptions.MULTI_RECT_MAX_RECTS)
+        } catch (e: Exception) {
+            // Planning depends only on this frame, so reconnecting would fail
+            // the same way (#42). Drop the frame (the planner and resource
+            // cache are as they were) and wait for the scene to change.
+            lastEnqueuedFingerprint = fingerprint
+            logLine("frame plan failed; frame dropped: " + safeMessage(e))
+            finishFrame(frameId, "discarded: frame plan failed")
+            return
+        }
+        if (rendered.bakedLayers > 0 || rendered.bakedSelections) {
+            val baked = "shell over resource budget: baked " + rendered.bakedLayers + "/" + scene.layers.size +
+                " layers" + (if (rendered.bakedSelections) " and retained drawings" else "") + " into the frame"
+            frameTimings.log(frameId, baked)
+            logLine("$baked fingerprint=$fingerprint")
+        }
         nextImageFrameId = rendered.nextFid
         val commands = rendered.commands
         for (i in 0 until commands.size - 1) enqueueResourceCommandLocked(commands[i])

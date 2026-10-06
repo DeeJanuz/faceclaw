@@ -522,13 +522,16 @@ test('T3 double-tap back remains app back while a sleeping display only wakes', 
 test('full-height switcher draws and hit-tests the panel, then restores compact geometry', () => {
   let full = true;
   const imports = importMap('app/ui/shell/chrome-layer.ts');
-  imports['../../graphics/image'] = { G2_LENS_WIDTH: 640, G2_LENS_HEIGHT: 480 };
+  // Unselected icons paint into their own image and are placed with stereo depth.
+  class IconImage { constructor(width, height) { this.width = width; this.height = height; } drawImage() {} }
+  imports['../../graphics/image'] = { G2_LENS_WIDTH: 640, G2_LENS_HEIGHT: 480, GrayImage: IconImage };
   imports['../extension-settings'] = {
     windowLayoutPolicy: () => ({ switcherHeight: full ? 'display' : 'minimum', dividerWidth: 2 }),
   };
   imports['./geometry'] = {
     MIN_WINDOW_HEIGHT: 288,
     minWindowTop: () => 96,
+    windowTop: () => 96,
     TOP_BAR_HEIGHT: 28,
     SIDEBAR_WIDTH: 64,
     SHELL_OPAQUE_BLACK: 1,
@@ -543,13 +546,19 @@ test('full-height switcher draws and hit-tests the panel, then restores compact 
     selectedIndex: 0,
     focus: 'sidebar',
     windows: Array.from({ length: 10 }, (_, index) => ({
-      drawIcon: (_image, x, y, size) => icons.push({ index, x, y, size }),
+      drawIcon: (target, x, y, size) => {
+        if (target instanceof IconImage) target.icon = { index, size };
+        else icons.push({ index, x, y, size });
+      },
     })),
   };
   const { ShellChromeLayer } = load('app/ui/shell/chrome-layer.ts', imports),
     chrome = new ShellChromeLayer(() => state);
   const image = new Proxy(
-    { fillRect: (...args) => fills.push(args) },
+    {
+      fillRect: (...args) => fills.push(args),
+      drawDepthImage: (icon, x, y) => icons.push({ ...icon.icon, x, y: y + 1 }),
+    },
     { get: (target, prop) => target[prop] ?? (() => {}) },
   );
   chrome.drawSidebar(image, state);

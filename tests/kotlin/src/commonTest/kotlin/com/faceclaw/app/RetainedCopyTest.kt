@@ -91,27 +91,16 @@ class RetainedCopyTest {
         val rasterBytes = raster?.payload?.size ?: BleImageOptimizer.maybeCompress(next, width, height).size
         assertTrue(plan.payload.size < rasterBytes)
 
-        val imageId =
-            ImageAtlas.ensure(
-                "retained-copy-fork",
-                2,
-                2,
-                ArrayByteReader(byteArrayOf(0, 64, 128.toByte(), 255.toByte())),
-            )
-        val live = TextureCacheState()
-        val imageOffset = live.ensureImage(imageId, assertNotNull(ImageAtlas.get(imageId)))
-        assertTrue(imageOffset >= 0)
-        assertTrue(live.hasPendingUploads())
-        val speculative = live.fork()
-        speculative.drainUploadPayloads(3600)
-        assertTrue(live.hasPendingUploads())
-        live.adopt(speculative)
-        assertFalse(live.hasPendingUploads())
-        assertEquals(imageOffset, live.ensureImage(imageId, assertNotNull(ImageAtlas.get(imageId))))
-        val reset = live.fork()
-        reset.reset()
-        assertTrue(live.usedBytes() > 0)
-        assertNotEquals(live.generation(), reset.generation())
+        // A copy candidate plans against a checkpoint; losing it must not leave unsent residency.
+        val live = ResourceCacheState()
+        val resource = CachedResource(byteArrayOf(1, 2, 3, 4))
+        val rollback = live.checkpoint()
+        assertTrue(live.prepare(listOf(resource))[0] >= 0)
+        rollback()
+        assertEquals(-1, live.resourceId(resource))
+        assertTrue(live.prepare(listOf(resource))[0] >= 0)
+        assertTrue(live.drainCommands(3600).isNotEmpty())
+        assertTrue(live.resourceId(resource) >= 0)
 
         val glyphGray = ByteArray(4 * 8) { -1 }
         val font = GlyphAtlas.ensureGray("hybrid-copy-font", 'A'.code, 4, 8, ArrayByteReader(glyphGray))
@@ -144,7 +133,7 @@ class RetainedCopyTest {
                     width,
                     height,
                     draws,
-                    TextureCacheState(),
+                    ResourceCacheState(),
                     11,
                     true,
                     6,
@@ -159,7 +148,7 @@ class RetainedCopyTest {
                     width,
                     height,
                     draws,
-                    TextureCacheState(),
+                    ResourceCacheState(),
                     11,
                     true,
                     6,

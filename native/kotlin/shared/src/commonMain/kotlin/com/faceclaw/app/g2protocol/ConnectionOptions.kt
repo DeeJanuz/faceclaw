@@ -74,8 +74,8 @@ class ConnectionOptions {
     // Move retained pixels on-glasses, then repair the authoritative target in the same batch.
     @JvmField val RETAINED_COPY_FRAMES = true
 
-    // Ship text as on-glasses cached-glyph draws (CFW modes 18/20) instead of
+    // Ship text as on-glasses cached-glyph draws (CFW modes 19/20/21/22) instead of
     // pixels, punching glyph ink out of the baked deltas (see TexturePlanner).
-    // Runtime use is gated on the negotiated Faceclaw firmware contract.
+    // Also gated at runtime on the firmware advertising Faceclaw/23 or later.
     @JvmField val TEXTURE_CACHE_FRAMES = true
 }

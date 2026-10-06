@@ -26,7 +26,7 @@ function harness() {
   const deadlines = [];
   let submit;
   const context = {
-    shell: { isScreenOn: () => true, describeInputTarget() {}, paintSurface: () => [], underlayDim: () => 256 },
+    shell: { isScreenOn: () => true, describeInputTarget() {}, paintScene: () => new Uint8Array([0, 0]) },
     frameTimings: {
       startFrame: () => 1,
       annotateFrame() {},
@@ -74,7 +74,7 @@ function harness() {
     },
     schedulePreviewUpdate() {},
     display: {
-      submitSurfaceFrame: async () => {
+      submitShellScene: async () => {
         events.push('submit');
         if (submit) await submit();
       },

@@ -80,6 +80,8 @@ export interface LayerContext {
 }
 
 export interface Layer {
+  readonly depth?: number;
+  paintParts?(): Plane[];
   readonly paintOverBase?: boolean;
   /**
    * Dim everything painted beneath this layer: a 0..1 brightness factor
@@ -116,6 +118,12 @@ export interface Layer {
 
 export class LayerStack {
   private readonly layers: Layer[];
+  private static nextShellKey = 3;
+  static allocateShellKey(): number {
+    if (this.nextShellKey > 65535) this.nextShellKey = 3;
+    return this.nextShellKey++;
+  }
+  private readonly shellKeys = new WeakMap<Layer, number>();
   private readonly ctx: LayerContext;
   private baseWidth: number;
   private baseHeight: number;
@@ -226,6 +234,12 @@ export class LayerStack {
     return this.paintLayer(this.layers.length - 1, 1);
   }
 
+  /** Planes without baked dimming; each plane carries its own dimUnderneath for the scene. */
+  paintUndimmed(): Plane[] {
+    this.lastBaseDim = false;
+    return this.paintLayer(this.layers.length - 1, 1, true);
+  }
+
   /**
    * The brightness factor the last paint applied to the base plane: 1 when
    * nothing dims it, a smaller factor under a layer with dimUnderneath, and
@@ -267,8 +281,11 @@ export class LayerStack {
 
 
   /** Paint layer `index`; `dimSoFar` is the factor the layers above apply to it. */
-  private paintLayer(index: number, dimSoFar: number): Plane[] {
+  private paintLayer(index: number, dimSoFar: number, raw = false): Plane[] {
     const layer = this.layers[index]!;
+    if (raw && index === 0 && layer.paintParts) return layer.paintParts();
+    let key = this.shellKeys.get(layer);
+    if (key === undefined) { key = LayerStack.allocateShellKey(); this.shellKeys.set(layer, key); }
     let canvas: GrayImage | null = null;
     let belowRequested = false;
     const image = spanCurrent(`paint[${index}]:${layer.constructor.name}`, () =>
@@ -280,7 +297,7 @@ export class LayerStack {
         return canvas;
       }),
     );
-    const ownPlane: Plane = { image, x: 0, y: 0 };
+    const ownPlane: Plane = { image, x: 0, y: 0, shellKey: key, depth: layer.depth, dimUnderneath: layer.dimUnderneath === false ? 1 : layer.dimUnderneath };
     if (index <= 0) {
       this.lastBaseDim = dimSoFar;
       return [ownPlane];
@@ -289,7 +306,7 @@ export class LayerStack {
       return [ownPlane];
     }
     const dim = typeof layer.dimUnderneath === "number" ? layer.dimUnderneath : 1;
-    const below = this.paintLayer(layer.paintOverBase ? 0 : index - 1, dimSoFar * dim);
-    return [...(dim < 1 ? dimPlanes(below, dim) : below), ownPlane];
+    const below = this.paintLayer(layer.paintOverBase ? 0 : index - 1, dimSoFar * dim, raw);
+    return [...(!raw && dim < 1 ? dimPlanes(below, dim) : below), ownPlane];
   }
 }

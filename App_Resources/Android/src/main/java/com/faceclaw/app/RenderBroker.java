@@ -8,7 +8,11 @@ import java.nio.ByteBuffer;
  * methods and therefore receive identical composition and planner input.
  */
 final class RenderBroker {
-    private final SurfaceCompositor compositor = new SurfaceCompositor();
+    private final SurfaceCompositor compositor;
+
+    RenderBroker(){this(true);}
+    /** Wire producers pass false: they need screen pixels and the shell scene, never preview pixels. */
+    RenderBroker(boolean includePreviewInFrames){compositor=new SurfaceCompositor(includePreviewInFrames);}
 
     void configureScreen(int width,int height){compositor.configureScreen(width,height);}
     int packedFrameSize(){return compositor.packedFrameSize();}
@@ -17,6 +21,9 @@ final class RenderBroker {
     void setSurfaceVisible(String id,boolean visible){compositor.setSurfaceVisible(id,visible);}
     void setBlanked(boolean blanked){compositor.setBlanked(blanked);}
     void setUnderlayDim(int belowZOrder,int factor256){compositor.setUnderlayDim(belowZOrder,factor256);}
+    void setShellScene(ByteBuffer scene){compositor.setShellScene(new AndroidByteReader(scene));}
+    /** Retain pixels without compositing; preview consumers composite on demand. */
+    void submitSurface(String id,ByteBuffer pixels,int x,int y,int width,int height,String fingerprint,ByteBuffer draws){compositor.submitSurface(id,new AndroidByteReader(pixels),x,y,width,height,fingerprint,draws==null?null:new AndroidByteReader(draws));}
     SurfaceCompositor.Composite composite(){return compositor.composite();}
     SurfaceCompositor.Composite previewComposite(){return compositor.previewComposite();}
     SurfaceCompositor.Composite applyAndComposite(String id,ByteBuffer pixels,int x,int y,int width,int height,String fingerprint){return compositor.applyAndComposite(id,new AndroidByteReader(pixels),x,y,width,height,fingerprint);}

@@ -1,3 +1,6 @@
+import { CFW_MSG_BOUNDING_BOX, CFW_MSG_CREATE_SURFACE, CFW_MSG_PRESENT, CFW_MSG_UPLOAD_RESOURCE } from "../g2/cfw-message-type";
+import { GrayImage } from "../graphics/image"
+import { encodeShellScene } from "../graphics/shell-scene"
 import { decodeImageBytes } from './image-bytes.ios'
 import * as protocol from '../g2/ble-protocol.ios'
 import { CfwTransport, parseCfwAcks } from '../g2/cfw-transport.ios'
@@ -31,6 +34,8 @@ export function runKotlinProtocolSmokeTest(): void {
   c.submitSurfaceFrame('test', new Uint8Array([0, 16, 255, 32, 48, 64]), { x: 0, y: 0, width: 3, height: 2 })
   assert(hex(c.composite()) === '0010ff203040', 'composition')
   assert(hex(protocol.packGray4(c.composite(), 3, 2)) === '01f02340', 'packing')
+  c.setShellScene(new Uint8Array([1,0,1,0,0,0,0,0,1,0,1,0,128,0,0,0,0,0,255]))
+  assert(hex(c.composite()) === 'f00070101020', 'shell scene bridge and 4bpp composition')
   c.setScreenBlanked(true); assert(c.composite().every(p => p === 0), 'blanking')
   const textures = new IosTexturePlanner(), textured = new SurfaceCompositor(4, 2)
   textured.configureSurface('icon', { x: 0, y: 0, width: 2, height: 2, zOrder: 0, transparency: 'opaque' })
@@ -40,12 +45,20 @@ export function runKotlinProtocolSmokeTest(): void {
   textured.submitSurfaceFrame('icon', white, { x: 0, y: 0, width: 2, height: 2 }, draw.buffer)
   const snapshot = textured.compositeFrame(), packed = protocol.packGray4(snapshot.pixels, 4, 2)
   const cold = textures.plan(null, packed, snapshot.textures, 1)
-  assert(!!cold && cold.uploads[0]?.[0] === 18 && cold.payload[0] === 8, 'texture upload and draw')
-  assert(textures.plan(null, packed, snapshot.textures, 1)?.uploads.length === 0, 'texture reuse')
+  assert(!!cold && cold.resourceCommands.some(command => command[0] === CFW_MSG_UPLOAD_RESOURCE) && cold.payload[0] === CFW_MSG_PRESENT, 'texture upload and draw')
+  assert(textures.plan(null, packed, snapshot.textures, 1)?.resourceCommands.length === 0, 'texture reuse')
   textures.reset()
-  assert((textures.plan(null, packed, snapshot.textures, 1)?.uploads.length ?? 0) > 0, 'texture reset')
+  assert((textures.plan(null, packed, snapshot.textures, 1)?.resourceCommands.length ?? 0) > 0, 'texture reset')
+  const selectedSurface = new GrayImage(8, 4, 1)
+  selectedSurface.drawMenuSelection(new GrayImage(4, 2, 255), 1, 1, 16, 48, 0, 2)
+  const selectedPreview = new SurfaceCompositor(8, 4)
+  selectedPreview.setShellScene(encodeShellScene([{ image: selectedSurface, x: 0, y: 0, shellKey: 100 }]))
+  const selectedSnapshot = selectedPreview.compositeFrame()
+  assert(selectedSnapshot.pixels[10] === 240 && selectedSnapshot.pixels[9] === 0, 'menu selection depth and bridge')
+  const selectedPlan = new IosTexturePlanner().plan(null, protocol.packGray4(selectedSnapshot.pixels, 8, 4), selectedSnapshot.textures, 1)
+  assert(!!selectedPlan && selectedPlan.payload[0] === CFW_MSG_PRESENT && selectedPlan.resourceCommands.some(c => c[0] === CFW_MSG_CREATE_SURFACE), 'menu resource planning')
   const changed = new Uint8Array(16); changed[0] = 255
-  assert(buildBoundingBoxPayload(new Uint8Array(16), changed, 8, 4, 1)?.[0] === 3, 'image update')
+  assert(buildBoundingBoxPayload(new Uint8Array(16), changed, 8, 4, 1)?.[0] === CFW_MSG_BOUNDING_BOX, 'image update')
   assert(lvglMetrics('/nonexistent/faceclaw-font').length === 0, 'font bridge')
   const compass = protocol.decodeCompassInput({ sid: 8, flag: 1, command: 15, magic: 0,
     payload: new Uint8Array([8, 15, 16, 0, 82, 3, 8, 231, 2, 162, 6, 12, 67, 77, 1, 3, 2, 3, 140, 0, 152, 186, 220, 254]) })

@@ -139,7 +139,6 @@ export class FaceclawCommunicatorBridge {
   // does not race against finishes that land before the wait starts.
   private readonly finishedFrameOutcomes = new Map<number, string>();
   private readonly frameFinishedWaiters = new Map<number, Set<(outcome: string) => void>>();
-  private readonly logListeners = new Set<(line: string) => void>();
   private readonly stateListeners = new Set<(state: CommunicatorState) => void>();
   private readonly ringListeners = new Set<(event: RawInputEvent) => void>();
   private readonly batteryListeners = new Set<(state: HeadsetBatteryState) => void>();
@@ -163,9 +162,6 @@ export class FaceclawCommunicatorBridge {
       addresses.ring ?? "",
     );
     this.listenerProxy = new com.faceclaw.app.FaceclawBleCommunicatorListener({
-      onLog: (line: string) => {
-        this.emitAsync(this.logListeners, String(line));
-      },
       onStateChange: (phase: string, status: string) => {
         const normalizedPhase = String(phase) as CommunicatorPhase;
         // FaceclawBleCommunicator emits its current state from setListener().
@@ -304,11 +300,6 @@ export class FaceclawCommunicatorBridge {
       () => undefined,
     );
     return result;
-  }
-
-  onLog(listener: (line: string) => void): () => void {
-    this.logListeners.add(listener);
-    return () => this.logListeners.delete(listener);
   }
 
   onStateChange(listener: (state: CommunicatorState) => void): () => void {
@@ -554,6 +545,11 @@ export class FaceclawCommunicatorBridge {
    * next composite. How a shell overlay's Layer.dimUnderneath reaches the
    * window surfaces beneath the shell surface.
    */
+  async submitShellScene(bytes: Uint8Array, paintMs = 0, frameId = 0): Promise<void> {
+    const snapshot = new Uint8Array(bytes);
+    await this.enqueueJavaCall(() => this.communicator.submitShellScene(snapshot.buffer, paintMs, frameId), true);
+  }
+
   async setUnderlayDim(belowZOrder: number, factor: number): Promise<void> {
     await this.enqueueJavaCall(() => {
       this.communicator.setUnderlayDim(Math.round(belowZOrder), dimFactor256(factor));
@@ -703,7 +699,6 @@ export class FaceclawCommunicatorBridge {
 
   async close(): Promise<void> {
     this.closed = true;
-    this.logListeners.clear();
     this.stateListeners.clear();
     this.ringListeners.clear();
     this.batteryListeners.clear();

@@ -59,5 +59,5 @@ test('viewport text entry uses its full height, renderer widths and reverts to t
   assert.ok(draws.every((line) => line.y + font.lineHeight < 480));
   expanded = false;
   paintInputDialog(image, content);
-  assert.deepEqual(boxes[1].slice(0, 4), [40, 120, 560, 240]);
+  assert.deepEqual(boxes[1].slice(0, 4), [40, 124, 560, 232]);
 });

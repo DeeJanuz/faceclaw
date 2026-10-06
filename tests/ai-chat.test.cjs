@@ -253,6 +253,7 @@ function shellEnv({ wakeAction = 'voice-input', skipConfirmation = false } = {})
     '../../apps/external/extension-platform': { extensionPlatform: () => null },
     './extension-layer': { ExtensionLayer: class {} },
     '../../native/voice-control': { voiceControlBridge: { stop() {} } },
+    '../../graphics/shell-scene': { encodeShellScene: () => new Uint8Array([0, 0]) },
     '../../graphics/image': images, '../../graphics/plane': {}, '../../graphics/ui-fonts': {}, '../../g2/events': load('app/g2/events.ts', {}),
     '../gestures': gestures, '../layers': layers, '../menu': { MenuLayer: Menu },
     '../extension-settings': {

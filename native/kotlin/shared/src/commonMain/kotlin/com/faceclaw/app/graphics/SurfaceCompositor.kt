@@ -31,7 +31,7 @@ import kotlin.jvm.JvmStatic
  * atomically under an internal lock, and each composite carries a monotonic sequence number so
  * callers can detect when a composite was superseded by a concurrent one before being acted on.
  */
-class SurfaceCompositor {
+class SurfaceCompositor @JvmOverloads constructor(private val includePreviewInFrames: Boolean = true) {
     companion object {
         const val TRANSPARENCY_OPAQUE: Int = 0
 
@@ -59,6 +59,7 @@ class SurfaceCompositor {
             var out: MutableList<ScreenDraw> = ArrayList()
             while ((cursor.remaining() >= 1)) {
                 var kind: Int = (cursor.get() and 0xff)
+                if (kind in 3..5) { out.add(ScreenDraw.image(0, 0, 0).also { it.selection = MenuSelection.read(cursor, kind) }); continue }
                 if (((kind == ScreenDraw.KIND_GLYPH) && (cursor.remaining() >= 11))) {
                     var fontId: Int = (cursor.getShort().toInt() and 0xffff)
                     var encoding: Int = cursor.getInt()
@@ -117,7 +118,7 @@ class SurfaceCompositor {
     /**
      * One deferred draw (a text glyph or an icon image) within a frame, in screen coordinates. The
      * draw's pixels are already baked into the composited gray buffer (the TS side bakes before
-     * submitting); this record preserves the draw's identity so the texture-cache planner can
+     * submitting); this record preserves the draw's identity so the resource-cache planner can
      * replay it as an on-glasses cached draw instead of image bytes.
      *
      * Glyphs: x/y are the pen position and line top; the raster (and its bearing/cell placement)
@@ -125,6 +126,7 @@ class SurfaceCompositor {
      * raster comes from ImageAtlas under imageId.
      */
     class ScreenDraw {
+        @JvmField var selection: MenuSelection? = null
         companion object {
             const val KIND_GLYPH: Int = 0
 
@@ -221,10 +223,14 @@ class SurfaceCompositor {
 
     /** One composited full-screen frame plus the metadata the pipeline needs. */
     class Composite {
+        /** Wire pixels without the shell scene; the scene is presented by the glasses. */
+        @JvmField var screenGray: ByteArray
+        @JvmField var shellScene: ShellScene = ShellScene.EMPTY
         /**
          * Full-screen 8bpp grayscale pixels, screenWidth*screenHeight bytes. Empty for the
-         * allocation-free packed intake path; preview and screenshot consumers request their own
-         * retained snapshot.
+         * allocation-free packed intake path. When includePreviewInFrames is false, submitted
+         * composites alias screenGray here; use previewComposite() for the shell/selection-rendered
+         * preview, screenshots or recording.
          */
         @JvmField val gray: ByteArray
 
@@ -264,6 +270,7 @@ class SurfaceCompositor {
             copies: Array<ScreenCopy>? = null,
         ) {
             this.gray = gray
+            this.screenGray = gray
             this.width = width
             this.height = height
             this.fingerprint = fingerprint
@@ -279,6 +286,16 @@ class SurfaceCompositor {
         @JvmField val composite: Composite,
         @JvmField val packed: ByteArray,
     )
+
+    private var shellScene: ShellScene? = null
+    fun setShellScene(reader: ByteReader) {
+        val scene = ShellScene.decode(reader)
+        lock.withLock {
+            // A scene takes the shell surface and its dimming out of the wire pixels.
+            if (shellScene == null) markAllDirtyLocked()
+            shellScene = scene
+        }
+    }
 
     private class Surface {
         @JvmField val id: String
@@ -449,8 +466,12 @@ class SurfaceCompositor {
         }
     }
 
+    /** With a shell scene the glasses present the shell; its surface stays out of the wire pixels. */
+    private fun excludedLocked(surface: Surface): Boolean = shellScene != null && surface.id == "shell"
+
     /** The dim factor (256 = none) that applies to a surface. */
     private fun dimForLocked(surface: Surface): Int {
+        if (shellScene != null) return 256
         return (if ((surface.zOrder < underlayDimBelowZOrder)) underlayDim else 256)
     }
 
@@ -870,15 +891,12 @@ class SurfaceCompositor {
             if (((screenWidth <= 0) || (screenHeight <= 0))) {
                 return null
             }
-            recomposeDirtyLocked()
-            return Composite(
-                retainedGray.copyOf(),
-                screenWidth,
-                screenHeight,
-                "preview",
-                0,
-                NO_DRAWS,
-            )
+            // Previews build their own pixels. Consuming dirty tiles here would hide their damage
+            // from the next kept composite and leave the packed framebuffer unpatched.
+            val seq = nextCompositeSeq
+            val result = describeLocked(buildGrayLocked(), true, IntArray(0), NO_COPIES)
+            nextCompositeSeq = seq
+            return result
         }
     }
 
@@ -890,7 +908,7 @@ class SurfaceCompositor {
         var ordered: MutableList<Surface> = ArrayList(surfaces.values)
         ordered.sortWith(compareBy<Surface> { it.zOrder }.thenBy { it.id })
         for (surface in ordered) {
-            if (surface.visible && dimForLocked(surface) != 0) {
+            if (surface.visible && dimForLocked(surface) != 0 && !excludedLocked(surface)) {
                 blendLocked(gray, surface)
             }
         }
@@ -925,9 +943,21 @@ class SurfaceCompositor {
                 retainedPacked,
             )
         }
+        // The packed intake path stays allocation-free; previews need their own snapshot.
+        val gray = if (snapshotGray) retainedGray.copyOf() else NO_GRAY
+        return describeLocked(gray, includePreviewInFrames, damage, copies)
+    }
+
+    /** Frame metadata (draws, shell scene, fingerprint) around already composed wire pixels. */
+    private fun describeLocked(
+        gray: ByteArray,
+        includePreview: Boolean,
+        damage: IntArray,
+        copies: Array<ScreenCopy>,
+    ): Composite {
         if (blanked) {
             return Composite(
-                if (snapshotGray) retainedGray.copyOf() else NO_GRAY,
+                gray,
                 screenWidth,
                 screenHeight,
                 ((("blanked:" + screenWidth) + "x") + screenHeight),
@@ -942,12 +972,15 @@ class SurfaceCompositor {
         var fingerprint: StringBuilder = StringBuilder()
         fingerprint.append(screenWidth).append('x').append(screenHeight)
         var draws: MutableList<ScreenDraw> = ArrayList()
+        val selections = ArrayList<MenuSelection>()
         for (surface in ordered) {
-            if (!surface.visible || dimForLocked(surface) == 0) {
+            if (!surface.visible || dimForLocked(surface) == 0 || excludedLocked(surface)) {
                 continue
             }
             var dim: Int = dimForLocked(surface)
             for (draw in surface.draws) {
+                val selected = draw.selection
+                if (selected != null) { selections.add(selected.translated(surface.x, surface.y)); continue }
                 if (((dim < 256) && (draw.kind == ScreenDraw.KIND_IMAGE))) {
                     continue
                 }
@@ -988,16 +1021,10 @@ class SurfaceCompositor {
                 fingerprint.append(":dim").append(dim)
             }
         }
-        return Composite(
-            if (snapshotGray) retainedGray.copyOf() else NO_GRAY,
-            screenWidth,
-            screenHeight,
-            fingerprint.toString(),
-            nextCompositeSeq++,
-            draws.toTypedArray(),
-            damage,
-            copies,
-        )
+        val scene = if (surfaces.values.any { it.visible && it.zOrder > 1 }) ShellScene.EMPTY else ShellScene(shellScene?.layers ?: emptyList(), selections)
+        val preview = if (includePreview && gray.isNotEmpty() && (shellScene != null || selections.isNotEmpty())) scene.preview(gray, screenWidth, screenHeight) else gray
+        return Composite(preview, screenWidth, screenHeight, fingerprint.append("|shell:").append(scene.fingerprint).toString(),
+            nextCompositeSeq++, draws.toTypedArray(), damage, copies).also { it.screenGray = gray; it.shellScene = scene }
     }
 
     /** Rebuild dirty display tiles and return their horizontally merged screen-space bounds. */
@@ -1031,7 +1058,7 @@ class SurfaceCompositor {
             }
             if (!blanked) {
                 for (surface in ordered) {
-                    if (surface.visible && dimForLocked(surface) != 0) {
+                    if (surface.visible && dimForLocked(surface) != 0 && !excludedLocked(surface)) {
                         blendRegionLocked(retainedGray, surface, tx, ty, right, bottom)
                     }
                 }

@@ -73,6 +73,13 @@ public final class FaceclawPreviewCompositor {
     }
 
     /** Dim every surface below zOrder belowZOrder to factor256/256 (see SurfaceCompositor). */
+    public void submitShellScene(java.nio.ByteBuffer bytes, int paintMs, int frameId) {
+        compositor.setShellScene(bytes);
+        FrameTimings.getInstance().finishFrame(frameId, "composited (preview-only, no glasses)");
+        Runnable listener = frameListener;
+        if (listener != null) mainHandler.post(listener);
+    }
+
     public void setUnderlayDim(int belowZOrder, int factor256) {
         compositor.setUnderlayDim(belowZOrder, factor256);
     }
@@ -104,7 +111,7 @@ public final class FaceclawPreviewCompositor {
             int frameId,
             java.nio.ByteBuffer glyphs
     ) {
-        compositor.applyAndComposite(
+        compositor.submitSurface(
                 surfaceId, pixels8bpp, rectX, rectY, rectWidth, rectHeight, contentFingerprint, glyphs);
         FrameTimings.getInstance().finishFrame(frameId, "composited (preview-only, no glasses)");
         Runnable listener = frameListener;

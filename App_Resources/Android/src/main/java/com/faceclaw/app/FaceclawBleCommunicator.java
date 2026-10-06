@@ -141,7 +141,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     private int faceclawWakePendingNonce = -1;
     /**
      * The last firmware-info read said the glasses run Faceclaw's custom
-     * firmware. Gates the private modes (cleanup, texture cache, ...) so stock
+     * firmware. Gates the private modes (cleanup, resource cache, ...) so stock
      * or third-party firmware never sees them; the TS side checks the actual
      * revision and disconnects on a mismatch, so no per-feature gating is
      * needed here.
@@ -268,7 +268,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     private int desiredPaintMs;
     private volatile int desiredFrameId;
     // Screen-space deferred draws (glyphs + images) whose pixels are baked
-    // into desiredPacked; the texture-cache planner may replay them as
+    // into desiredPacked; the resource-cache planner may replay them as
     // on-glasses cached draws.
     private SurfaceCompositor.ScreenDraw[] desiredDraws = new SurfaceCompositor.ScreenDraw[0];
     private SurfaceCompositor.ScreenCopy[] desiredCopies = new SurfaceCompositor.ScreenCopy[0];
@@ -286,13 +286,17 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     // included in the newer composite).
     private long lastStoredCompositeSeq;
 
-    private final RenderBroker compositor = new RenderBroker();
+    // Wire submissions need screenGray + the shell scene, never preview pixels.
+    // Preview/screenshot/recording callers render those explicitly on demand.
+    private final RenderBroker compositor = new RenderBroker(false);
 
-    // Phone-side model of the CFW's 256 KiB texture cache (modes 18/19/20).
+    // Phone-side model of the CFW's 192 KiB resource cache.
     // Reset whenever the image pipeline / EvenHub session is torn down: the
     // firmware frees the cache with the fb lease, and after any resync the
     // cheap safe assumption is an empty cache (glyphs re-upload lazily).
-    private final TextureCacheState textureCache = new TextureCacheState();
+    private final ResourceCacheState resourceCache = new ResourceCacheState();
+    private final ScenePlanner scenePlanner = new ScenePlanner(resourceCache);
+    private ShellScene desiredShellScene = ShellScene.Companion.getEMPTY();
     private boolean retainedCopySupported;
 
     /** Content-free result returned to an SDK app after a texture prefetch request. */
@@ -914,7 +918,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         // would compress even a random payload if we reused it across the run.
         byte[] payload = new byte[benchmarkMessageSize];
         benchmarkRandom.nextBytes(payload);
-        payload[0] = 7;             // CFW diagnostic-control mode...
+        payload[0] = CfwMessageTypeKt.CFW_MSG_DIAGNOSTICS;             // CFW diagnostic-control mode...
         payload[1] = (byte) 0x7f;   // ...with an unused sub-op: acked, no effect
         OutboundMessage message = messageBuilder.imagePayload(
             "bandwidth",
@@ -1008,7 +1012,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     /** Request one CFW ambient-light report (image-handler mode 16 op 0). */
     public void queryAmbientLight() {
         synchronized (lock) {
-            enqueueAmbientLightControlLocked(new byte[] { (byte) 16, (byte) 0 }, "als query", false);
+            enqueueAmbientLightControlLocked(new byte[] { (byte) CfwMessageTypeKt.CFW_MSG_AMBIENT_LIGHT, (byte) 0 }, "als query", false);
         }
         interruptibleSleep.interrupt();
     }
@@ -1026,7 +1030,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                                        int heartbeatMs, boolean bindToLease) {
         byte[] payload = enable
             ? new byte[] {
-                (byte) 16,
+                (byte) CfwMessageTypeKt.CFW_MSG_AMBIENT_LIGHT,
                 (byte) 1,
                 (byte) (bindToLease ? 1 : 0),
                 (byte) (intervalMs & 0xff),
@@ -1036,7 +1040,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 (byte) (heartbeatMs & 0xff),
                 (byte) ((heartbeatMs >> 8) & 0xff),
             }
-            : new byte[] { (byte) 16, (byte) 2 };
+            : new byte[] { (byte) CfwMessageTypeKt.CFW_MSG_AMBIENT_LIGHT, (byte) 2 };
         synchronized (lock) {
             ambientLightPollingRequested = enable;
             updateSensorRequestedActivityLocked();
@@ -1296,7 +1300,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 "compositor:visible " + id + "=" + visible);
         compositor.setSurfaceVisible(id, visible);
         SurfaceCompositor.Composite composite = compositor.composite();
-        byte[] packed = BmpUtil.pack4bppFromGray8(composite.gray, composite.width, composite.height);
+        byte[] packed = BmpUtil.pack4bppFromGray8(composite.screenGray, composite.width, composite.height);
         submitComposedFrame(composite, packed, 0, frameId);
     }
 
@@ -1310,7 +1314,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 "compositor:" + (blanked ? "blank" : "unblank"));
         compositor.setBlanked(blanked);
         SurfaceCompositor.Composite composite = compositor.composite();
-        byte[] packed = BmpUtil.pack4bppFromGray8(composite.gray, composite.width, composite.height);
+        byte[] packed = BmpUtil.pack4bppFromGray8(composite.screenGray, composite.width, composite.height);
         submitComposedFrame(composite, packed, 0, frameId);
     }
 
@@ -1327,12 +1331,14 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         compositor.removeSurface(id);
     }
 
-    /**
-     * Dim every surface below zOrder belowZOrder to factor256/256 (see
-     * SurfaceCompositor.setUnderlayDim). Takes effect with the next submitted
-     * frame: the shell always submits its own surface right after changing
-     * this, so no recomposite happens here.
-     */
+    /** Stage an immutable shell snapshot alongside the retained app screen. */
+    public void submitShellScene(java.nio.ByteBuffer bytes, int paintMs, int frameId) {
+        compositor.setShellScene(bytes);
+        SurfaceCompositor.Composite composite = compositor.composite();
+        submitComposedFrame(composite, BmpUtil.pack4bppFromGray8(composite.screenGray, composite.width, composite.height), paintMs, frameId);
+    }
+
+    /** Legacy compositor dimming for callers without a shell scene. */
     public void setUnderlayDim(int belowZOrder, int factor256) {
         compositor.setUnderlayDim(belowZOrder, factor256);
     }
@@ -1365,7 +1371,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     /**
      * As above, with the frame's glyph draws (see SurfaceCompositor's glyph
      * overload for the buffer format): the surface's full text content as
-     * structured draws, letting the texture-cache planner ship glyphs as
+     * structured draws, letting the resource-cache planner ship glyphs as
      * on-glasses cached draws instead of pixels. Null when the submitter has
      * no glyph metadata; the pixels alone remain fully correct.
      */
@@ -1393,7 +1399,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         // format the wire planners consume; BMP framing is added later only for
         // the uncompressed fallback.
         FrameTimings.getInstance().spanStart(frameId, "pack-4bpp");
-        byte[] packed = BmpUtil.pack4bppFromGray8(composite.gray, composite.width, composite.height);
+        byte[] packed = BmpUtil.pack4bppFromGray8(composite.screenGray, composite.width, composite.height);
         FrameTimings.getInstance().spanEnd(frameId, "pack-4bpp");
         submitComposedFrame(composite, packed, paintMs, frameId);
     }
@@ -1505,6 +1511,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                 desiredFrameId = frameId;
                 desiredDraws = composite.draws;
                 desiredCopies = composite.copies;
+                desiredShellScene = composite.shellScene;
             }
         }
         if (stale) {
@@ -1534,9 +1541,9 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
 
     /**
      * Upload immutable glyphs and images before a frame references them. Replacement is
-     * accepted only while the image pipeline is idle, so new cache bytes cannot
-     * overwrite offsets used by an already-planned draw. A later frame follows
-     * these mode-18 uploads on the ordered transport.
+     * accepted only while the image pipeline is idle, so a reset cannot evict resources an
+     * already-planned draw uses. Resource commands precede the next frame on the ordered
+     * transport; glyphs travel as per-font resources (see FontResourceAtlas).
      */
     public TexturePrefetchResult prefetchTextures(int[] kinds, int[] resourceIds, int[] encodings, boolean replace) {
         TexturePrefetchResult result;
@@ -1544,48 +1551,62 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             int requested = resourceIds == null ? 0 : resourceIds.length;
             if (kinds == null || encodings == null || resourceIds == null
                     || kinds.length != requested || encodings.length != requested) {
-                return new TexturePrefetchResult("invalid", requested, 0, 0, textureCache.usedBytes());
+                return new TexturePrefetchResult("invalid", requested, 0, 0, resourceCache.usedBytes());
             }
             if (!running || !sessionReady || shutdownRequested || !fixedLayoutCreated
                     || !customFirmwareDetected
                     || !connectionOptions.TEXTURE_CACHE_FRAMES) {
-                return new TexturePrefetchResult("unsupported", requested, 0, 0, textureCache.usedBytes());
+                return new TexturePrefetchResult("unsupported", requested, 0, 0, resourceCache.usedBytes());
             }
             boolean busy = prewrittenMessage != null
-                    && ("image".equals(prewrittenMessage.kind) || "texcache".equals(prewrittenMessage.kind));
+                    && ("image".equals(prewrittenMessage.kind) || "resources".equals(prewrittenMessage.kind));
             for (OutboundMessage message : pendingMessages) {
-                busy |= "image".equals(message.kind) || "texcache".equals(message.kind);
+                busy |= "image".equals(message.kind) || "resources".equals(message.kind);
             }
             for (OutboundMessage message : inFlightMessages) {
-                busy |= "image".equals(message.kind) || "texcache".equals(message.kind);
+                busy |= "image".equals(message.kind) || "resources".equals(message.kind);
             }
             synchronized (desiredTilesLock) {
                 busy |= desiredFrameId != 0;
             }
             if (busy && replace) {
-                return new TexturePrefetchResult("busy", requested, 0, 0, textureCache.usedBytes());
+                return new TexturePrefetchResult("busy", requested, 0, 0, resourceCache.usedBytes());
             }
-            if (replace) textureCache.reset();
+            if (replace) resourceCache.reset();
             java.util.HashSet<String> unique = new java.util.HashSet<>();
-            int resident = 0;
+            java.util.LinkedHashMap<Integer, java.util.LinkedHashSet<Integer>> fontRequests = new java.util.LinkedHashMap<>();
+            java.util.ArrayList<CachedResource> resources = new java.util.ArrayList<>();
+            java.util.ArrayList<Integer> covered = new java.util.ArrayList<>();
             for (int i = 0; i < requested; i++) {
                 int kind = kinds[i], resourceId = resourceIds[i], encoding = encodings[i];
                 String key = kind + ":" + resourceId + ":" + encoding;
                 if (resourceId <= 0 || !unique.add(key)) continue;
-                int offset = kind == SurfaceCompositor.ScreenDraw.KIND_GLYPH
-                        ? textureCache.ensureGlyph(resourceId, encoding, GlyphAtlas.get(resourceId, encoding))
-                        : kind == SurfaceCompositor.ScreenDraw.KIND_IMAGE
-                            ? textureCache.ensureImage(resourceId, ImageAtlas.get(resourceId)) : -1;
-                if (offset >= 0) resident++;
+                if (kind == SurfaceCompositor.ScreenDraw.KIND_GLYPH && GlyphAtlas.get(resourceId, encoding) != null) {
+                    fontRequests.computeIfAbsent(resourceId, ignored -> new java.util.LinkedHashSet<>()).add(encoding);
+                } else if (kind == SurfaceCompositor.ScreenDraw.KIND_IMAGE) {
+                    ImageAtlas.Entry image = ImageAtlas.get(resourceId);
+                    if (image != null) { resources.add(image.getResource()); covered.add(1); }
+                }
             }
-            int uploadBytes = textureCache.pendingUploadBytes();
-            for (byte[] upload : textureCache.drainUploadPayloads(3600)) {
-                enqueueTextureUploadLocked(upload);
+            for (java.util.Map.Entry<Integer, java.util.LinkedHashSet<Integer>> font : fontRequests.entrySet()) {
+                FontResourceAtlas.Font atlas = FontResourceAtlas.Companion.get(font.getKey(), font.getValue());
+                int count = 0;
+                for (int encoding : font.getValue()) if (atlas.getEncodings().contains(encoding)) count++;
+                resources.add(atlas.getResource());
+                covered.add(count);
+            }
+            int resident = 0;
+            int[] ids = resources.isEmpty() ? new int[0] : resourceCache.prepare(resources);
+            for (int i = 0; i < ids.length; i++) if (ids[i] >= 0) resident += covered.get(i);
+            int uploadBytes = 0;
+            for (byte[] command : resourceCache.drainCommands(3600)) {
+                uploadBytes += command.length;
+                enqueueResourceCommandLocked(command);
             }
             String state = resident == unique.size() ? "queued" : (resident == 0 ? "cache_full" : "partial");
-            result = new TexturePrefetchResult(state, unique.size(), resident, uploadBytes, textureCache.usedBytes());
+            result = new TexturePrefetchResult(state, unique.size(), resident, uploadBytes, resourceCache.usedBytes());
             logLine("texture prefetch " + state + " resident=" + resident + "/" + unique.size()
-                    + " upload=" + uploadBytes + "B cache=" + textureCache.usedBytes() + "B");
+                    + " upload=" + uploadBytes + "B cache=" + resourceCache.usedBytes() + "B");
         }
         interruptibleSleep.interrupt();
         return result;
@@ -1736,10 +1757,10 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
      */
     public boolean suspendEvenHubSession() {
         // Ending the plugin task releases the fb lease, which frees the
-        // on-glasses texture cache; forget it phone-side either way (a lost
+        // on-glasses resource cache; forget it phone-side either way (a lost
         // ack may still have taken effect).
         synchronized (lock) {
-            textureCache.reset();
+            resourceCache.reset();
         }
         if (sendShutdownInternal(0, false)) {
             batteryActivity.transition("sessionActive", false, SystemClock.elapsedRealtime());
@@ -2884,7 +2905,8 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
                         return ConnectionOptions.IDLE_SLEEP_MS;
                     }
 
-                    if (messageToPrewrite == null && sessionReady && windowHasRoom && !pendingMessages.isEmpty()) {
+                    if (messageToPrewrite == null && sessionReady && windowHasRoom && !pendingMessages.isEmpty()
+                            && CfwMessageWindow.canSend(inFlightMessages, pendingMessages.peekFirst())) {
                         messageToWrite = pendingMessages.removeFirst();
                         logInfo("sending pending message: " + messageToWrite.label);
                     } else if (messageToPrewrite == null && !shutdownRequested && !benchmarkActive
@@ -3352,7 +3374,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     private void enqueueFirmwareDebugFlagsLocked() {
         boolean show = firmwareDebugFlagsEnabled;
         int sub = show ? 2 : 1;
-        byte[] payload = new byte[] { (byte) 7, (byte) sub };
+        byte[] payload = new byte[] { (byte) CfwMessageTypeKt.CFW_MSG_DIAGNOSTICS, (byte) sub };
         OutboundMessage message = messageBuilder.imagePayload(
             DASHBOARD_TILE, nextMapSessionId(), payload,
             "fw-debug-flags " + (show ? "show" : "hide"),
@@ -3370,14 +3392,14 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         int sentState = enable ? 1 : 0;
         byte[] payload = enable
             ? new byte[] {
-                (byte) 10,
+                (byte) CfwMessageTypeKt.CFW_MSG_COMPASS,
                 (byte) 2,
                 (byte) (COMPASS_REPORT_INTERVAL_MS & 0xff),
                 (byte) ((COMPASS_REPORT_INTERVAL_MS >> 8) & 0xff),
                 (byte) (COMPASS_MIN_CHANGE_DEGREES & 0xff),
                 (byte) ((COMPASS_MIN_CHANGE_DEGREES >> 8) & 0xff),
             }
-            : new byte[] { (byte) 10, (byte) 0 };
+            : new byte[] { (byte) CfwMessageTypeKt.CFW_MSG_COMPASS, (byte) 0 };
         OutboundMessage message = messageBuilder.imagePayload(
             "compass-control",
             DASHBOARD_TILE,
@@ -3425,6 +3447,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         int frameId;
         SurfaceCompositor.ScreenDraw[] draws;
         SurfaceCompositor.ScreenCopy[] copies;
+        ShellScene scene;
         synchronized (desiredTilesLock) {
             packed = desiredPacked;
             width = desiredWidth;
@@ -3433,114 +3456,27 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
             frameId = desiredFrameId;
             draws = desiredDraws;
             copies = desiredCopies;
+            scene = desiredShellScene;
             desiredFrameId = 0;
         }
         if (packed == null) {
             packed = new byte[0];
         }
-        if (lastEnqueuedWidth == width && lastEnqueuedHeight == height
-                && Arrays.equals(packed, lastEnqueuedPacked)) {
-            lastEnqueuedFingerprint = fingerprint;
-            finishFrame(frameId, "discarded: image content identical to displayed");
-            return;
-        }
-
-        // A retained-copy hint can shift the firmware shadow before repairing
-        // the exposed edge. Build that candidate before texture planning: a
-        // sideways text animation should not resend every cached-glyph
-        // placement when a 17-byte mode-9 copy plus a narrow repair is cheaper.
-        BleImageOptimizer.CopyPlan copyCandidate = null;
-        int copyOrdinaryBytes = Integer.MAX_VALUE;
-        if(retainedCopySupported&&connectionOptions.RETAINED_COPY_FRAMES&&connectionOptions.INCREMENTAL_FRAMES
-                &&copies!=null&&copies.length>0&&lastEnqueuedPacked.length>0
-                &&lastEnqueuedWidth==width&&lastEnqueuedHeight==height){
-            int baseFid=nextImageFrameId;
-            FrameTimings.getInstance().spanStart(frameId,"retained-copy-plan");
-            BleImageOptimizer.CopyPlan copy=BleImageOptimizer.buildRetainedCopyPayload(
-                    lastEnqueuedPacked,packed,width,height,copies,baseFid,ConnectionOptions.MULTI_RECT_MAX_RECTS);
-            if(copy!=null){
-                BleImageOptimizer.TileImagePlan keyframe=new BleImageOptimizer.TileImagePlan(0,DASHBOARD_TILE,packed,width,height,0);
-                copyOrdinaryBytes=keyframe.payload.length;
-                BleImageOptimizer.IncrementalPlan single=BleImageOptimizer.buildIncrementalImagePayload(lastEnqueuedPacked,packed,width,height,baseFid);
-                if(single!=null){
-                    copyOrdinaryBytes=Math.min(copyOrdinaryBytes,single.payload.length);
-                    if(connectionOptions.MULTI_RECT_FRAMES){BleImageOptimizer.MultiRectPlan multi=BleImageOptimizer.buildMultiRectImagePayload(lastEnqueuedPacked,packed,width,height,baseFid,ConnectionOptions.MULTI_RECT_MAX_RECTS);if(multi!=null)copyOrdinaryBytes=Math.min(copyOrdinaryBytes,multi.payload.length);}
-                }
-                if(copy.payload.length<copyOrdinaryBytes)copyCandidate=copy;
-            }
-            FrameTimings.getInstance().spanEnd(frameId,"retained-copy-plan");
-        }
-
-        // A copy with no repairs is already the complete frame in 21 bytes
-        // for the common one-region case. Avoid a second full texture scan.
-        if(copyCandidate!=null&&copyCandidate.repairRectCount==0){
-            nextImageFrameId=copyCandidate.nextFid;
-            BleImageOptimizer.TileImagePlan plan=new BleImageOptimizer.TileImagePlan(0,DASHBOARD_TILE,packed,width,height,nextMapSessionId(),copyCandidate.payload);
-            FrameTimings.getInstance().log(frameId,"retained-copy exact copies="+copyCandidate.copyCount+" payload="+copyCandidate.payload.length+"B (vs raster "+copyOrdinaryBytes+"B)");
-            finishEnqueueDesiredImageLocked(plan,fingerprint,paintMs,frameId);return;
-        }
-
-        // Texture-cache path: ship text as cached-glyph draws, punching their
-        // ink out of the baked deltas. With a retained-copy candidate, plan
-        // only the exposed repair region and prefix its mode-9 move. Planning
-        // uses a forked cache model so a discarded candidate cannot falsely
-        // mark unsent texture uploads resident.
-        if (customFirmwareDetected && connectionOptions.TEXTURE_CACHE_FRAMES
-                && draws != null && draws.length > 0 && packed.length > 0) {
-            SurfaceCompositor.ScreenDraw[] textureDraws = firmwareFontCompatible
+        if (customFirmwareDetected && packed.length > 0) {
+            // Firmware-font runs stay baked unless both lenses run the bundled font base.
+            SurfaceCompositor.ScreenDraw[] textureDraws = draws == null || firmwareFontCompatible
                     ? draws : withoutFirmwareFontDraws(draws);
-            byte[] deltaBase = (connectionOptions.INCREMENTAL_FRAMES && lastEnqueuedPacked.length > 0
-                    && lastEnqueuedWidth == width && lastEnqueuedHeight == height)
-                    ? lastEnqueuedPacked : null;
-            TextureCacheState plannedCache = copyCandidate == null ? textureCache : textureCache.fork();
-            String textureSpan=copyCandidate==null?"texture-plan":"copy-texture-plan";
-            FrameTimings.getInstance().spanStart(frameId, textureSpan);
-            TexturePlanner.Result tex = copyCandidate == null
-                    ? TexturePlanner.plan(deltaBase, packed, width, height, textureDraws, plannedCache,
-                        nextImageFrameId, connectionOptions.MULTI_RECT_FRAMES,
-                        ConnectionOptions.MULTI_RECT_MAX_RECTS)
-                    : TexturePlanner.planAfterCopies(copyCandidate, packed, width, height, textureDraws, plannedCache,
-                        nextImageFrameId, connectionOptions.MULTI_RECT_FRAMES,
-                        ConnectionOptions.MULTI_RECT_MAX_RECTS);
-            if (tex != null) {
-                FrameTimings.getInstance().spanEnd(frameId, textureSpan);
-                int textureWireBytes=tex.payload.length;
-                for(byte[] upload:tex.uploads)textureWireBytes+=upload.length;
-                if(copyCandidate!=null&&copyCandidate.payload.length<textureWireBytes){
-                    nextImageFrameId=copyCandidate.nextFid;
-                    BleImageOptimizer.TileImagePlan plan=new BleImageOptimizer.TileImagePlan(0,DASHBOARD_TILE,packed,width,height,nextMapSessionId(),copyCandidate.payload);
-                    FrameTimings.getInstance().log(frameId,"retained-copy update copies="+copyCandidate.copyCount+" repairs="+copyCandidate.repairRectCount+" repaired="+copyCandidate.repairedBytes+"B payload="+copyCandidate.payload.length+"B (vs hybrid "+textureWireBytes+"B, raster "+copyOrdinaryBytes+"B)");
-                    finishEnqueueDesiredImageLocked(plan,fingerprint,paintMs,frameId);return;
-                }
-                if(plannedCache!=textureCache)textureCache.adopt(plannedCache);
-                nextImageFrameId = tex.nextFid;
-                for (byte[] upload : tex.uploads) enqueueTextureUploadLocked(upload);
-                BleImageOptimizer.TileImagePlan plan = new BleImageOptimizer.TileImagePlan(
-                        0, DASHBOARD_TILE, packed, width, height, nextMapSessionId(), tex.payload);
-                String texLog = (copyCandidate==null?"texture update ":"retained-copy+texture update copies="+copyCandidate.copyCount+" ")
-                        + (tex.fullFrame ? "full" : ("rects=" + tex.rectCount))
-                        + " glyphs=" + tex.drawnGlyphs + " runs=" + tex.runCount
-                        + " images=" + tex.drawnImages
-                        + " fw=" + tex.fwGlyphs + "/" + tex.fwRuns
-                        + " baked=" + tex.bakedCandidates
-                        + (tex.uploadBytes > 0 ? " upload=" + tex.uploadBytes + "B" : "")
-                        + " cache=" + textureCache.usedBytes() + "B"
-                        + " payload=" + tex.payload.length + "B"
-                        + " (rects " + tex.rectsMs + "ms, match " + tex.matchMs
-                        + "ms, cache " + tex.cacheMs + "ms, punch " + tex.punchMs
-                        + "ms, encode " + tex.encodeMs + "ms)";
-                FrameTimings.getInstance().log(frameId, texLog);
-                finishEnqueueDesiredImageLocked(plan, fingerprint, paintMs, frameId);
-                return;
-            }
-            FrameTimings.getInstance().spanEnd(frameId, textureSpan);
-        }
-
-        if(copyCandidate!=null){
-            nextImageFrameId=copyCandidate.nextFid;
-            BleImageOptimizer.TileImagePlan plan=new BleImageOptimizer.TileImagePlan(0,DASHBOARD_TILE,packed,width,height,nextMapSessionId(),copyCandidate.payload);
-            FrameTimings.getInstance().log(frameId,"retained-copy update copies="+copyCandidate.copyCount+" repairs="+copyCandidate.repairRectCount+" repaired="+copyCandidate.repairedBytes+"B payload="+copyCandidate.payload.length+"B (vs raster "+copyOrdinaryBytes+"B)");
-            finishEnqueueDesiredImageLocked(plan,fingerprint,paintMs,frameId);return;
+            boolean useCopies = retainedCopySupported && connectionOptions.RETAINED_COPY_FRAMES && copies != null && copies.length > 0;
+            ScenePlanner.Plan rendered = scenePlanner.plan(packed, width, height, textureDraws, scene, nextImageFrameId,
+                connectionOptions.TEXTURE_CACHE_FRAMES, connectionOptions.INCREMENTAL_FRAMES,
+                connectionOptions.MULTI_RECT_FRAMES, ConnectionOptions.MULTI_RECT_MAX_RECTS, useCopies ? copies : null);
+            nextImageFrameId = rendered.getNextFid();
+            List<byte[]> commands = rendered.getCommands();
+            for (int i = 0; i < commands.size() - 1; i++) enqueueResourceCommandLocked(commands.get(i));
+            BleImageOptimizer.TileImagePlan plan = new BleImageOptimizer.TileImagePlan(
+                0, DASHBOARD_TILE, packed, width, height, nextMapSessionId(), commands.get(commands.size() - 1));
+            finishEnqueueDesiredImageLocked(plan, fingerprint, paintMs, frameId);
+            return;
         }
 
         FrameTimings.getInstance().spanStart(frameId, "compress-and-plan");
@@ -3630,23 +3566,23 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     }
 
     /**
-     * Enqueue one mode-18 texture-cache upload ahead of the image message that
+     * Enqueue one resource eviction/upload command ahead of the image message that
      * references its glyphs (the transport is FIFO, so no ack round trip is
      * needed before use). A timeout means the on-glasses cache state is
      * unknown; forget everything phone-side (glyphs re-upload lazily) and let
      * the accompanying image update's own timeout drive the frame resync.
      */
-    private void enqueueTextureUploadLocked(byte[] payload) {
+    private void enqueueResourceCommandLocked(byte[] payload) {
         OutboundMessage message = messageBuilder.imagePayload(
-            "texcache",
+            "resources",
             DASHBOARD_TILE,
             nextMapSessionId(),
             payload,
-            "texture upload " + payload.length + "B",
+            "resource command " + payload.length + "B",
             connectionOptions.sendImagesToLeft);
         message.onTimeout = () -> {
-            textureCache.reset();
-            logLine("texture upload ack timeout; texture cache state reset");
+            resourceCache.reset();
+            logLine("resource command ack timeout; resource cache state reset");
         };
         pendingMessages.addLast(message);
         logLine("queue " + message.label);
@@ -4175,10 +4111,10 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         // image is a full keyframe rather than a delta onto a stale base.
         lastEnqueuedPacked = new byte[0];
         lastEnqueuedFingerprint = "";
-        // Queued texture uploads (if any) were dropped with the rest, and the
+        // Queued resource commands (if any) were dropped with the rest, and the
         // session churn behind a full clear may have freed the on-glasses
         // cache; forget it phone-side so glyphs re-upload lazily.
-        textureCache.reset();
+        resourceCache.reset();
     }
 
     /**
@@ -4226,7 +4162,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
         }
         lastEnqueuedPacked = new byte[0];
         lastEnqueuedFingerprint = "";
-        textureCache.reset();
+        resourceCache.reset();
     }
 
     /** Any image update whose fragments are still queued (not yet sent). */
@@ -4766,19 +4702,7 @@ public class FaceclawBleCommunicator implements FaceclawBleListener, Runnable, D
     }
 
     private void logLine(String line) {
-        String taggedLine = tagMessage(line);
-        android.util.Log.i(TAG, taggedLine);
-        final FaceclawBleCommunicatorListener current = listener;
-        if (current == null) {
-            return;
-        }
-        mainHandler.post(() -> {
-            try {
-                current.onLog(taggedLine);
-            } catch (Throwable t) {
-                logWarn("listener onLog failed", t);
-            }
-        });
+        android.util.Log.i(TAG, tagMessage(line));
     }
 
     private static String timestamp(long elapsedMs) {

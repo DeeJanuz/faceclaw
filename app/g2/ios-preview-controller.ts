@@ -352,9 +352,7 @@ export class IosPreviewController {
       try {
         if (this.shellDirty) {
           this.shellDirty = false
-          const { image, draws } = flattenPlanesWithDraws(shell.paintSurface(), { width: 640, height: 480 })
-          this.compositor.submitSurfaceFrame('shell', image.pixels, { x: 0, y: 0, width: 640, height: 480 }, prepareFrameDraws(draws))
-          this.compositor.setUnderlayDim(1, shell.underlayDim())
+          this.compositor.setShellScene(shell.paintScene())
         }
         const { pixels, textures } = this.compositor.compositeFrame()
         this.session?.setFrame(pixels, textures)
@@ -505,6 +503,7 @@ export class IosPreviewController {
       ? new IosNavigationSensors(event => worker.postMessage({ type: 'navigation-sensors', event })) : undefined
     const host = new WorkerAppHost({
       appId, worker, navigationSensors,
+      onStopping: () => { if (this.appHosts.get(appId) === host) this.appHosts.delete(appId) },
       playBuzzerSequence: payload => this.actions.playBuzzerSequence(payload),
       openUrl: url => { void Utils.openUrl(url) },
       configureSurface: async (id, visible, heightMode) => {

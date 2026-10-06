@@ -1,3 +1,5 @@
+import { shellCrop } from "../../graphics/shell-scene";
+import type { Plane } from "../../graphics/plane";
 import { G2_LENS_HEIGHT, G2_LENS_WIDTH, GrayImage } from "../../graphics/image";
 import { getDefaultMediumFont, getDefaultSmallFont } from "../../graphics/ui-fonts";
 import { truncateText } from "../../graphics/textwrap";
@@ -18,7 +20,7 @@ import {
 } from "../dashboard-settings";
 import { formatClockDate, formatClockTime } from "../clock-format";
 import { getFont } from "../../graphics/bdffont";
-import { Layer } from "../layers";
+import { Layer, LayerStack } from "../layers";
 import { scrollToKeepSelectionVisible } from "../menu";
 import { lineStep } from "../metrics";
 import { showWindowTopBar, windowLayoutPolicy } from "../extension-settings";
@@ -225,6 +227,21 @@ export class ShellChromeLayer implements Layer {
     return image;
   }
 
+  paintParts(): Plane[] {
+    const state = this.getState(), parts: Plane[] = [];
+    if (sidebarStripVisible(state.focus, state.foregroundAppId)) {
+      const canvas = new GrayImage(G2_LENS_WIDTH, G2_LENS_HEIGHT, 0);
+      this.drawSidebar(canvas, state);
+      parts.push(shellCrop(canvas, 0, minWindowTop(state.foregroundAppId), SIDEBAR_WIDTH, MIN_WINDOW_HEIGHT, 1));
+    }
+    const canvas = new GrayImage(G2_LENS_WIDTH, G2_LENS_HEIGHT, 0);
+    this.drawTopBar(canvas, state);
+    const left = sidebarStripVisible(state.focus, state.foregroundAppId) ? SIDEBAR_WIDTH : 0;
+    parts.push({ ...shellCrop(canvas, left, windowTop(state.foregroundHeightMode, state.foregroundAppId), G2_LENS_WIDTH-left, TOP_BAR_HEIGHT, 2), depth: -2 });
+    drawAmbientCards(canvas, parts);
+    return parts;
+  }
+
   handleInput(): void {
     // Shell input is handled by the shell state machine before it reaches the
     // layer stack; the chrome itself never consumes events.
@@ -282,16 +299,18 @@ export class ShellChromeLayer implements Layer {
     // the icon drawn inverted. Only the right column touches the separator;
     // a selected overflow icon gets a self-contained box instead.
     const sep = SIDEBAR_WIDTH - 1;
+    // Start beside the app content, leaving the area alongside the top bar open.
+    const sepTop = Math.max(bandTop, windowTop(state.foregroundHeightMode, state.foregroundAppId) + TOP_BAR_HEIGHT);
     const selVisible = state.selectedIndex >= this.scrollRow && state.selectedIndex < lastVisible;
     const selSlot = selVisible ? slotOf(state.selectedIndex) : null;
     const selTabTop = selSlot && selSlot.column === firstColumn ? selSlot.y - 2 : null;
     const thickness = windowLayoutPolicy().dividerWidth;
     const divider = (top: number, bottom: number) => image.fillRect(sep - thickness + 1, top, thickness, bottom - top + 1, BORDER_VALUE);
     if (selTabTop !== null) {
-      divider(bandTop, selTabTop);
+      divider(sepTop, selTabTop);
       divider(selTabTop + iconSize + 4, bandBottom - 1);
     } else {
-      divider(bandTop, bandBottom - 1);
+      divider(sepTop, bandBottom - 1);
     }
 
     for (let index = this.scrollRow; index < lastVisible; index++) {
@@ -308,13 +327,17 @@ export class ShellChromeLayer implements Layer {
         // slot, so anything wider would clip at the screen edge.
         drawSelectionBox(image, left, y - 2, variant.columnWidth, iconSize + 4, focused);
       }
-      window.drawIcon(image, x, y, iconSize, focused);
+      // Paint unselected icons into their own resource so only the replayed copy moves.
+      const icon = selected ? image : new GrayImage(iconSize, iconSize + 1);
+      const iconX = selected ? x : 0, iconY = selected ? y : 1;
+      window.drawIcon(icon, iconX, iconY, iconSize, focused);
       if (window.attention) {
         // Black dot on the white focused tab, white dot otherwise. A deferred
         // image (not a raster fill) so it renders above the icon, which is
         // itself a deferred draw.
-        image.drawImage(attentionDot(focused ? SHELL_OPAQUE_BLACK : 255), x + iconSize - 7, y - 1);
+        icon.drawImage(attentionDot(focused ? SHELL_OPAQUE_BLACK : 255), iconX + iconSize - 7, iconY - 1);
       }
+      if (!selected) image.drawDepthImage(icon, x, y - 1, -2);
     }
 
     // Chevrons center over the icon area, which in the one-column variant is
@@ -514,7 +537,8 @@ const AMBIENT_MAX_LINES_PER_CARD = 3;
  * bottom of the window band and newer ones stack above it. Cards that would
  * cross into the top bar are dropped rather than clipped.
  */
-function drawAmbientCards(image: GrayImage): void {
+const ambientKeys = new Map<string, number>();
+function drawAmbientCards(image: GrayImage, parts?: Plane[]): void {
   const cards = activeAmbientCards();
   if (!cards.length) return;
   const font = getDefaultSmallFont();
@@ -528,16 +552,22 @@ function drawAmbientCards(image: GrayImage): void {
     const height = 2 * AMBIENT_CARD_PADDING_Y + lines.length * lineStep(font);
     const y = bottom - height;
     if (y < bandTop + TOP_BAR_HEIGHT) break;
-    image.fillRoundedRect(x, y, AMBIENT_CARD_WIDTH, height, SHELL_OPAQUE_BLACK, 6);
-    image.drawRoundedRect(x, y, AMBIENT_CARD_WIDTH, height, 90, 6);
+    const target = parts ? new GrayImage(image.width, image.height, 0) : image;
+    target.fillRect(x, y, AMBIENT_CARD_WIDTH, height, SHELL_OPAQUE_BLACK);
+    target.drawRect(x, y, AMBIENT_CARD_WIDTH, height, 90);
     for (let index = 0; index < lines.length; index++) {
-      image.drawText(
+      target.drawText(
         font,
         x + AMBIENT_CARD_PADDING_X,
         y + AMBIENT_CARD_PADDING_Y + index * lineStep(font),
         truncateText(font, lines[index]!, textWidth),
         index === 0 ? 220 : 160,
       );
+    }
+    if (parts) {
+      let key = ambientKeys.get(card.id);
+      if (key === undefined) { key = LayerStack.allocateShellKey(); ambientKeys.set(card.id, key); }
+      parts.push(shellCrop(target, x, y, AMBIENT_CARD_WIDTH, height, key));
     }
     bottom = y - AMBIENT_CARD_GAP;
   }
@@ -571,7 +601,7 @@ function attentionDot(value: number): GrayImage {
 
 const TAB_RADIUS = 6;
 // How far the diversion pokes past the separator into the main area.
-const TAB_EXTEND = 1;
+const TAB_EXTEND = 0;
 const TAB_STROKE = 150;
 
 /**

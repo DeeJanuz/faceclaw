@@ -1,3 +1,5 @@
+import { CFW_MSG_CLEANUP, CFW_MSG_COMPASS, CFW_MSG_EVICT_RESOURCE, CFW_MSG_FULL_FRAME, CFW_MSG_PRESENT } from "./cfw-message-type";
+import { drawMessages } from './draw-protocol'
 import { setBrightness } from './brightness-protocol'
 import { AncsClient, ANCS_FIRMWARE_VERSION } from './ancs-client'
 import { type CompassEvent } from '../native/compass-types'
@@ -254,7 +256,7 @@ export class GlassesSession {
     return Promise.all(['right', 'left'].map(role => this.send(role, protocol.SID.settings, 0x20, protocol.framebufferLease(acquire))))
   }
   private requestCfw(role: string, payload: Uint8Array): Promise<void> {
-    if (payload.length > CFW_MAX_MESSAGE) return Promise.reject(new Error('CFW message too large'))
+    if (payload.length > CFW_MAX_MESSAGE - 16) return Promise.reject(new Error('CFW message too large'))
     return new Promise((resolve, reject) => {
       const item: CfwPending = { role, payload, checksum: protocol.crc16(payload), magic: this.nextMagic(), ackLenses: 0, retries: 0,
         retryPending: false, deadline: 0, resolve, reject }
@@ -480,7 +482,7 @@ export class GlassesSession {
       const enabled = !this.compassStopping && this.compassWanted
       if (this.compassSent === enabled) return
       // Same CFW mode 10, 100 ms report interval and zero minimum change as Android.
-      await this.requestCfw('left', new Uint8Array(enabled ? [10, 2, 100, 0, 0, 0] : [10, 0]))
+      await this.requestCfw('left', new Uint8Array(enabled ? [CFW_MSG_COMPASS, 2, 100, 0, 0, 0] : [CFW_MSG_COMPASS, 0]))
       if (generation === this.generation) this.compassSent = enabled
     }).catch(error => { if (generation === this.generation) this.fail(error, true) })
     this.compassWork = work
@@ -496,6 +498,7 @@ export class GlassesSession {
     this.timer = setTimeout(() => { this.timer = null; void this.pump() }, delay)
   }
   private canSendDisplay(): boolean {
+    if (this.displaySending?.commands[this.displaySending.offset][0] === CFW_MSG_EVICT_RESOURCE && this.cfwPending.length) return false
     // Also bound completed frames retained behind a missing/out-of-order ACK.
     return this.displayInFlight < DISPLAY_WINDOW_SIZE && !!(this.displaySending ||
       (this.latest && !this.charging && this.displayFrames.length < DISPLAY_WINDOW_SIZE))
@@ -507,28 +510,32 @@ export class GlassesSession {
         const textureFrame = this.latestTextures; this.latestTextures = null
         // Compare with the last enqueued image, not the last ACKed one. In an
         // A -> B -> A sequence, B may still be in flight when A is requested.
-        if (this.lastEnqueued && packed.every((value, i) => value === this.lastEnqueued![i])) continue
+        if (!textureFrame && this.lastEnqueued && packed.every((value, i) => value === this.lastEnqueued![i])) continue
         const texturePlan = textureFrame ? this.textures?.plan(this.lastEnqueued, packed, textureFrame, this.nextImageFrameId) : null
         let commands: Uint8Array[]
         if (texturePlan) {
-          // Uploads participate in the same ordered, acknowledged command window as
+          // Resource commands participate in the same ordered, acknowledged command window as
           // the image. Coalescing only happens before planning mutates residency.
-          commands = [...texturePlan.uploads, texturePlan.payload]
+          commands = [...texturePlan.resourceCommands, texturePlan.payload]
           this.nextImageFrameId = texturePlan.nextFid
-          this.log(`Display textures (${texturePlan.uploads.length} uploads, cache=${texturePlan.usedBytes}B)`)
+          this.log(`Display textures (${texturePlan.resourceCommands.length} resource commands, cache=${texturePlan.usedBytes}B)`)
         } else {
           const delta = buildBoundingBoxPayload(this.lastEnqueued, packed, 640, 480, this.nextImageFrameId)
-          const payload = delta ?? protocol.concat(new Uint8Array([6]), protocol.rle4(packed))
+          const payload = delta ?? protocol.concat(new Uint8Array([CFW_MSG_FULL_FRAME]), protocol.rle4(packed))
           if (delta) this.nextImageFrameId = this.nextImageFrameId >= 0xfffe ? 1 : this.nextImageFrameId + 1
-          commands = payload.length <= CFW_MAX_MESSAGE ? [payload] : buildFullFrameBands(packed, 640, 480, this.nextImageFrameId)
-          if (payload.length > CFW_MAX_MESSAGE) for (const _ of commands)
+          commands = payload.length <= CFW_MAX_MESSAGE - 16 ? [payload] : buildFullFrameBands(packed, 640, 480, this.nextImageFrameId)
+          if (payload.length > CFW_MAX_MESSAGE - 16) for (const _ of commands)
             this.nextImageFrameId = this.nextImageFrameId >= 0xfffe ? 1 : this.nextImageFrameId + 1
+          commands = [...commands.flatMap(command => drawMessages(command)), new Uint8Array([CFW_MSG_PRESENT])]
           this.log(`Display ${delta ? 'bbox' : 'full'} (${commands.length} CFW commands)`)
         }
         this.displaySending = { packed, commands, offset: 0, pending: 0 }
         this.displayFrames.push(this.displaySending); this.lastEnqueued = packed
       }
-      const frame = this.displaySending, payload = frame.commands[frame.offset++]
+      const frame = this.displaySending
+      // Drain earlier commands before evicting: recovery may replay any unresolved draw/upload.
+      if (frame.commands[frame.offset][0] === CFW_MSG_EVICT_RESOURCE && this.cfwPending.length) return
+      const payload = frame.commands[frame.offset++]
       frame.pending++; this.displayInFlight++
       if (frame.offset >= frame.commands.length) this.displaySending = null
       // Writes serialize on L while up to three complete commands await their
@@ -554,7 +561,7 @@ export class GlassesSession {
     this.pumping = true; const generation = this.generation
     try {
       const now = Date.now()
-      // Firmware frees textures when its 90-second framebuffer lease expires.
+      // Firmware frees resources when its 90-second framebuffer lease expires.
       // After a long iOS suspension, reconnect rather than replaying pending
       // draws against unknown memory. Leave a margin for the two arm writes.
       if (now - this.lastLease >= 80_000) throw new Error('Display lease lapsed; restarting session')
@@ -628,7 +635,7 @@ export class GlassesSession {
     this.update('disconnecting', 'Disconnecting…'); this.reset()
     try {
       if (cleanup) {
-        await this.requestCfw('left', new Uint8Array([11]))
+        await this.requestCfw('left', new Uint8Array([CFW_MSG_CLEANUP]))
       }
     } catch (error) { this.log(`Disconnect cleanup: ${this.message(error)}`) }
     finally { this.reset(); this.closeLinks(); this.update('disconnected', 'Preview only') }

@@ -289,7 +289,6 @@ class DashboardController {
   private lockSurfaceConfigured = false;
   private lastLockScreenEnabled = lockScreenEnabledSetting.get();
   private offState: (() => void) | null = null;
-  private offLog: (() => void) | null = null;
   private offRing: (() => void) | null = null;
   private offBattery: (() => void) | null = null;
   private offSilentMode: (() => void) | null = null;
@@ -1489,10 +1488,6 @@ class DashboardController {
       this.communicator = communicator;
       const isCurrentConnection = () =>
         this.connectionGeneration === generation && this.communicator === communicator;
-      this.offLog = communicator.onLog((line) => {
-        if (!isCurrentConnection()) return;
-        this.appendLog(line);
-      });
       this.offState = communicator.onStateChange((state) => {
         if (!isCurrentConnection()) return;
         if (state.phase !== "connected") resetRingInputFilter();
@@ -1716,8 +1711,6 @@ class DashboardController {
       if (ownsController) {
         this.offState?.();
         this.offState = null;
-        this.offLog?.();
-        this.offLog = null;
         this.offRing?.();
         this.offRing = null;
         this.offBattery?.();
@@ -1876,8 +1869,6 @@ class DashboardController {
     this.clearDashboardTimer();
     this.offState?.();
     this.offState = null;
-    this.offLog?.();
-    this.offLog = null;
     this.offRing?.();
     this.offRing = null;
     this.offBattery?.();
@@ -2459,6 +2450,7 @@ class DashboardController {
     const host = new WorkerAppHost({
       appId,
       worker: createWorker(),
+      onStopping: () => { if (this.appHosts.get(appId) === host) this.appHosts.delete(appId); },
       configureSurface: (surfaceId, _visible, heightMode) =>
         this.configureWindowSurface(surfaceId, heightMode),
       setSurfaceVisible: (surfaceId, visible) => this.setWindowSurfaceVisible(surfaceId, visible),
@@ -2695,7 +2687,7 @@ class DashboardController {
     beginRenderPass(!wantFreshData);
     const paintStartedAtMs = Date.now();
     const planes = frameTimings.span(frameId, "paint", () =>
-      frameTimings.runWithFrame(frameId, () => shell.paintSurface()),
+      frameTimings.runWithFrame(frameId, () => shell.paintScene()),
     );
     const notificationState = this.extensionSurfaces.get("ui.notifications");
     const notificationWakeFrame = this.pendingNotificationWake?.readyForDisplay ? this.pendingNotificationWake : null;
@@ -2718,32 +2710,7 @@ class DashboardController {
       frameTimings.finishFrame(frameId, "discarded: shell render with no display target");
       return;
     }
-    // A shell overlay that dims what it covers (a context menu) must dim the
-    // window surfaces too, which live below the shell surface in the
-    // compositor: forward the factor before this frame composites.
-    const underlayDim = shell.underlayDim();
-    if (underlayDim !== this.appliedUnderlayDim) {
-      this.appliedUnderlayDim = underlayDim;
-      await display.setUnderlayDim(SHELL_SURFACE_Z_ORDER, underlayDim);
-    }
-    const fingerprint = frameTimings.span(frameId, "fingerprint", () => planesFingerprint(planes));
-    const { image, draws } = frameTimings.span(frameId, "flatten", () => flattenPlanesWithDraws(planes));
-    const buffer = frameTimings.span(frameId, "to8bpp", () => image.to8bppBuffer());
-    const preparedDraws = frameTimings.span(frameId, "prepareFrameDraws", () => prepareFrameDraws(draws));
-    // Spanned because the bridge serializes Java calls: a frame can sit here
-    // behind another surface's submission, which is otherwise an unexplained
-    // jump between the paint spans and the composite.
-    await frameTimings.spanAsync(frameId, "submit", () =>
-      display.submitSurfaceFrame(
-        SHELL_SURFACE_ID,
-        buffer,
-        { x: 0, y: 0, width: image.width, height: image.height },
-        fingerprint,
-        paintMs,
-        frameId,
-        preparedDraws,
-      ),
-    );
+    await frameTimings.spanAsync(frameId, "submit", () => display.submitShellScene(planes, paintMs, frameId));
     const notificationWakeIsCurrent = notificationWakeFrame && this.pendingNotificationWake === notificationWakeFrame &&
       (!notificationWakeState || (notificationWakeState.layer === notificationWakeFrame &&
         notificationWakeState.presentationId === notificationWakePresentationId));
@@ -3036,7 +3003,7 @@ class DashboardController {
   }
 
   private appendLog(line: string): void {
-    console.log(`[${formatTimestamp(new Date())}] ${line}`);
+    //console.log(`[${formatTimestamp(new Date())}] ${line}`);
   }
 
   private setDisplayPreview(preview: ImageSource | null): void {
@@ -3053,6 +3020,22 @@ class DashboardController {
    */
   private previewTrailingTimer: ReturnType<typeof setTimeout> | null = null;
   private lastRecordCaptureAtMs = 0;
+  private phonePreviewVisible: (() => boolean) | null = null;
+
+  /** The main page owns the mirror; other phone pages must not keep it rendering. */
+  attachPhonePreview(isVisible: () => boolean): () => void {
+    this.phonePreviewVisible = isVisible;
+    this.lastConnectedPreviewUpdateAtMs = 0;
+    this.updateCompositePreview();
+    return () => {
+      if (this.phonePreviewVisible !== isVisible) return;
+      this.phonePreviewVisible = null;
+      if (this.previewTrailingTimer) {
+        clearTimeout(this.previewTrailingTimer);
+        this.previewTrailingTimer = null;
+      }
+    };
+  }
 
   /**
    * Refresh the preview now if the floor allows, otherwise once the floor
@@ -3060,6 +3043,7 @@ class DashboardController {
    * of waiting for the safety-net poll.
    */
   private schedulePreviewUpdate(): void {
+    if (!this.phonePreviewVisible && !this.screenRecordingActive) return;
     if (this.previewTrailingTimer) return;
     const wait = this.lastConnectedPreviewUpdateAtMs + CONNECTED_PREVIEW_MIN_UPDATE_MS - Date.now();
     if (wait <= 0) {
@@ -3087,6 +3071,13 @@ class DashboardController {
       return;
     }
     this.lastConnectedPreviewUpdateAtMs = now;
+    // A user-requested GIF is an independent consumer, including while the
+    // phone is asleep or another page/app is foregrounded.
+    if (this.screenRecordingActive && now - this.lastRecordCaptureAtMs >= RECORDING_MIN_CAPTURE_MS) {
+      this.lastRecordCaptureAtMs = now;
+      display.recordScreenFrame();
+    }
+    if (!this.phonePreviewVisible?.()) return;
     // The connected foreground service intentionally keeps this controller
     // alive after the phone UI is backgrounded. Do not keep constructing
     // 640x480 Android Bitmaps for a window that cannot display them: besides
@@ -3095,10 +3086,8 @@ class DashboardController {
     if (global.isAndroid) {
       const activity = Application.android.foregroundActivity;
       if (!activity || !activity.hasWindowFocus()) return;
-    }
-    if (this.screenRecordingActive && now - this.lastRecordCaptureAtMs >= RECORDING_MIN_CAPTURE_MS) {
-      this.lastRecordCaptureAtMs = now;
-      display.recordScreenFrame();
+      const power = activity.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager;
+      if (!power?.isInteractive()) return;
     }
     const preview = display.getCompositePreview(previewColorSetting.get() === "green");
     if (preview) {

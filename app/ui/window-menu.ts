@@ -46,6 +46,7 @@ export const WINDOW_MENU_LAYOUT: MenuLayout = {
   minHeight: 150,
   footer: gestureHints([[GESTURE_LONG_PRESS, "system menu"]]),
   dimUnderneath: CONTEXT_MENU_DIM,
+  depth: 4,
 };
 
 export class WindowMenuLayer extends MenuLayer {

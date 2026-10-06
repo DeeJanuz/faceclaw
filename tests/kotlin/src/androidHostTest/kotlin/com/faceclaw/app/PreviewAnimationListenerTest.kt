@@ -29,6 +29,9 @@ class PreviewAnimationListenerTest {
         c.setPreviewAnimationListener { pulled.add(assertNotNull(c.previewComposite()).gray) }
         c.submitSurface("app", ArrayByteReader(ByteArray(64)), 0, 0, 8, 8, "menu", ArrayByteReader(menu))
         val settled = settledPreview()
+        // At 0 ms the highlight starts just above this 8x8 screen, so that frame matches the settled
+        // one; a pull within the same millisecond as the submit would not show the slide at all.
+        Thread.sleep(10)
         assertFalse(assertNotNull(c.previewComposite()).gray.contentEquals(settled), "the first pull is mid-slide")
         // Redraws are 45 ms apart; 150 ms without one means the player has stopped.
         val deadline = System.nanoTime() + 2_000_000_000L

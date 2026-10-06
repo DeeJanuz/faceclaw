@@ -11,3 +11,7 @@ id = "generic-api-key"
   [[rules.allowlists]]
   description = "Made-up T3 Code pairing tokens used as parser test fixtures."
   paths = ['''tests/t3code-pairing\.test\.cjs''']
+
+  [[rules.allowlists]]
+  description = "FONT_KEY in the text-density demo is a font cache identifier, not a credential."
+  paths = ['''android-sdk/text-density-demo/src/main/java/com/faceclaw/textdensity/DensityService\.java''']

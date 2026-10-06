@@ -72,6 +72,7 @@ function shellVoiceHarness(prepare) {
   }
   imports['../layers'] = { noopLayerActions: {}, LayerStack: Stack };
   imports['./chrome-layer'] = { ShellChromeLayer: class {} };
+  imports['./notification-modal-queue'] = load('app/ui/shell/notification-modal-queue.ts');
   imports['../menu'] = { MenuLayer: class {} };
   imports['./voice-input'] = { VoiceInputLayer: Voice };
   imports['./voice-search'] = { VoiceSearchLayer: Voice };
@@ -183,6 +184,7 @@ test('the TypeScript proxy implements every callback the Kotlin listener declare
     },
     {
       global: { isAndroid: true },
+      java: { util: { ArrayList: class { size() { return 0; } } } },
       com: {
         faceclaw: {
           app: {
@@ -231,6 +233,7 @@ test('native snapshot changes invalidate icons and notify all observers without 
     },
     {
       global: { isAndroid: true },
+      java: { util: { ArrayList: class { size() { return 0; } } } },
       com: {
         faceclaw: {
           app: {
@@ -323,6 +326,7 @@ test('phone removal invalidates cached icons and reaches every removal observer'
     },
     {
       global: { isAndroid: true },
+      java: { util: { ArrayList: class { size() { return 0; } } } },
       com: {
         faceclaw: {
           app: {
@@ -448,10 +452,13 @@ test('notification reply capture paints one opaque view without painting the rea
   for (const statement of source.statements)
     if (ts.isImportDeclaration(statement)) imports[statement.moduleSpecifier.text] = {};
   imports['../../graphics/image'] = { GrayImage: Image };
+  imports['../../apps/external/extension-platform'] = { extensionPlatform: () => null };
+  imports['../dashboard-settings'] = { anthropicApiKeySetting: { get: () => '' } };
   imports['./input-dialog'] = {
     paintInputDialog: (image, content) => {
       painted = { image, content };
     },
+    createInputDialogMenu: () => ({ setItems() {} }),
   };
   const { VoiceInputLayer } = load('app/ui/shell/voice-input.ts', imports);
   const layer = new VoiceInputLayer({

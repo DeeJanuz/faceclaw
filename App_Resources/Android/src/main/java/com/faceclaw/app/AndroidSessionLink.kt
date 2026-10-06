@@ -6,6 +6,10 @@ import android.bluetooth.BluetoothGatt
 class AndroidSessionLink(private val bleManager: FaceclawBleManager) : SessionLink {
     override fun connect(address: String, timeoutMs: Int): Boolean = bleManager.connect(address, timeoutMs)
 
+    override fun beginConnect(address: String, background: Boolean): Boolean = bleManager.beginConnect(address, background)
+
+    override fun isConnected(address: String): Boolean = bleManager.isConnected(address)
+
     override fun requestHighPriority(address: String) {
         bleManager.requestConnectionPriority(address, BluetoothGatt.CONNECTION_PRIORITY_HIGH)
     }

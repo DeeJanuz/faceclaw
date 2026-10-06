@@ -1,7 +1,7 @@
 import { GrayImage } from "../graphics/image";
 import { singlePlane, type Plane } from "../graphics/plane";
 import { GESTURE_LONG_PRESS, GESTURE_SHORT_THEN_LONG_PRESS, gestureHints, type InputEvent } from "./gestures";
-import { type Layer, type LayerContext, LayerStack, noopLayerActions } from "./layers";
+import { type Layer, type LayerActions, type LayerContext, LayerStack, noopLayerActions } from "./layers";
 import { CONTEXT_MENU_DIM, MenuLayer, type MenuItem, type MenuLayout } from "./menu";
 import type { WorkerAppReply } from "./shell/worker-window";
 import { appMenuPolicy, navigationPolicy, effectiveExtension } from "./extension-settings";
@@ -134,11 +134,17 @@ export type WindowMenuOptions = {
  * content with the menu drawn over it and keeps the shell told about the
  * window's gesture bindings (whether it has a menu, whether it claims
  * long-press).
+ *
+ * Text-setting rows (textSettingMenuItem) work here too: the phone editor
+ * opens through the shell, and the app repaints the edit page as the setting
+ * changes. Call close() when the window closes so an open edit is ended.
  */
 export class WindowMenu {
   private stack: LayerStack | null = null;
   private remoteMenu: { id: number; items: MenuItem[]; menu: MenuLayer; ctx: LayerContext } | undefined;
   private reported: { hasAppMenu: boolean; claimsLongPress: boolean } | null = null;
+  /** A text-setting row opened the phone editor and nothing has closed it yet. */
+  private textEditOpen = false;
 
   constructor(private readonly options: WindowMenuOptions) {}
 
@@ -161,10 +167,10 @@ export class WindowMenu {
 
   /**
    * Open the menu, or the shell's system menu when this window has no
-   * entries. `items` overrides the window's own entries for an app that
-   * reuses this host for another list (a per-row action menu).
+   * entries. `items` (and optionally `title`) override the window's own for
+   * an app that reuses this host for another list (a per-row action menu).
    */
-  open(items: MenuItem[] = this.options.items()): void {
+  open(items: MenuItem[] = this.options.items(), title: string = this.options.title()): void {
     if (this.stack) return;
     items = appActionItems(items,
       () => this.options.post({ type: "sleep-display", windowId: this.options.windowId }),
@@ -178,15 +184,45 @@ export class WindowMenu {
       paint: () => this.options.paintBase(),
       handleInput: () => {},
     };
-    const stack = new LayerStack(base, { ...noopLayerActions }, this.options.size, this.options.isFocused);
-    const menu = new WindowMenuLayer(this.options.title(), items);
+    const actions = this.layerActions();
+    const stack = new LayerStack(base, actions, this.options.size, this.options.isFocused);
+    const menu = new WindowMenuLayer(title, items);
     stack.push(menu);
     this.stack = stack;
     if (effectiveExtension("ui.app-menu")) {
       const id = ++nextRemoteMenu;
-      this.remoteMenu = { id, items, menu, ctx: { stack, actions: { ...noopLayerActions } } };
-      this.options.post({ type: "present-app-menu", windowId: this.options.windowId, menuId: id, title: this.options.title(), items: items.map(item => ({ label: item.label, enabled: !(typeof item.disabled === "function" ? item.disabled() : item.disabled) })) });
+      this.remoteMenu = { id, items, menu, ctx: { stack, actions } };
+      this.options.post({ type: "present-app-menu", windowId: this.options.windowId, menuId: id, title, items: items.map(item => ({ label: item.label, enabled: !(typeof item.disabled === "function" ? item.disabled() : item.disabled) })) });
     }
+  }
+
+  /** Close the menu outright (the window is closing), ending any phone edit. */
+  close(): void {
+    this.stack?.clearToBase();
+    this.stack = null;
+    this.remoteMenu = undefined;
+    this.endTextEdit();
+  }
+
+  /**
+   * No-ops apart from the phone text editor, which the shell owns: a worker
+   * can only ask for it by setting id.
+   */
+  private layerActions(): LayerActions {
+    return {
+      ...noopLayerActions,
+      startTextSettingEdit: (setting) => {
+        this.textEditOpen = true;
+        this.options.post({ type: "start-text-setting-edit", settingId: setting.id });
+      },
+      endTextSettingEdit: () => this.endTextEdit(),
+    };
+  }
+
+  private endTextEdit(): void {
+    if (!this.textEditOpen) return;
+    this.textEditOpen = false;
+    this.options.post({ type: "end-text-setting-edit" });
   }
 
   /**
@@ -238,9 +274,7 @@ export class WindowMenu {
     // The shell opened its system menu over this window; close ours so the
     // two context menus never stack.
     if (event.type === "system-menu-opened") {
-      stack.clearToBase();
-      this.remoteMenu = undefined;
-      this.stack = null;
+      this.close();
       return;
     }
     await stack.handleInput(event);

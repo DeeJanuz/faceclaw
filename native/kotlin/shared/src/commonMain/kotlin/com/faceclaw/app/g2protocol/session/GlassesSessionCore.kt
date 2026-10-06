@@ -125,12 +125,19 @@ class GlassesSessionCore(
     internal val compassSubscriptions = CopyOnWriteList<CompassSubscription>(platform)
     internal val ambientLightListeners = CopyOnWriteList<FaceclawAmbientLightListener>(platform)
     internal val micStatusListeners = CopyOnWriteList<FaceclawMicStatusListener>(platform)
+    internal val audioMonitorListeners = CopyOnWriteList<FaceclawAudioPacketListener>(platform)
     @Volatile internal var running = false
     @Volatile internal var userDisconnectRequested = false
-    // Set when a connect attempt failed while an arm's OS bond is gone:
-    // retrying is pointless until the user re-pairs, so the worker loop parks
+    // Set when a connect attempt failed while an arm's OS bond is gone, or the
+    // glasses reported firmware this app can't run: retrying is pointless until
+    // the user re-pairs or installs the custom firmware, so the worker loop parks
     // instead of redialing. Cleared by start() (a fresh explicit connect).
     @Volatile internal var reconnectHalted = false
+    // The Faceclaw firmware revision this app needs; see setRequiredFirmwareRevision.
+    @Volatile internal var requiredFirmwareRevision = 0
+    // Firmware info from a settings ack that failed requiredFirmwareRevision. While
+    // set, driveSession sends nothing; the worker loop halts on it (handleIncompatibleFirmware).
+    internal var incompatibleFirmware: BleProtocol.FirmwareInfo? = null
 
     internal var phase = "disconnected"
     internal var status = "Disconnected."
@@ -181,9 +188,9 @@ class GlassesSessionCore(
     /**
      * The last firmware-info read said the glasses run Faceclaw's custom
      * firmware. Gates the private modes (cleanup, resource cache, ...) so stock
-     * or third-party firmware never sees them; the TS side checks the actual
-     * revision and disconnects on a mismatch, so no per-feature gating is
-     * needed here.
+     * or third-party firmware never sees them; a revision mismatch halts the
+     * session (handleIncompatibleFirmware), so no per-feature gating is needed
+     * here.
      */
     internal var customFirmwareDetected = false
     internal var firmwareFontCompatible = false
@@ -191,10 +198,17 @@ class GlassesSessionCore(
     /** Stable source for the SDK's opaque firmware-resource fingerprint. */
     internal var lastFirmwareIdentity = ""
     internal var lastFirmwareExtension = ""
+    internal val brightnessPolicy = BrightnessPolicy()
+    internal var brightnessSentVisible: Boolean? = null
+    internal var brightnessSentLevel = -1
+    internal var brightnessAlsStartedAt = -2000L
+    internal var brightnessDemoPolling = false
     internal var cfwCleanupDelivered = false
     internal var lastCfwCleanupAckMagic = 0
 
     internal var reconnectAfterMs = 0L
+    // Failed connects/sessions since the last stable session; indexes RECONNECT_BACKOFF_MS.
+    internal var consecutiveReconnects = 0
     internal var ringReconnectAfterMs = 0L
     internal var lastAckAtMs = 0L
     internal var lastIncomingAtMs = 0L
@@ -234,7 +248,6 @@ class GlassesSessionCore(
     internal var audioCaptureActive = false
     internal var imuReportRequested = false
     internal var ambientLightPollingRequested = false
-    internal var firmwareInfoQueried = false
     // Glasses are in the charging case: nobody is wearing them, so display
     // communication pauses and only battery polls flow (see driveSession).
     internal var chargingMode = false
@@ -281,15 +294,20 @@ class GlassesSessionCore(
 
     internal val desiredTilesLock: ProtocolLock = platform.createLock()
     internal var desiredFingerprint = ""
-    // Headerless packed 4bpp frame (see BmpUtil.pack4bppFromGray8) plus its
-    // pixel dimensions.
-    internal var desiredPacked: ByteArray? = ByteArray(0)
+    // Composited 8bpp frame plus its pixel dimensions. The send loop packs it to
+    // the headerless 4bpp wire format (BmpUtil.pack4bppFromGray8) when it picks
+    // the frame up, so frames superseded before sending are never packed and
+    // the packing stays off the submitting (main) thread.
+    internal var desiredGray: ByteArray? = ByteArray(0)
+    // Set instead of desiredGray when the producer already packed the frame (the SDK
+    // broker patches a retained packed buffer); the send loop packs gray lazily.
+    internal var desiredPacked: ByteArray? = null
     internal var desiredWidth = 0
     internal var desiredHeight = 0
     internal var desiredPaintMs = 0
     @Volatile internal var desiredFrameId = 0
     // Screen-space deferred draws (glyphs + images) whose pixels are baked
-    // into desiredPacked; the resource-cache planner may replay them as
+    // into desiredGray; the resource-cache planner may replay them as
     // on-glasses cached draws.
     internal var desiredDraws: Array<SurfaceCompositor.ScreenDraw>? = arrayOf()
     internal var desiredCopies: Array<SurfaceCompositor.ScreenCopy> = arrayOf()
@@ -321,6 +339,11 @@ class GlassesSessionCore(
 
     internal val pendingMessages = ArrayDeque<OutboundMessage>()
     internal val cfwTransports = arrayOf(CfwTransport(platform), CfwTransport(platform))
+    // Per arm (0 = left, 1 = right, like cfwTransports): when a write to it last
+    // completed and when a CFW ack last arrived from it. The CFW window's liveness
+    // signals (see CfwMessageWindow.ackDeadline).
+    internal val lastArmWriteAtMs = LongArray(2)
+    internal val lastArmCfwAckAtMs = LongArray(2)
     internal val inFlightMessages = ArrayDeque<OutboundMessage>()
     internal var prewrittenMessage: OutboundMessage? = null
     internal var prewrittenFrames: List<ByteArray> = emptyList()
@@ -357,8 +380,10 @@ class GlassesSessionCore(
         val active = monitor.withLock { running }
         if (!active) return false
         return try {
-            link.writeFrames(address, BleProtocol.WRITE_CHAR_UUID, listOf(packet), ConnectionOptions.WRITE_MODE,
+            val result = link.writeFrames(address, BleProtocol.WRITE_CHAR_UUID, listOf(packet), ConnectionOptions.WRITE_MODE,
                 ConnectionOptions.WRITE_TIMEOUT_MS)
+            if (result) monitor.withLock { noteWriteCompletedLocked(address, now()) }
+            result
         } catch (t: Throwable) {
             logLine("raw packet write failed: " + safeMessage(t))
             false
@@ -379,6 +404,15 @@ class GlassesSessionCore(
 
     fun isRunning(): Boolean = running
 
+    /**
+     * The Faceclaw firmware revision this app needs (REQUIRED_FACECLAW_FIRMWARE_VERSION in
+     * app/g2/firmware-compat.ts; the TS bridges pass it in before start()). A settings ack
+     * reporting anything else halts the session. 0 accepts any Faceclaw revision.
+     */
+    fun setRequiredFirmwareRevision(revision: Int) {
+        requiredFirmwareRevision = revision
+    }
+
     /** Start the worker (through the host); false when it was already running. */
     fun start(): Boolean {
         monitor.withLock {
@@ -388,6 +422,7 @@ class GlassesSessionCore(
             running = true
             userDisconnectRequested = false
             reconnectHalted = false
+            incompatibleFirmware = null
             shutdownRequested = false
             host.startWorker { run() }
             return true
@@ -668,25 +703,16 @@ class GlassesSessionCore(
         interruptibleSleep.interrupt()
     }
 
-    /**
-     * Set the lens brightness. Fire-and-forget, like the IMU control: the
-     * message is queued ahead of other traffic and any not-yet-sent brightness
-     * message is superseded. When autoAdjust is true the ambient-light sensor
-     * drives brightness and brightnessLevel is ignored; otherwise
-     * brightnessLevel (0-100) is applied directly.
-     */
+    /** Update desired brightness; retained before readiness and across reconnect. */
     fun setBrightness(autoAdjust: Boolean, brightnessLevel: Int) {
         monitor.withLock {
-            if (!running || !sessionReady) {
-                logLine("skip brightness set; session not ready")
-                return
-            }
-            clearMessagesOfKindLocked("brightness-control")
-            val message = messageBuilder.setBrightness(autoAdjust, brightnessLevel)
-            message.onTimeout = MessageCallback { logLine("brightness control ack timeout") }
-            pendingMessages.addFirst(message)
-            logLine("queue brightness " + (if (autoAdjust) "auto" else "level=$brightnessLevel"))
+            brightnessPolicy.setMode(autoAdjust, brightnessLevel)
         }
+        interruptibleSleep.interrupt()
+    }
+
+    fun configureBrightness(auto: Boolean, level: Int, minimum: Int, maximum: Int, curve: String, fadeMs: Int) {
+        monitor.withLock { brightnessPolicy.configure(auto, level, minimum, maximum, curve, fadeMs) }
         interruptibleSleep.interrupt()
     }
 
@@ -854,6 +880,13 @@ class GlassesSessionCore(
      */
     fun setAmbientLightPolling(enable: Boolean, intervalMs: Int, minDelta: Int,
                                heartbeatMs: Int, bindToLease: Boolean) {
+        // The brightness controller owns passive mode throughout a CFW session.
+        // The demo can request faster samples without releasing that ownership.
+        if (customFirmwareDetected) {
+            monitor.withLock { brightnessDemoPolling = enable; brightnessAlsStartedAt = -2000 }
+            interruptibleSleep.interrupt()
+            return
+        }
         val payload = if (enable)
             byteArrayOf(
                 CFW_MSG_AMBIENT_LIGHT.toByte(),
@@ -892,6 +925,24 @@ class GlassesSessionCore(
     fun removeMicStatusListener(listener: FaceclawMicStatusListener?) {
         if (listener != null) {
             micStatusListeners.remove(listener)
+        }
+    }
+
+    /**
+     * Observe every packet on the audio (render) characteristic, on the main
+     * thread, whether or not any capture is active. Purely passive: sends
+     * nothing to the glasses and does not affect the capture listener, so it
+     * shows what another app's mic activation actually produces.
+     */
+    fun addAudioMonitorListener(listener: FaceclawAudioPacketListener?) {
+        if (listener != null) {
+            audioMonitorListeners.add(listener)
+        }
+    }
+
+    fun removeAudioMonitorListener(listener: FaceclawAudioPacketListener?) {
+        if (listener != null) {
+            audioMonitorListeners.remove(listener)
         }
     }
 
@@ -987,6 +1038,9 @@ class GlassesSessionCore(
     /** The current composite for previews/screenshots, or null before any surface exists. */
     fun previewComposite(): SurfaceCompositor.Composite? = compositor.previewComposite()
 
+    /** See SurfaceCompositor.setPreviewAnimationListener; runs on the redraw scheduler's thread. */
+    fun setPreviewAnimationListener(listener: (() -> Unit)?) = compositor.setPreviewAnimationListener(listener)
+
     /**
      * Show or hide a compositor surface, immediately submitting the resulting
      * frame. Recompositing here (rather than waiting for the next surface
@@ -994,6 +1048,9 @@ class GlassesSessionCore(
      * actually appear — otherwise a static window (e.g. the terminal hub) whose
      * frame landed while briefly hidden would stay blank until its next repaint.
      */
+    /** Stereo depth for a full-screen surface; applies from its next frame. */
+    fun setSurfaceDepth(id: String, depth: Int) = compositor.setSurfaceDepth(id, depth)
+
     fun setSurfaceVisible(id: String, visible: Boolean) {
         // Its own frame: this recomposite is a real screen update with real
         // latency, and without one it would show up in other frames' logs only
@@ -1001,9 +1058,7 @@ class GlassesSessionCore(
         val frameId = frameTimings.startFrame(
                 "compositor:visible $id=$visible")
         compositor.setSurfaceVisible(id, visible)
-        val composite = compositor.composite()
-        val packed = BmpUtil.pack4bppFromGray8(composite.screenGray, composite.width, composite.height)
-        storeDesiredComposite(composite, packed, 0, frameId)
+        storeDesiredComposite(compositor.composite(), 0, frameId)
     }
 
     /**
@@ -1015,9 +1070,7 @@ class GlassesSessionCore(
         val frameId = frameTimings.startFrame(
                 "compositor:" + (if (blanked) "blank" else "unblank"))
         compositor.setBlanked(blanked)
-        val composite = compositor.composite()
-        val packed = BmpUtil.pack4bppFromGray8(composite.screenGray, composite.width, composite.height)
-        storeDesiredComposite(composite, packed, 0, frameId)
+        storeDesiredComposite(compositor.composite(), 0, frameId)
     }
 
     /**
@@ -1037,7 +1090,7 @@ class GlassesSessionCore(
     fun submitShellScene(bytes: ByteReader, paintMs: Int, frameId: Int) {
         compositor.setShellScene(bytes)
         val composite = compositor.composite()
-        storeDesiredComposite(composite, BmpUtil.pack4bppFromGray8(composite.screenGray, composite.width, composite.height), paintMs, frameId)
+        storeDesiredComposite(composite, paintMs, frameId)
     }
 
     /** Legacy compositor dimming for callers without a shell scene. */
@@ -1074,17 +1127,19 @@ class GlassesSessionCore(
         val composite = compositor.applyAndComposite(
                 surfaceId, pixels8bpp, rectX, rectY, rectWidth, rectHeight, contentFingerprint, glyphs)
         frameTimings.spanEnd(frameId, "composite")
-        // Pack the composited 8bpp buffer down to the headerless 4bpp frame
-        // format the wire planners consume; BMP framing is added later only for
-        // the uncompressed fallback.
-        frameTimings.spanStart(frameId, "pack-4bpp")
-        val packed = BmpUtil.pack4bppFromGray8(composite.screenGray, composite.width, composite.height)
-        frameTimings.spanEnd(frameId, "pack-4bpp")
-        storeDesiredComposite(composite, packed, paintMs, frameId)
+        storeDesiredComposite(composite, paintMs, frameId)
     }
 
+    /** See [SurfaceCompositor.isSurfaceCurrent]. */
+    fun isSurfaceCurrent(surfaceId: String, fingerprint: String): Boolean =
+        compositor.isSurfaceCurrent(surfaceId, fingerprint)
+
     /** Store a composite as the desired frame unless a newer one won the race. */
-    internal fun storeDesiredComposite(composite: SurfaceCompositor.Composite, packed: ByteArray, paintMs: Int, frameId: Int) {
+    internal fun storeDesiredComposite(composite: SurfaceCompositor.Composite, paintMs: Int, frameId: Int) =
+        storeDesiredComposite(composite, null, paintMs, frameId)
+
+    /** [packed], when given, is the already packed screen; otherwise the send loop packs the gray. */
+    internal fun storeDesiredComposite(composite: SurfaceCompositor.Composite, packed: ByteArray?, paintMs: Int, frameId: Int) {
         var supersededFrameId = 0
         var stale = false
         desiredTilesLock.locked {
@@ -1095,6 +1150,7 @@ class GlassesSessionCore(
             } else {
                 lastStoredCompositeSeq = composite.seq
                 supersededFrameId = desiredFrameId
+                desiredGray = if (packed == null) composite.screenGray else null
                 desiredPacked = packed
                 desiredWidth = composite.width
                 desiredHeight = composite.height
@@ -1501,6 +1557,10 @@ class GlassesSessionCore(
                     break
                 }
                 emitPhoneLockStateIfChanged(false)
+                if (monitor.withLock { incompatibleFirmware != null }) {
+                    handleIncompatibleFirmware()
+                    continue
+                }
                 if (!sessionReady) {
                     if (reconnectHalted) {
                         interruptibleSleep.sleep(ConnectionOptions.IDLE_SLEEP_MS.toLong())
@@ -1540,7 +1600,7 @@ class GlassesSessionCore(
     }
 
     override fun onNotification(address: String?, characteristicUuid: String?, data: ByteArray?) {
-        if (!running || !hooks.isActiveOwner()) return
+        if (!hooks.isActiveOwner()) return
         if (address == null || characteristicUuid == null || data == null) {
             return
         }
@@ -1560,6 +1620,8 @@ class GlassesSessionCore(
             val acks = CfwTransport.parseAcks(data) ?: return
             monitor.withLock {
                 lastIncomingAtMs = now()
+                val arm = armIndex(address)
+                if (arm >= 0) lastArmCfwAckAtMs[arm] = lastIncomingAtMs
                 for (ack in acks) {
                     for (message in inFlightMessages) {
                         val ingress = if (message.isLeftArmMessage) leftAddress else rightAddress
@@ -1597,11 +1659,16 @@ class GlassesSessionCore(
         else
             null
         var emitWearState = false
+        var putOnWhileCharging = false
         var event: G2Event? = null
         var exitTransportFailure: String? = null
         monitor.withLock {
             lastIncomingAtMs = now()
             if (decodedWearState >= 0 && decodedWearState != wearState) {
+                // An observed OFF_HEAD -> ON_HEAD means charging is over, up
+                // to CHARGING_BATTERY_POLL_MS before a battery poll would say
+                // so. Like TS's put-on wake, a first snapshot doesn't count.
+                putOnWhileCharging = chargingMode && wearState == 0 && decodedWearState == 1
                 wearState = decodedWearState
                 emitWearState = true
             }
@@ -1700,6 +1767,7 @@ class GlassesSessionCore(
                 // CFW ambient-light report (field 105) from the master temple.
                 val alsReport = BleProtocol.parseFaceclawAlsReport(frame.pb)
                 if (alsReport != null) {
+                    if (address.equals(rightAddress, ignoreCase = true)) brightnessPolicy.sample(alsReport, now())
                     emitAmbientLight(alsReport)
                 }
             }
@@ -1756,7 +1824,7 @@ class GlassesSessionCore(
                         updateSilentModeLocked(false)
                     }
                     if ("sys-event" == decoded.kind) {
-                        if (decoded.eventType == BleProtocol.EVENT_FOREGROUND_EXIT || decoded.eventType == BleProtocol.EVENT_ABNORMAL_EXIT || decoded.eventType == BleProtocol.EVENT_SYSTEM_EXIT) {
+                        if (decoded.eventType == BleProtocol.EVENT_ABNORMAL_EXIT || decoded.eventType == BleProtocol.EVENT_SYSTEM_EXIT) {
                             val exitAtMs = now()
                             if (shutdownRequested) {
                                 lastShutdownExitAtMs = exitAtMs
@@ -1792,6 +1860,19 @@ class GlassesSessionCore(
                                     exitTransportFailure = "firmware exited during session recovery"
                                 }
                             }
+                        } else if (decoded.eventType == BleProtocol.EVENT_FOREGROUND_ENTER) {
+                            logLine("firmware overlay opened over the EvenHub page")
+                        } else if (decoded.eventType == BleProtocol.EVENT_FOREGROUND_EXIT) {
+                            // Despite its name this does not end the page: stock
+                            // evenhub_page_event_handler sends it when a firmware
+                            // overlay announced by FOREGROUND_ENTER closes, and
+                            // restores the page and its keepalive. Teardown is
+                            // always SYSTEM_EXIT/ABNORMAL_EXIT. Re-creating the
+                            // layout here sent a create the firmware ignores while
+                            // the page exists, so the session timed out (#42).
+                            // Re-present over whatever the overlay left instead.
+                            logLine("firmware overlay closed; re-presenting")
+                            lastEnqueuedFingerprint = ""
                         }
                     }
                 }
@@ -1806,6 +1887,11 @@ class GlassesSessionCore(
         if (emitWearState) {
             logLine(if (decodedWearState > 0) "wear state ON_HEAD" else "wear state OFF_HEAD")
             emitWearState(decodedWearState > 0)
+        }
+        if (putOnWhileCharging) {
+            // After the emit, so TS sees the put-on while still in its
+            // charging phase and wakes once the rebuilt session is ready.
+            monitor.withLock { endChargingModeLocked("glasses put on while charging") }
         }
         if (compassEvent != null) {
             emitCompassEvent(compassEvent)
@@ -1856,10 +1942,11 @@ class GlassesSessionCore(
             lastIncomingAtMs = arrivalMs
             listenerToCall = if (audioCaptureActive) audioPacketListener else null
         }
+        val arm = if (address.equals(leftAddress, ignoreCase = true)) "L" else if (address.equals(rightAddress, ignoreCase = true)) "R" else "?"
+        emitAudioMonitorPacket(data, arm, arrivalMs)
         if (listenerToCall == null) {
             return
         }
-        val arm = if (address.equals(leftAddress, ignoreCase = true)) "L" else if (address.equals(rightAddress, ignoreCase = true)) "R" else "?"
         try {
             listenerToCall.onAudioPacket(data.copyOf(), arm, arrivalMs)
         } catch (t: Throwable) {
@@ -1868,20 +1955,27 @@ class GlassesSessionCore(
     }
 
     override fun onConnectionStateChange(address: String?, connected: Boolean) {
-        if (!running || !hooks.isActiveOwner()) return
-        monitor.withLock {
-            if (address == null) {
-                return
-            }
-            if (isConfiguredRingAddress(address)) {
+        if (!hooks.isActiveOwner()) return
+        if (address == null) {
+            return
+        }
+        if (isConfiguredRingAddress(address)) {
+            monitor.withLock {
                 ringConnected = connected
-                ringNotificationsReady = false
-                if (!connected) {
+                if (connected) {
+                    // A background connect landed: finish setting it up right away.
+                    ringReconnectAfterMs = 0
+                } else {
+                    ringNotificationsReady = false
                     ringReconnectAfterMs = now() + ConnectionOptions.RING_RECONNECT_DELAY_MS
                 }
-                logLine(if (connected) "direct ring BLE connected" else "direct ring BLE disconnected")
-                return
             }
+            logLine(if (connected) "direct ring BLE connected" else "direct ring BLE disconnected")
+            interruptibleSleep.interrupt()
+            return
+        }
+        var lostSession = false
+        monitor.withLock {
             if (address.equals(rightAddress, ignoreCase = true)) {
                 rightConnected = connected
             } else if (address.equals(leftAddress, ignoreCase = true)) {
@@ -1890,6 +1984,10 @@ class GlassesSessionCore(
                 return
             }
             if (!connected) {
+                // Before the session is ready, this is an attempt failing (or an arm
+                // dropping mid-setup): the connect sequence notices on its own and
+                // schedules the retry, so leave the backoff alone.
+                lostSession = sessionReady
                 sessionReady = false
                 sessionRecovery.resetForNewSession()
                 fixedLayoutCreated = false
@@ -1901,17 +1999,14 @@ class GlassesSessionCore(
                 clearAllMessagesLocked("connection lost")
                 displayedFingerprint = ""
                 faceclawWakeReadyGeneration = 0
-                if (!reconnectHalted) {
-                    reconnectAfterMs = now() + ConnectionOptions.RECONNECT_DELAY_MS
+                if (lostSession && !reconnectHalted) {
+                    scheduleReconnectLocked(true)
                 }
             }
         }
         interruptibleSleep.interrupt()
-        if (connected) {
-            setStateDisplay("connected", "Connected.")
-        } else if (!reconnectHalted) {
-            // While parked on a missing bond, keep the "unpaired" display: this
-            // callback is just the teardown of the arm that did connect.
+        if (lostSession && !reconnectHalted) {
+            // While parked on a missing bond, keep the "unpaired" display.
             setStateDisplay("connecting", "Connecting to the glasses...")
         }
     }
@@ -1920,10 +2015,21 @@ class GlassesSessionCore(
     // Connect sequence (worker thread)
 
     internal fun connectLoopOnce() {
+        monitor.withLock {
+            // TS treats a wear snapshot as per-transport and forgets it on a
+            // reconnect; forget ours too, or the new session's first report
+            // (the CFW query reply) is deduped away and TS never relearns it.
+            wearState = -1
+        }
         setStateDisplay("connecting", "Connecting to the glasses...")
         try {
-            connectArm(rightAddress, true)
-            connectArm(leftAddress, true)
+            // Dial both arms at once, so the left arm's attempt is already pending (and
+            // can land) while the right arm is being set up; they share one window.
+            val deadlineMs = now() + ConnectionOptions.ARM_CONNECT_WINDOW_MS
+            link.beginConnect(rightAddress, false)
+            link.beginConnect(leftAddress, false)
+            connectArm(rightAddress, true, deadlineMs)
+            connectArm(leftAddress, true, deadlineMs)
             if (!sleepDuringConnectSettling(800)) {
                 return
             }
@@ -1977,16 +2083,16 @@ class GlassesSessionCore(
             hooks.transition("sessionActive", true, readyAt)
             logLine("session ready")
             monitor.withLock {
-                // Query settings promptly on the first session so firmware
+                // Query settings at the start of every session so firmware
                 // version/extension (and battery) arrive without waiting for
-                // the input-quiet battery poll. The settings response doubles as
-                // the firmware-compatibility check surfaced during onboarding.
-                if (!firmwareInfoQueried) {
-                    firmwareInfoQueried = true
-                    lastBatteryRefreshAtMs = now()
-                    pendingMessages.addLast(createBatteryQueryMessageLocked())
-                    logLine("queue settings query for firmware info")
-                }
+                // the input-quiet battery poll. The reply is the firmware-
+                // compatibility check, and the drive loop only creates the
+                // layout once the queue is empty, so it lands before any
+                // custom-firmware traffic -- including after a reconnect to
+                // glasses that were reflashed in the meantime.
+                lastBatteryRefreshAtMs = now()
+                pendingMessages.addLast(createBatteryQueryMessageLocked())
+                logLine("queue settings query for firmware info")
             }
             tryConnectRing("initial")
         } catch (t: Throwable) {
@@ -1994,6 +2100,17 @@ class GlassesSessionCore(
             val unpairedArm = firstUnpairedArm()
             if (unpairedArm != null) {
                 handleUnpairedFailure(unpairedArm)
+            } else if (t is ArmUnreachableException) {
+                val otherArm = if (t.side == "left") rightAddress else leftAddress
+                if (link.isConnected(otherArm)) {
+                    handleTransportFailure(
+                        t.side + " arm not found",
+                        "Can't reach the " + t.side + " arm of the glasses. It may be connected to"
+                            + " another device, or be off or out of range."
+                    )
+                } else {
+                    handleTransportFailure("glasses not found", "Can't find the glasses. They may be off or out of range.")
+                }
             } else {
                 handleTransportFailure("connect failed")
             }
@@ -2014,9 +2131,10 @@ class GlassesSessionCore(
         }
     }
 
-    internal fun connectArm(address: String, enableRenderNotify: Boolean) {
-        if (!link.connect(address, ConnectionOptions.CONNECT_TIMEOUT_MS)) {
-            throw IllegalStateException("connect failed: $address")
+    internal fun connectArm(address: String, enableRenderNotify: Boolean, deadlineMs: Long) {
+        val timeoutMs = maxOf(deadlineMs - now(), ConnectionOptions.CONNECT_TIMEOUT_MS.toLong())
+        if (!link.connect(address, timeoutMs.toInt())) {
+            throw ArmUnreachableException(if (address.equals(leftAddress, ignoreCase = true)) "left" else "right", address)
         }
         // requestConnectionPriority has no callback in this Android compile target, so there is
         // no reliable completion point to keep it in the global GATT operation pipeline. But it's
@@ -2063,6 +2181,16 @@ class GlassesSessionCore(
             return
         }
         try {
+            // The ring is often out of range or bound to the glasses. Rather than block this
+            // worker (and every frame and heartbeat behind it) on a timed connect, keep a
+            // low-duty background connection pending; its callback wakes us to finish setup.
+            // The periodic recheck re-arms it if the attempt died without a callback.
+            if (!link.isConnected(ringAddress) && link.beginConnect(ringAddress, true)) {
+                monitor.withLock {
+                    ringReconnectAfterMs = now() + ConnectionOptions.RING_RECONNECT_DELAY_MS
+                }
+                return
+            }
             connectRing()
         } catch (t: Throwable) {
             monitor.withLock {
@@ -2071,6 +2199,9 @@ class GlassesSessionCore(
                 ringReconnectAfterMs = now() + ConnectionOptions.RING_RECONNECT_DELAY_MS
             }
             logLine("direct ring connect failed (" + reason + "): " + safeMessage(t))
+            // Start the next attempt from a fresh connection rather than retrying setup on
+            // one that just failed it.
+            link.disconnect(ringAddress)
         }
     }
 
@@ -2219,6 +2350,13 @@ class GlassesSessionCore(
         return id
     }
 
+    /** 0 for the left arm, 1 for the right (the cfwTransports order), -1 for anything else. */
+    internal fun armIndex(address: String): Int = when {
+        address.equals(leftAddress, ignoreCase = true) -> 0
+        address.equals(rightAddress, ignoreCase = true) -> 1
+        else -> -1
+    }
+
     internal fun hasRingAddress(): Boolean {
         return ringAddress.trim().isNotEmpty()
     }
@@ -2241,3 +2379,7 @@ class GlassesSessionCore(
         }
     }
 }
+
+/** An arm's connection never came up within the connect window ([side] is "left" or "right"). */
+internal class ArmUnreachableException(val side: String, address: String) :
+    IllegalStateException("connect failed: $side arm $address")

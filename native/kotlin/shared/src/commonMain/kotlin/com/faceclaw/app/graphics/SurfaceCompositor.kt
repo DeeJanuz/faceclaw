@@ -1,5 +1,6 @@
 package com.faceclaw.app
 
+import kotlin.concurrent.Volatile
 import kotlin.jvm.JvmField
 import kotlin.jvm.JvmOverloads
 import kotlin.jvm.JvmStatic
@@ -51,15 +52,23 @@ class SurfaceCompositor @JvmOverloads constructor(private val includePreviewInFr
             return maxOf(1, (((value * dim) + 128) shr 8))
         }
 
+        /**
+         * The rest of [reader] as a heap-array reader. Parsing reads field by field, and through a
+         * platform buffer (Android's direct ByteBuffer) each byte was its own native peek; one bulk
+         * copy first is far cheaper.
+         */
+        private fun heapReader(reader: ByteReader): ByteReader =
+            if (reader is ArrayByteReader) reader else ArrayByteReader(ByteArray(reader.remaining()).also { reader.get(it) })
+
         private fun parseDraws(draws: ByteReader?): Array<ScreenDraw> {
             if (((draws == null) || (draws.remaining() < 1))) {
                 return NO_DRAWS
             }
-            val cursor: ByteReader = draws
+            val cursor: ByteReader = heapReader(draws)
             var out: MutableList<ScreenDraw> = ArrayList()
             while ((cursor.remaining() >= 1)) {
                 var kind: Int = (cursor.get() and 0xff)
-                if (kind in 3..5) { out.add(ScreenDraw.image(0, 0, 0).also { it.selection = MenuSelection.read(cursor, kind) }); continue }
+                if (DrawRecordKind.isPresentation(kind)) { out.add(ScreenDraw.image(0, 0, 0).also { it.selection = readRetainedDrawing(cursor, kind) }); continue }
                 if (((kind == ScreenDraw.KIND_GLYPH) && (cursor.remaining() >= 11))) {
                     var fontId: Int = (cursor.getShort().toInt() and 0xffff)
                     var encoding: Int = cursor.getInt()
@@ -126,14 +135,14 @@ class SurfaceCompositor @JvmOverloads constructor(private val includePreviewInFr
      * raster comes from ImageAtlas under imageId.
      */
     class ScreenDraw {
-        @JvmField var selection: MenuSelection? = null
+        @JvmField var selection: RetainedDrawing? = null
         companion object {
-            const val KIND_GLYPH: Int = 0
+            const val KIND_GLYPH: Int = DrawRecordKind.GLYPH
 
-            const val KIND_IMAGE: Int = 1
+            const val KIND_IMAGE: Int = DrawRecordKind.TEXTURE_IMAGE
 
             /** A firmware-builtin-font text run (CFW mode 15). */
-            const val KIND_FWTEXT: Int = 2
+            const val KIND_FWTEXT: Int = DrawRecordKind.FIRMWARE_TEXT
 
             @JvmStatic
             fun glyph(fontId: Int, encoding: Int, penX: Int, lineY: Int, value: Int): ScreenDraw {
@@ -289,11 +298,12 @@ class SurfaceCompositor @JvmOverloads constructor(private val includePreviewInFr
 
     private var shellScene: ShellScene? = null
     fun setShellScene(reader: ByteReader) {
-        val scene = ShellScene.decode(reader)
+        val scene = ShellScene.decode(heapReader(reader))
         lock.withLock {
             // A scene takes the shell surface and its dimming out of the wire pixels.
             if (shellScene == null) markAllDirtyLocked()
             shellScene = scene
+            changedSinceComposite = true
         }
     }
 
@@ -314,6 +324,9 @@ class SurfaceCompositor @JvmOverloads constructor(private val includePreviewInFr
 
         @JvmField var visible: Boolean = true
 
+        /** Stereo depth; see setSurfaceDepth. */
+        @JvmField var depth: Int = 0
+
         @JvmField var pixels: ByteArray = ByteArray(0)
 
         @JvmField var fingerprint: String = ""
@@ -321,12 +334,56 @@ class SurfaceCompositor @JvmOverloads constructor(private val includePreviewInFr
         /** Surface-local deferred draws of the retained content (already baked into pixels). */
         @JvmField var draws: Array<ScreenDraw> = NO_DRAWS
 
+        /**
+         * [draws]' retained selections in screen coordinates, as built for [placedFor] at
+         * ([placedX], [placedY]). Reused by every composite until either changes, so the shell
+         * scene built from them (and its fingerprint) can be reused too.
+         */
+        @JvmField var placedSelections: List<RetainedDrawing> = emptyList()
+        @JvmField var placedFor: Array<ScreenDraw>? = null
+        @JvmField var placedX: Int = 0
+        @JvmField var placedY: Int = 0
+
         constructor(id: String) {
             this.id = id
         }
     }
 
     private val lock = protocolPlatform().createLock()
+    private var animatedPreview: ShellScene.AnimatedPreview? = null
+    /** The last composite's scene; reused while its inputs are unchanged (see compositeLocked). */
+    private var lastScene: ShellScene? = null
+    private var previewKey: String? = null
+    @Volatile private var previewAnimationListener: (() -> Unit)? = null
+
+    /**
+     * Called after each timer redraw of an animated preview (including the one where it settles),
+     * outside the lock and on the redraw scheduler's thread. The mirror pulls previews on new
+     * frames only, and the animation advances between them, so without this the mirror keeps
+     * whichever mid-motion frame it last pulled.
+     */
+    fun setPreviewAnimationListener(listener: (() -> Unit)?) {
+        previewAnimationListener = listener
+    }
+
+    /**
+     * The phone mirror's view of [scene]: without the whole-screen stereo shift, which would move
+     * it off centre by half the depth and put mirror touches that far from what they land on.
+     */
+    private fun previewScene(scene: ShellScene, gray: ByteArray, key: String): ByteArray {
+        if (previewKey != key) {
+            animatedPreview?.player?.stop()
+            animatedPreview = scene.unshifted().animatedPreview(gray, screenWidth, screenHeight,
+                schedule = { delay, action ->
+                    scheduleDrawRedraw(delay) {
+                        lock.withLock(action)
+                        previewAnimationListener?.invoke()
+                    }
+                })
+            previewKey = key
+        }
+        return animatedPreview!!.pixels
+    }
 
     private var screenWidth: Int = 0
 
@@ -356,12 +413,22 @@ class SurfaceCompositor @JvmOverloads constructor(private val includePreviewInFr
 
     private var retainedValid: Boolean = false
 
+    /** Reused bulk-read buffer for surface updates (guarded by the compositor lock). */
+    private var intakeScratch: ByteArray = ByteArray(0)
+
     fun packedFrameSize(): Int {
         lock.withLock {
             requireScreenConfiguredLocked()
             return ((screenWidth + 1) shr 1) * screenHeight
         }
     }
+
+    /**
+     * Set by changes that take effect at the next composite (geometry, dim, depth, blanking,
+     * visibility, a new shell scene, content retained without compositing) and cleared by a
+     * composite that is kept (not a preview); see [isSurfaceCurrent].
+     */
+    private var changedSinceComposite: Boolean = false
 
     /** Set the output frame size. Must be called before any surface work. */
     fun configureScreen(width: Int, height: Int): Unit {
@@ -434,6 +501,7 @@ class SurfaceCompositor @JvmOverloads constructor(private val includePreviewInFr
             if (surface.visible) {
                 markScreenRectDirtyLocked(x, y, width, height)
             }
+            changedSinceComposite = true
         }
     }
 
@@ -443,6 +511,20 @@ class SurfaceCompositor @JvmOverloads constructor(private val includePreviewInFr
             if (removed != null && removed.visible) {
                 markScreenRectDirtyLocked(removed.x, removed.y, removed.width, removed.height)
             }
+            changedSinceComposite = true
+        }
+    }
+
+    /**
+     * Whether a full-surface update carrying [fingerprint] would change nothing: the surface
+     * already retains that content and every other change has reached a kept composite. A
+     * submitter can then drop an identical repaint without flattening or sending it.
+     */
+    fun isSurfaceCurrent(id: String, fingerprint: String): Boolean {
+        lock.withLock {
+            if (changedSinceComposite) return false
+            val surface = surfaces.get(id) ?: return false
+            return surface.fingerprint.isNotEmpty() && surface.fingerprint == fingerprint
         }
     }
 
@@ -463,6 +545,7 @@ class SurfaceCompositor @JvmOverloads constructor(private val includePreviewInFr
             }
             underlayDimBelowZOrder = belowZOrder
             underlayDim = next
+            changedSinceComposite = true
         }
     }
 
@@ -490,7 +573,34 @@ class SurfaceCompositor @JvmOverloads constructor(private val includePreviewInFr
                 markScreenRectDirtyLocked(surface.x, surface.y, surface.width, surface.height)
             }
             surface.visible = visible
+            changedSinceComposite = true
         }
+    }
+
+    /**
+     * Stereo depth (DrawProtocol.depthOffset) for a surface. It applies while the surface is the
+     * topmost visible one and opaquely covers the screen: the glasses then copy the whole screen
+     * into the frame shifted per lens. Takes effect when the next frame composites.
+     */
+    fun setSurfaceDepth(id: String, depth: Int): Unit {
+        require(depth in -128..127) { "bad depth $depth for $id" }
+        lock.withLock {
+            val surface = surfaces.get(id) ?: throw IllegalArgumentException(("unknown surface " + id))
+            surface.depth = depth
+            changedSinceComposite = true
+        }
+    }
+
+    /**
+     * The screen's stereo depth: a covering surface's own (see setSurfaceDepth), else the shell
+     * scene's depth for the whole display (the regular UI's Depth setting).
+     */
+    private fun screenDepthLocked(ordered: List<Surface>): Int {
+        val uiDepth = shellScene?.screenDepth ?: 0
+        val top = ordered.lastOrNull { it.visible } ?: return uiDepth
+        val covers = top.transparency == TRANSPARENCY_OPAQUE && top.x <= 0 && top.y <= 0 &&
+            top.x + top.width >= screenWidth && top.y + top.height >= screenHeight
+        return if (covers) top.depth else uiDepth
     }
 
     /**
@@ -503,6 +613,7 @@ class SurfaceCompositor @JvmOverloads constructor(private val includePreviewInFr
                 markAllDirtyLocked()
             }
             this.blanked = blanked
+            changedSinceComposite = true
         }
     }
 
@@ -836,6 +947,11 @@ class SurfaceCompositor @JvmOverloads constructor(private val includePreviewInFr
                         expectedBytes)
                 )
             }
+            // One bulk read (per-element reads from a direct ByteBuffer each cross into native
+            // code), then a diff against the retained pixels for the changed bounds.
+            if (intakeScratch.size < expectedBytes) intakeScratch = ByteArray(expectedBytes)
+            val incoming = intakeScratch
+            pixels.get(incoming, 0, expectedBytes)
             var minX = rectX + rectWidth
             var minY = rectY + rectHeight
             var maxX = -1
@@ -843,9 +959,10 @@ class SurfaceCompositor @JvmOverloads constructor(private val includePreviewInFr
             var row = 0
             while (row < rectHeight) {
                 val dstOffset = (rectY + row) * surface.width + rectX
+                val srcOffset = row * rectWidth
                 var col = 0
                 while (col < rectWidth) {
-                    val value = pixels.get()
+                    val value = incoming[srcOffset + col]
                     val index = dstOffset + col
                     if (surface.pixels[index] != value) {
                         surface.pixels[index] = value
@@ -870,6 +987,7 @@ class SurfaceCompositor @JvmOverloads constructor(private val includePreviewInFr
             }
             surface.fingerprint = (if ((contentFingerprint == null)) "" else contentFingerprint)
             surface.draws = parsed
+            if (!composeAfter) changedSinceComposite = true
             return if (composeAfter) compositeLocked() else null
         }
     }
@@ -894,8 +1012,10 @@ class SurfaceCompositor @JvmOverloads constructor(private val includePreviewInFr
             // Previews build their own pixels. Consuming dirty tiles here would hide their damage
             // from the next kept composite and leave the packed framebuffer unpatched.
             val seq = nextCompositeSeq
+            val changed = changedSinceComposite
             val result = describeLocked(buildGrayLocked(), true, IntArray(0), NO_COPIES)
             nextCompositeSeq = seq
+            changedSinceComposite = changed
             return result
         }
     }
@@ -924,6 +1044,7 @@ class SurfaceCompositor @JvmOverloads constructor(private val includePreviewInFr
         snapshotGray: Boolean,
         copies: Array<ScreenCopy>,
     ): Composite {
+        changedSinceComposite = false
         val damage = recomposeDirtyLocked()
         if (!retainedPackedValid) {
             BmpUtil.patch4bppFromGray8(
@@ -956,6 +1077,9 @@ class SurfaceCompositor @JvmOverloads constructor(private val includePreviewInFr
         copies: Array<ScreenCopy>,
     ): Composite {
         if (blanked) {
+            animatedPreview?.player?.stop()
+            animatedPreview = null
+            previewKey = null
             return Composite(
                 gray,
                 screenWidth,
@@ -972,15 +1096,15 @@ class SurfaceCompositor @JvmOverloads constructor(private val includePreviewInFr
         var fingerprint: StringBuilder = StringBuilder()
         fingerprint.append(screenWidth).append('x').append(screenHeight)
         var draws: MutableList<ScreenDraw> = ArrayList()
-        val selections = ArrayList<MenuSelection>()
+        val selections = ArrayList<RetainedDrawing>()
         for (surface in ordered) {
             if (!surface.visible || dimForLocked(surface) == 0 || excludedLocked(surface)) {
                 continue
             }
             var dim: Int = dimForLocked(surface)
+            selections.addAll(placedSelectionsLocked(surface))
             for (draw in surface.draws) {
-                val selected = draw.selection
-                if (selected != null) { selections.add(selected.translated(surface.x, surface.y)); continue }
+                if (draw.selection != null) continue
                 if (((dim < 256) && (draw.kind == ScreenDraw.KIND_IMAGE))) {
                     continue
                 }
@@ -1021,9 +1145,30 @@ class SurfaceCompositor @JvmOverloads constructor(private val includePreviewInFr
                 fingerprint.append(":dim").append(dim)
             }
         }
-        val scene = if (surfaces.values.any { it.visible && it.zOrder > 1 }) ShellScene.EMPTY else ShellScene(shellScene?.layers ?: emptyList(), selections)
-        val preview = if (includePreview && gray.isNotEmpty() && (shellScene != null || selections.isNotEmpty())) scene.preview(gray, screenWidth, screenHeight) else gray
-        return Composite(preview, screenWidth, screenHeight, fingerprint.append("|shell:").append(scene.fingerprint).toString(),
+        val screenDepth = screenDepthLocked(ordered)
+        val overlaid = surfaces.values.any { it.visible && it.zOrder > 1 }
+        val sceneLayers = if (overlaid) emptyList() else shellScene?.layers ?: emptyList()
+        val sceneSelections: List<RetainedDrawing> = if (overlaid) emptyList() else selections
+        // Built per composite, a scene rebuilt its fingerprint and resource lists every time even
+        // though its inputs (the decoded shell layers, cached placed selections) rarely change.
+        val previous = lastScene
+        val scene = if (previous != null && previous.layers === sceneLayers && previous.screenDepth == screenDepth &&
+            sameElements(previous.selections, sceneSelections)) previous
+            else ShellScene(sceneLayers, sceneSelections, screenDepth)
+        lastScene = scene
+        val sceneKey = fingerprint.append("|shell:").append(scene.fingerprint).toString()
+        // The packed intake path carries no pixels, so it never renders a preview.
+        val preview = if (includePreview && gray.isNotEmpty() && (shellScene != null || selections.isNotEmpty())) {
+            previewScene(scene, gray, sceneKey)
+        } else {
+            if (includePreview) {
+                animatedPreview?.player?.stop()
+                animatedPreview = null
+                previewKey = null
+            }
+            gray
+        }
+        return Composite(preview, screenWidth, screenHeight, sceneKey,
             nextCompositeSeq++, draws.toTypedArray(), damage, copies).also { it.screenGray = gray; it.shellScene = scene }
     }
 
@@ -1155,6 +1300,22 @@ class SurfaceCompositor @JvmOverloads constructor(private val includePreviewInFr
         }
     }
 
+    private fun placedSelectionsLocked(surface: Surface): List<RetainedDrawing> {
+        if (surface.placedFor !== surface.draws || surface.placedX != surface.x || surface.placedY != surface.y) {
+            surface.placedSelections = surface.draws.mapNotNull { it.selection?.translated(surface.x, surface.y) }
+            surface.placedFor = surface.draws
+            surface.placedX = surface.x
+            surface.placedY = surface.y
+        }
+        return surface.placedSelections
+    }
+
+    private fun sameElements(a: List<RetainedDrawing>, b: List<RetainedDrawing>): Boolean {
+        if (a.size != b.size) return false
+        for (i in a.indices) if (a[i] !== b[i]) return false
+        return true
+    }
+
     private fun blendLocked(gray: ByteArray, surface: Surface): Unit {
         var srcX: Int = maxOf(0, -surface.x)
         var srcY: Int = maxOf(0, -surface.y)
@@ -1176,7 +1337,7 @@ class SurfaceCompositor @JvmOverloads constructor(private val includePreviewInFr
                         var col: Int = 0
                         while ((col < copyWidth)) {
                             var value: Int = (surface.pixels[(srcOffset + col)] and 0xff)
-                            if ((value.toInt() != 0)) {
+                            if ((value != 0)) {
                                 gray[(dstOffset + col)] = (dimValue(value, dim)).toByte()
                             } else {
                                 if ((surface.transparency == TRANSPARENCY_OPAQUE)) {

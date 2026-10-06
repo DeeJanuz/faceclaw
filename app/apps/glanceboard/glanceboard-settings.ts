@@ -6,13 +6,14 @@ import { glanceWidgetSpans } from "./widgets";
 
 export type GlanceSlotChoice = GlanceWidgetId | "none";
 
-const SLOT_CHOICES: readonly GlanceSlotChoice[] = ["none", "system-card", "calendar", "terminal", "nightscout", "compass", "music"];
+const SLOT_CHOICES: readonly GlanceSlotChoice[] = ["none", "system-card", "calendar", "terminal", "t3code", "nightscout", "compass", "music"];
 
 const SLOT_CHOICE_LABELS: Partial<Record<GlanceSlotChoice, string>> = {
   none: "Empty",
   "system-card": "System card",
   calendar: "Calendar",
   terminal: "Terminal",
+  t3code: "T3 Code",
   nightscout: "Nightscout",
   compass: "Compass",
   music: "Music",
@@ -103,6 +104,31 @@ export const glanceShowOnHeadTiltSetting = new ConfigSettingBoolean({
   defaultValue: true,
   description: "Tilting your head up while asleep shows the Glanceboard instead of waking the regular UI.",
 });
+
+const DEPTH_VALUES = ["-64", "-48", "-32", "-16", "0", "16", "32", "48", "64"] as const;
+export type GlanceDepth = (typeof DEPTH_VALUES)[number];
+
+/**
+ * Stereo depth of the board, in the firmware's depth units: the lenses shift
+ * it by half this many pixels each, in opposite directions.
+ */
+export const glanceDepthSetting = new ConfigSettingEnum<GlanceDepth>({
+  id: "glanceboard-depth",
+  label: "Depth",
+  storageKey: "glanceboard.depth",
+  defaultValue: "0",
+  values: DEPTH_VALUES,
+  formatValue: (value) => {
+    const depth = Number(value);
+    return depth === 0 ? "0" : depth > 0 ? `+${depth} (nearer)` : `${depth} (farther)`;
+  },
+  description:
+    "Moves the Glanceboard nearer (positive) or farther away (negative) by shifting it in opposite directions on the two lenses.",
+});
+
+export function glanceDepth(): number {
+  return Number(glanceDepthSetting.get());
+}
 
 /** Hairlines between the board's slots. */
 export const glanceShowLinesSetting = new ConfigSettingBoolean({

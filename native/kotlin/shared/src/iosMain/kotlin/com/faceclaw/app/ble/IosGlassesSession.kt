@@ -70,6 +70,8 @@ class IosGlassesSession internal constructor(
 
     fun setListener(listener: FaceclawBleCommunicatorListener?) = core.setListener(listener)
 
+    fun setRequiredFirmwareRevision(revision: Int) = core.setRequiredFirmwareRevision(revision)
+
     fun start(): Boolean = core.start()
 
     fun disconnect() = core.disconnect()
@@ -147,6 +149,8 @@ class IosGlassesSession internal constructor(
     fun setCompassEnabledForOwner(owner: String?, enable: Boolean) = core.setCompassEnabled(owner, enable)
 
     fun setBrightness(autoAdjust: Boolean, brightnessLevel: Int) = core.setBrightness(autoAdjust, brightnessLevel)
+    fun configureBrightness(auto: Boolean, level: Int, minimum: Int, maximum: Int, curve: String, fadeMs: Int) =
+        core.configureBrightness(auto, level, minimum, maximum, curve, fadeMs)
 
     fun enableWearDetectionAndRequestState() = core.enableWearDetectionAndRequestState()
 
@@ -207,6 +211,8 @@ class IosGlassesSession internal constructor(
 
     fun setSurfaceVisible(id: String, visible: Boolean) = core.setSurfaceVisible(id, visible)
 
+    fun setSurfaceDepth(id: String, depth: Int) = core.setSurfaceDepth(id, depth)
+
     fun setScreenBlanked(blanked: Boolean) = core.setScreenBlanked(blanked)
 
     fun configureSurface(id: String, x: Int, y: Int, width: Int, height: Int, zOrder: Int, transparency: Int) =
@@ -236,6 +242,9 @@ class IosGlassesSession internal constructor(
 
     /** The current composited screen (gray, 8bpp) or null before any surface was configured. */
     fun previewComposite(): IosTextureFrame? = core.previewComposite()?.let { IosTextureFrame(it) }
+
+    /** Called on the main queue after each step of an animation the preview is replaying (see SurfaceCompositor). */
+    fun setPreviewAnimationListener(listener: (() -> Unit)?) = core.setPreviewAnimationListener(listener)
 
     fun compositeWidth(): Int = core.previewComposite()?.width ?: 0
 

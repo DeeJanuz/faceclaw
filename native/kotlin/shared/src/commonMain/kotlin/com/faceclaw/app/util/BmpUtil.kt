@@ -99,9 +99,9 @@ class BmpUtil {
                     for (pair in firstPair..lastPair) {
                         val x = pair shl 1
                         val src = y * width + x
-                        val high = GRAY_TO_NIBBLE[gray8[src].toInt() and 0xff].toInt() and 0xff
+                        val high = GRAY_TO_NIBBLE[gray8[src].toInt() and 0xff] and 0xff
                         val low = if (x + 1 < width) {
-                            GRAY_TO_NIBBLE[gray8[src + 1].toInt() and 0xff].toInt() and 0xff
+                            GRAY_TO_NIBBLE[gray8[src + 1].toInt() and 0xff] and 0xff
                         } else 0
                         out[y * stride + pair] = ((high shl 4) or low).toByte()
                     }

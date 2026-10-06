@@ -412,7 +412,7 @@ class TexturePlanner {
                         i++
                         continue
                     }
-                    var entry: FwGlyphAtlas.Entry? = FwGlyphAtlas.get(draw.fwCps!![i])
+                    var entry: FwGlyphAtlas.Entry? = FwGlyphAtlas.get(draw.fwCps[i])
                     if ((entry == null)) {
                         baked++
                         i++
@@ -455,7 +455,7 @@ class TexturePlanner {
                 var bytesToLastInk: Int = 0
                 var bytesSoFar: Int = 0
                 while (((j < n) && ok[j])) {
-                    var encodedLength: Int = utf8Length(draw.fwCps!![j])
+                    var encodedLength: Int = utf8Length(draw.fwCps[j])
                     if (((bytesSoFar + encodedLength) > 255)) {
                         break
                     }
@@ -483,7 +483,7 @@ class TexturePlanner {
                 run {
                     var k: Int = i
                     while ((k <= lastInk)) {
-                        var encoded: ByteArray = codePointUtf8(draw.fwCps!![k])
+                        var encoded: ByteArray = codePointUtf8(draw.fwCps[k])
                         encoded.copyInto(sub, pos, 0, 0 + encoded.size)
                         pos += encoded.size
                         k++
@@ -497,7 +497,7 @@ class TexturePlanner {
                             outPunches.add(
                                 FwPunch(
                                     entries[k]!!,
-                                    ((draw.x + draw.fwDx!![k]) + entries[k]!!.ofsX),
+                                    ((draw.x + draw.fwDx[k]) + entries[k]!!.ofsX),
                                     (draw.y + entries[k]!!.inkTop),
                                 )
                             )
@@ -906,14 +906,14 @@ class TexturePlanner {
         }
 
         /** How many 1..31 control bytes are needed to move the cursor by delta. */
-        private fun adjustByteCount(delta: Int): Int {
+        internal fun adjustByteCount(delta: Int): Int {
             if ((delta == 0)) {
                 return 0
             }
             return (if ((delta > 0)) ((delta + 19) / 20) else ((-delta + 9) / 10))
         }
 
-        private fun emitAdjust(out: ByteSink, delta: Int): Unit {
+        internal fun emitAdjust(out: ByteSink, delta: Int): Unit {
             var delta = delta
             while ((delta != 0)) {
                 var step: Int = (if ((delta > 0)) minOf(delta, 20) else maxOf(delta, -10))

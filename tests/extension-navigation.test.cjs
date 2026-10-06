@@ -65,6 +65,7 @@ function harness(options = {}) {
   }
   imports['../layers'] = { LayerStack: Stack };
   imports['./chrome-layer'] = { ShellChromeLayer: class {} };
+  imports['./notification-modal-queue'] = load('app/ui/shell/notification-modal-queue.ts', {});
   imports['../menu'] = {
     MenuLayer: class {
       constructor(title, items) {
@@ -528,6 +529,7 @@ test('full-height switcher draws and hit-tests the panel, then restores compact 
   imports['../extension-settings'] = {
     windowLayoutPolicy: () => ({ switcherHeight: full ? 'display' : 'minimum', dividerWidth: 2 }),
   };
+  const band = () => (full ? { top: 0, height: 480 } : { top: 96, height: 288 });
   imports['./geometry'] = {
     MIN_WINDOW_HEIGHT: 288,
     minWindowTop: () => 96,
@@ -535,6 +537,10 @@ test('full-height switcher draws and hit-tests the panel, then restores compact 
     TOP_BAR_HEIGHT: 28,
     SIDEBAR_WIDTH: 64,
     SHELL_OPAQUE_BLACK: 1,
+    switcherPosition: () => 'left',
+    sideStripBand: band,
+    switcherRect: () => ({ x: 0, y: band().top, width: 64, height: band().height }),
+    windowFramed: () => false,
   };
   imports['../menu'] = {
     scrollToKeepSelectionVisible: (_scroll, selected, visible, count) =>

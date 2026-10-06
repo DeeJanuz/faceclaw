@@ -1,6 +1,7 @@
 import type { RingInput } from "../g2/ring-input";
 import { ImageSource, Utils } from "@nativescript/core";
 import * as frameTimings from "./frame-timings";
+import { JavaDirectBuffer } from "./java-direct-buffer";
 
 declare const com: any;
 
@@ -13,6 +14,7 @@ export type CommunicatorPhase =
   | "charging"
   | "retrying"
   | "unpaired"
+  | "incompatible-firmware"
   | "disconnecting";
 
 export type CommunicatorState = {
@@ -33,7 +35,7 @@ export type FrameMetrics = {
   tileCount: number;
 };
 
-import { type FirmwareInfo } from "../g2/firmware-compat";
+import { REQUIRED_FACECLAW_FIRMWARE_VERSION, type FirmwareInfo } from "../g2/firmware-compat";
 
 export type { FirmwareInfo };
 
@@ -134,6 +136,15 @@ export class FaceclawCommunicatorBridge {
   private javaCallQueue: Promise<void> = Promise.resolve();
   /** Calls waiting on javaCallQueue; 0 means enqueueJavaCall's fast path is safe. */
   private queuedJavaCalls = 0;
+  /** Queued calls that may change what a surface holds; see isSurfaceCurrent. */
+  private queuedSurfaceChanges = 0;
+  // Reused Java-side buffers for byte payloads; passing a JS ArrayBuffer to
+  // Java leaks it (see java-direct-buffer.ts). Loaded inside the queued call,
+  // immediately before the synchronous Java call that consumes them.
+  private readonly framePixelsBuffer = new JavaDirectBuffer(640 * 480);
+  private readonly frameDrawsBuffer = new JavaDirectBuffer();
+  private readonly shellSceneBuffer = new JavaDirectBuffer();
+  private readonly buzzerBuffer = new JavaDirectBuffer();
   private readonly frameMetricWaiters = new Set<(metrics: FrameMetrics) => void>();
   // Recent frame-finished outcomes from the Java side, so waitForFrameFinished
   // does not race against finishes that land before the wait starts.
@@ -150,6 +161,7 @@ export class FaceclawCommunicatorBridge {
   private readonly evenAppConflictListeners = new Set<(message: string) => void>();
   private readonly frameMetricsListeners = new Set<(metrics: FrameMetrics) => void>();
   private readonly firmwareInfoListeners = new Set<(info: FirmwareInfo) => void>();
+  private readonly previewAnimationListeners = new Set<() => void>();
 
   constructor(addresses: { right: string; left: string; ring?: string }) {
     const context = Utils.android.getApplicationContext();
@@ -161,6 +173,8 @@ export class FaceclawCommunicatorBridge {
       addresses.left,
       addresses.ring ?? "",
     );
+    // The shared session halts on any other firmware ("incompatible-firmware").
+    this.communicator.setRequiredFirmwareRevision(REQUIRED_FACECLAW_FIRMWARE_VERSION);
     this.listenerProxy = new com.faceclaw.app.FaceclawBleCommunicatorListener({
       onStateChange: (phase: string, status: string) => {
         const normalizedPhase = String(phase) as CommunicatorPhase;
@@ -250,6 +264,14 @@ export class FaceclawCommunicatorBridge {
       },
     });
     this.communicator.setListener(this.listenerProxy);
+    // Already posted to the main looper by the Java side.
+    this.communicator.setPreviewAnimationListener(
+      new java.lang.Runnable({
+        run: () => {
+          for (const listener of Array.from(this.previewAnimationListeners)) listener();
+        },
+      }),
+    );
   }
 
   private emitAsync<T>(listeners: Set<(value: T) => void>, value: T): void {
@@ -272,8 +294,12 @@ export class FaceclawCommunicatorBridge {
    * the frame timings), which is pure latency on a call the caller is already
    * awaiting. Off by default: a call that might block for a while should keep
    * yielding to the main looper first.
+   *
+   * preservesSurfaces marks a call that neither changes a surface's retained
+   * content nor leaves a change waiting for a later composite (it composites
+   * itself), so having it queued does not make isSurfaceCurrent answer false.
    */
-  private enqueueJavaCall<T>(operation: () => T, inlineWhenIdle = false): Promise<T> {
+  private enqueueJavaCall<T>(operation: () => T, inlineWhenIdle = false, preservesSurfaces = false): Promise<T> {
     if (inlineWhenIdle && this.queuedJavaCalls === 0) {
       try {
         return Promise.resolve(operation());
@@ -282,10 +308,12 @@ export class FaceclawCommunicatorBridge {
       }
     }
     this.queuedJavaCalls++;
+    if (!preservesSurfaces) this.queuedSurfaceChanges++;
     const run = () =>
       new Promise<T>((resolve, reject) => {
         setTimeout(() => {
           this.queuedJavaCalls--;
+          if (!preservesSurfaces) this.queuedSurfaceChanges--;
           try {
             resolve(operation());
           } catch (error) {
@@ -356,6 +384,15 @@ export class FaceclawCommunicatorBridge {
   onFrameMetrics(listener: (metrics: FrameMetrics) => void): () => void {
     this.frameMetricsListeners.add(listener);
     return () => this.frameMetricsListeners.delete(listener);
+  }
+
+  /**
+   * Each step of an animation the phone preview is replaying (a menu slide
+   * reaches the glasses as one frame, so frame metrics fire only at its start).
+   */
+  onPreviewAnimationFrame(listener: () => void): () => void {
+    this.previewAnimationListeners.add(listener);
+    return () => this.previewAnimationListeners.delete(listener);
   }
 
   onFirmwareInfo(listener: (info: FirmwareInfo) => void): () => void {
@@ -455,13 +492,22 @@ export class FaceclawCommunicatorBridge {
     await this.enqueueJavaCall(() => this.communicator.setFirmwareDebugFlags(Boolean(enabled)));
   }
 
-  /** Set lens brightness: auto (ambient sensor) or an explicit 0-100 level. */
+  /** Set lens brightness: Faceclaw auto or a fixed level (clamped to 2–100). */
   async setBrightness(autoAdjust: boolean, level: number): Promise<void> {
     await this.enqueueJavaCall(() => this.communicator.setBrightness(Boolean(autoAdjust), Math.round(level)));
   }
 
+  async configureBrightness(p: { auto: boolean; level: number; minimum: number; maximum: number; curve: string; fadeMs: number }): Promise<void> {
+    await this.enqueueJavaCall(() => this.communicator.configureBrightness(p.auto, p.level, p.minimum, p.maximum, p.curve, p.fadeMs));
+  }
+
   async enableWearDetectionAndRequestState(): Promise<void> {
     await this.enqueueJavaCall(() => this.communicator.enableWearDetectionAndRequestState());
+  }
+
+  /** Whether the transport prelude has finished (each arm reports "connected" before it). */
+  isSessionReady(): boolean {
+    return Boolean(this.communicator.isSessionReady());
   }
 
   /** Set the compositor's output frame size. Call before configuring surfaces. */
@@ -547,7 +593,11 @@ export class FaceclawCommunicatorBridge {
    */
   async submitShellScene(bytes: Uint8Array, paintMs = 0, frameId = 0): Promise<void> {
     const snapshot = new Uint8Array(bytes);
-    await this.enqueueJavaCall(() => this.communicator.submitShellScene(snapshot.buffer, paintMs, frameId), true);
+    await this.enqueueJavaCall(
+      () => this.communicator.submitShellScene(this.shellSceneBuffer.load(snapshot), paintMs, frameId),
+      true,
+      true,
+    );
   }
 
   async setUnderlayDim(belowZOrder: number, factor: number): Promise<void> {
@@ -560,6 +610,28 @@ export class FaceclawCommunicatorBridge {
   async setSurfaceVisible(id: string, visible: boolean): Promise<void> {
     await this.enqueueJavaCall(() => {
       this.communicator.setSurfaceVisible(id, Boolean(visible));
+    }, false, true);
+  }
+
+  /**
+   * Whether submitting a full-surface frame with this fingerprint would
+   * change nothing: Java already holds that content for the surface, and no
+   * queued or not-yet-composited change is waiting on a composite. Lets a
+   * repaint that came out identical (a window re-rendered when it comes to
+   * the foreground, say) skip flattening and submitting its frame.
+   */
+  isSurfaceCurrent(surfaceId: string, fingerprint: string): boolean {
+    if (this.queuedSurfaceChanges > 0) return false;
+    return Boolean(this.communicator.isSurfaceCurrent(surfaceId, fingerprint));
+  }
+
+  /**
+   * Stereo depth for a surface, applied while it is the topmost visible
+   * surface and opaquely covers the screen; takes effect at its next frame.
+   */
+  async setSurfaceDepth(id: string, depth: number): Promise<void> {
+    await this.enqueueJavaCall(() => {
+      this.communicator.setSurfaceDepth(id, Math.round(depth));
     });
   }
 
@@ -593,15 +665,17 @@ export class FaceclawCommunicatorBridge {
      */
     glyphs: ArrayBuffer | null = null,
   ): Promise<void> {
-    // Snapshot because the Java call is deferred; the buffer is passed as an
-    // ArrayBuffer, which NativeScript marshals to a ByteBuffer without the
-    // ~150ms per-element copy a byte[] parameter would need.
+    // Snapshot because the Java call is deferred. The bytes reach Java as a
+    // ByteBuffer (no ~150ms per-element copy, as a byte[] parameter would
+    // need), but through a reused Java direct buffer rather than by passing
+    // the ArrayBuffer itself, which NativeScript never frees
+    // (java-direct-buffer.ts).
     const snapshot = new Uint8Array(pixels8bpp);
     // inlineWhenIdle: this is the frame path, the Java side of it measures
     // ~5ms (composite + pack), and the caller awaits it either way.
     await this.enqueueJavaCall(() => {
       this.communicator.submitSurfaceFrame(
-        snapshot.buffer,
+        this.framePixelsBuffer.load(snapshot),
         surfaceId,
         Math.round(rect.x),
         Math.round(rect.y),
@@ -610,7 +684,7 @@ export class FaceclawCommunicatorBridge {
         fingerprint,
         Math.round(nonNegativeNumber(paintMs)),
         Math.round(nonNegativeNumber(frameId)),
-        glyphs,
+        this.frameDrawsBuffer.loadOptional(glyphs),
       );
     }, true);
   }
@@ -693,7 +767,7 @@ export class FaceclawCommunicatorBridge {
   async playBuzzerSequence(payload: Uint8Array): Promise<void> {
     const snapshot = new Uint8Array(payload);
     await this.enqueueJavaCall(() => {
-      this.communicator.playBuzzerSequence(snapshot.buffer);
+      this.communicator.playBuzzerSequence(this.buzzerBuffer.load(snapshot));
     });
   }
 
@@ -713,6 +787,10 @@ export class FaceclawCommunicatorBridge {
       for (const waiter of waiters) waiter("closed");
     }
     this.frameFinishedWaiters.clear();
-    await this.enqueueJavaCall(() => this.communicator.close());
+    this.previewAnimationListeners.clear();
+    await this.enqueueJavaCall(() => {
+      this.communicator.setPreviewAnimationListener(null);
+      this.communicator.close();
+    });
   }
 }

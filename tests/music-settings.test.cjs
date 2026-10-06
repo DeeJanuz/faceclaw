@@ -137,7 +137,7 @@ test('Music settings keeps toggles and selection when a new app arrives and supp
   const { prefs } = store();
   let refreshes = 0, closes = 0;
   const textwrap = load('app/graphics/textwrap.ts');
-  const graphics = load('app/graphics/image.ts', () => textwrap);
+  const graphics = require('../.test-build/app/graphics/image.js');
   const { BdfFont } = load('app/graphics/bdffont.ts', () => ({}));
   const font = BdfFont.parse(source('app/fonts/terminus/ter-u20n.bdf'));
   class RecordingImage extends graphics.GrayImage {
@@ -153,9 +153,12 @@ test('Music settings keeps toggles and selection when a new app arrives and supp
     '../graphics/textwrap': textwrap,
     '../graphics/ui-fonts': { getDefaultSmallFont: () => font },
     '../util/numeric-util': { clamp: (n, lo, hi) => Math.max(lo, Math.min(hi, n)) },
+    './menu-highlight-motion': require('../.test-build/app/ui/menu-highlight-motion.js'), '../graphics/menu-scroll-list': require('../.test-build/app/graphics/menu-scroll-list.js'), './menu-scroll-motion': require('../.test-build/app/ui/menu-scroll-motion.js'), '../graphics/draw-expression': require('../.test-build/app/graphics/draw-expression.js'),
     './metrics': load('app/ui/metrics.ts'), './gestures': {},
     './extension-settings': { typographyPolicy: () => ({}) },
+    './menu-animation-pref': require('../.test-build/app/ui/menu-animation-pref.js'), './animation-speed': require('../.test-build/app/ui/animation-speed.js'), '../native/settings-store': { getStringSetting: (_key, fallback) => fallback },
   };
+  deps['./menu-core'] = load('app/ui/menu-core.ts', (name) => deps[name]);
   const menu = load('app/ui/menu.ts', (name) => deps[name]);
   const uiDeps = {
     '../../graphics/image': deps['../graphics/image'],

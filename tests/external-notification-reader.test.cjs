@@ -45,6 +45,7 @@ function setup() {
   imports['../native/external-notifications'] = store;
   imports['~/util/numeric-util'] = { clamp: (value, min, max) => Math.max(min, Math.min(max, value)) };
   imports['./notification-routing'] = { routeNotificationOpen: () => false };
+  imports['./menu-core'] = require('../.test-build/app/ui/menu-core.js');
   imports['./shell/shell'] = {
     shell: {
       foregroundWindow: () => ({ windowId: focused }),

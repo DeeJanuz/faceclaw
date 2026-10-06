@@ -85,8 +85,11 @@ class RetainedCopyTest {
         assertEquals(1, plan.copyCount)
         assertTrue(plan.repairRectCount >= 1)
         val firstLength = (plan.payload[2].toInt() and 255) or ((plan.payload[3].toInt() and 255) shl 8)
-        assertEquals(17, firstLength)
+        assertEquals(13, firstLength)
         assertEquals(9, plan.payload[4].toInt())
+        // The planner sends every candidate as draw calls; the copy must decode to the same move.
+        val calls = DrawProtocol.fromOptimized(plan.payload, width, height)
+        assertContentEquals(DrawProtocol.rectCopy(DrawProtocol.CURRENT, 12, 0, width - 12, height, 0, 0), calls[0])
         val raster = BleImageOptimizer.buildIncrementalImagePayload(previous, next, width, height, 7)
         val rasterBytes = raster?.payload?.size ?: BleImageOptimizer.maybeCompress(next, width, height).size
         assertTrue(plan.payload.size < rasterBytes)
@@ -160,8 +163,9 @@ class RetainedCopyTest {
         assertEquals(0, hybrid.rectCount)
         val hybridFirstLength =
             (hybrid.payload[2].toInt() and 255) or ((hybrid.payload[3].toInt() and 255) shl 8)
-        assertEquals(17, hybridFirstLength)
+        assertEquals(13, hybridFirstLength)
         assertEquals(9, hybrid.payload[4].toInt())
+        DrawProtocol.fromOptimized(hybrid.payload, width, height)
     }
 
     @Test

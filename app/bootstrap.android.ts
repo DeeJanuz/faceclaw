@@ -5,12 +5,6 @@ import { registerPhoneRotation } from './native/phone-rotation'
 import { dashboardController } from './g2/dashboard-controller'
 import { weatherBridge } from './native/weather'
 
-import { runKotlinBridgeSmokeTest } from './native/kotlin-bridge'
-
-declare const __DEV__: boolean;
-
-if (__DEV__) runKotlinBridgeSmokeTest()
-
 installNativeUserAgent()
 registerShareIntentHandler()
 registerPhoneRotation()

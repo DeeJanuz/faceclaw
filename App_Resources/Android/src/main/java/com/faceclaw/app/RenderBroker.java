@@ -19,6 +19,9 @@ final class RenderBroker {
     void configureSurface(String id,int x,int y,int width,int height,int zOrder,int transparency){compositor.configureSurface(id,x,y,width,height,zOrder,transparency);}
     void removeSurface(String id){compositor.removeSurface(id);}
     void setSurfaceVisible(String id,boolean visible){compositor.setSurfaceVisible(id,visible);}
+    void setSurfaceDepth(String id,int depth){compositor.setSurfaceDepth(id,depth);}
+    /** Notified after each step of an animation the preview is replaying (see SurfaceCompositor). */
+    void setPreviewAnimationListener(kotlin.jvm.functions.Function0<kotlin.Unit> listener){compositor.setPreviewAnimationListener(listener);}
     void setBlanked(boolean blanked){compositor.setBlanked(blanked);}
     void setUnderlayDim(int belowZOrder,int factor256){compositor.setUnderlayDim(belowZOrder,factor256);}
     void setShellScene(ByteBuffer scene){compositor.setShellScene(new AndroidByteReader(scene));}

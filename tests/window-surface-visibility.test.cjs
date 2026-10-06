@@ -11,14 +11,14 @@ function harness() {
     ts.ScriptTarget.Latest,
     true,
   );
-  let method;
+  const methods = [];
   function visit(node) {
-    if (ts.isMethodDeclaration(node) && node.name?.getText(source) === 'configureWindowSurface')
-      method = node.getText(source);
+    if (ts.isMethodDeclaration(node) && ['configureWindowSurface', 'isForegroundSurface'].includes(node.name?.getText(source)))
+      methods.push(node.getText(source));
     ts.forEachChild(node, visit);
   }
   visit(source);
-  assert.ok(method);
+  assert.equal(methods.length, 2);
   const windows = [
     { windowId: 'launcher', appId: 'launcher', surfaceId: 'window:launcher' },
     { windowId: 'calendar', appId: 'calendar', surfaceId: 'window:calendar' },
@@ -42,7 +42,7 @@ function harness() {
   };
   vm.createContext(context);
   vm.runInContext(
-    ts.transpileModule(`class Harness { ${method} }; globalThis.Harness = Harness;`, {
+    ts.transpileModule(`class Harness { ${methods.join('\n')} }; globalThis.Harness = Harness;`, {
       compilerOptions: { target: ts.ScriptTarget.ES2020 },
     }).outputText,
     context,
@@ -63,7 +63,7 @@ function harness() {
 
 test('delayed geometry setup cannot make the old launcher cover a newly focused window', async () => {
   const h = harness();
-  const setup = h.controller.configureWindowSurface('window:launcher', 'min');
+  const setup = h.controller.configureWindowSurface('window:launcher', h.controller.isForegroundSurface('window:launcher'), 'min');
   h.focus(1);
   h.finish();
   await setup;
@@ -72,7 +72,7 @@ test('delayed geometry setup cannot make the old launcher cover a newly focused 
 
 test('a window focused during geometry setup remains visible after setup completes', async () => {
   const h = harness();
-  const setup = h.controller.configureWindowSurface('window:calendar', 'min');
+  const setup = h.controller.configureWindowSurface('window:calendar', h.controller.isForegroundSurface('window:calendar'), 'min');
   h.focus(1);
   h.finish();
   await setup;

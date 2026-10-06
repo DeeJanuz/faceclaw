@@ -46,6 +46,10 @@ export type InProcessWindowOptions = {
   onSystemMenuOpened?: () => void;
   onAppMenuOpened?: () => void;
   setScreenOn?: ShellWindow["setScreenOn"];
+  /** See ShellWindow.keepsScreenOn. */
+  keepsScreenOn?: ShellWindow["keepsScreenOn"];
+  /** The window came to or left the foreground (after its surface visibility follows). */
+  onForegroundChanged?: (foreground: boolean) => void;
   /** Shared actions; requestRender is rebound to this window's render. */
   actions: LayerActions;
   /**
@@ -184,6 +188,7 @@ export function createInProcessWindow(options: InProcessWindowOptions): InProces
     acceptsDirectional: true,
     holdToTalk: options.holdToTalk,
     isVoiceCapturing: options.isVoiceCapturing,
+    keepsScreenOn: options.keepsScreenOn,
     setScreenOn: options.setScreenOn,
     heightMode,
     hasAppMenu: () => hasSharedAppActions(options.closeable) || appMenuItems().length > 0,
@@ -240,6 +245,7 @@ export function createInProcessWindow(options: InProcessWindowOptions): InProces
     onFocus: options.onFocus,
     setForeground: (foreground) => {
       options.setSurfaceVisible(foreground);
+      options.onForegroundChanged?.(foreground);
     },
   };
   const setHeightMode = (mode: WindowHeightMode) => {

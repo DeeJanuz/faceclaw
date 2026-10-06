@@ -273,9 +273,10 @@ function shellEnv({ wakeAction = 'voice-input', skipConfirmation = false } = {})
     '../../assistant/conversations': {}, '../../assistant/models': {}, '../../native/settings-store': {},
     '../notifications': {}, '../dashboard-settings': settings, './ambient-cards': {},
     './chrome-layer': { ShellChromeLayer: class {} }, './modal-layer': {}, './tool-debug-layer': {},
-    './brightness-picker-layer': {},
+    './brightness-picker-layer': {}, './notification-modal-queue': load('app/ui/shell/notification-modal-queue.ts', {}),
+    '../../native/notification-icons': {}, '../../native/notification-sources': {},
     '../../assistant/tool-registry': {}, './geometry': {
-      sidebarWidth: () => 64, minWindowTop: () => 96, TOP_BAR_HEIGHT: 28,
+      sidebarWidth: () => 64, minWindowTop: () => 96, switcherPosition: () => 'left', uiDepth: () => 0, TOP_BAR_HEIGHT: 28,
       appViewportRect: () => ({ x: 64, y: 124, width: 576, height: 260 }),
       windowBandHeight: () => 288, windowTop: () => 96,
     },
@@ -376,7 +377,7 @@ function chatLayerEnv() {
   const env = conversations();
   const textwrap = load('app/graphics/textwrap.ts', {});
   const { BdfFont } = load('app/graphics/bdffont.ts', { '@nativescript/core': {} });
-  const graphics = load('app/graphics/image.ts', { './textwrap': textwrap });
+  const graphics = require('../.test-build/app/graphics/image.js');
   const font = BdfFont.parse(fs.readFileSync(path.join(__dirname, '../app/fonts/terminus/ter-u12n.bdf'), 'utf8'));
   let windowOptions;
   const { createAiChatWindow } = load('app/apps/ai-chat/ai-chat-app.ts', {

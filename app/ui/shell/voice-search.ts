@@ -2,7 +2,10 @@ import { type GrayImage } from "../../graphics/image";
 import { voiceControlBridge } from "../../native/voice-control";
 import { GESTURE_CLICK, GESTURE_DOUBLE_CLICK, gestureHints, type InputEvent } from "../gestures";
 import { Layer, type LayerActions, type LayerContext } from "../layers";
-import { paintInputDialog } from "./input-dialog";
+import type { Menu } from "../menu-core";
+import { createInputDialogMenu, paintInputDialog, type InputDialogRow } from "./input-dialog";
+
+type SearchRow = InputDialogRow & { onSelect: () => void };
 
 /** Generic, explicit voice query. No message destination, draft, send or refinement path. */
 export class VoiceSearchLayer implements Layer {
@@ -16,6 +19,8 @@ export class VoiceSearchLayer implements Layer {
   private delivered = false;
   private generation = 0;
   private selected = 0;
+  /** Painted rows; `selected` stays the source of truth for input. */
+  private menu: Menu<SearchRow> | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private unsubscribe: Array<() => void> = [];
   constructor(private readonly options: { actions: LayerActions; label: string; onSearch: (query: string) => void; dismiss: () => void; onClosed: () => void }) {}
@@ -80,7 +85,7 @@ export class VoiceSearchLayer implements Layer {
     if (wasCapturing) this.stop(false);
     this.options.actions.requestRender();
   }
-  private rows(): Array<{ label: string; dim: boolean; onSelect: () => void }> {
+  private rows(): SearchRow[] {
     return [
       { label: "Search", dim: !this.text, onSelect: () => {
         if (this.removed || this.delivered || this.phase !== "review" || !this.text) return;
@@ -93,8 +98,13 @@ export class VoiceSearchLayer implements Layer {
   }
   paint(_context: LayerContext, paintBelow: () => GrayImage): GrayImage {
     const image = paintBelow();
+    let menu: Menu<SearchRow> | null = null;
+    if (this.phase === "review") {
+      menu = this.menu ??= createInputDialogMenu<SearchRow>();
+      menu.setItems(this.rows(), this.selected);
+    }
     paintInputDialog(image, { title: this.options.label || "Voice search", status: this.status,
-      text: this.text || this.partial || "Say a name", rows: this.phase === "review" ? this.rows() : [], selectedRow: this.selected,
+      text: this.text || this.partial || "Say a name", menu,
       hint: this.phase === "review" ? undefined : gestureHints([[GESTURE_CLICK, "done"], [GESTURE_DOUBLE_CLICK, "cancel"]]) });
     return image;
   }

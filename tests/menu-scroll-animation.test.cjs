@@ -1,0 +1,216 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { Menu } = require('../.test-build/app/ui/menu-core.js');
+const { MenuHighlightMotion, MENU_HIGHLIGHT_DURATION_MS } = require('../.test-build/app/ui/menu-highlight-motion.js');
+const { GrayImage } = require('../.test-build/app/graphics/image.js');
+const { DrawOp } = require('../.test-build/app/graphics/display-list.js');
+const { evaluate } = require('../.test-build/app/graphics/draw-expression.js');
+const { MenuScrollMotion, MENU_BOUNCE_DURATION_MS } = require('../.test-build/app/ui/menu-scroll-motion.js');
+const { setMenuAnimationReader } = require('../.test-build/app/ui/menu-animation-pref.js');
+
+const BOX = { x: 10, y: 5, width: 40, height: 60 };
+const ITEMS = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
+
+function withClock(now, fn) {
+  const original = Date.now;
+  Date.now = () => now;
+  try { return fn(); } finally { Date.now = original; }
+}
+
+/** 20px rows whose ink ignores selection, so frames compare across selection changes. */
+function inkMenu(overrides = {}) {
+  return new Menu({
+    items: ITEMS,
+    getHeight: () => 20,
+    draw: ({ image, index, x, y }) => image.fillRect(x + 2 + index, y + 4, 6, 8, 200),
+    ...overrides,
+  });
+}
+
+function paint(menu, now, { box = BOX, background = 0, size = [64, 72] } = {}) {
+  return withClock(now, () => {
+    const image = new GrayImage(size[0], size[1], background);
+    menu.paint(image, box, true);
+    return image;
+  });
+}
+
+const scrollLists = (image) => image.draws
+  .map((draw) => draw.presentation?.displayList)
+  .filter((list) => list?.calls.some((call) => call.op === DrawOp.RECT_COPY));
+
+/** What the glasses show at `at`, as 4-bit values. */
+function shown(image, at) {
+  return withClock(at, () => Array.from(image.withDrawsBaked().pixels, (v) => Math.min(15, (v + 8) >> 4)));
+}
+
+test('navigation that scrolls animates a strip covering both viewports', () => {
+  const menu = inkMenu();
+  menu.select(1);
+  const before = paint(menu, 1000);
+  assert.equal(menu.scrollTop, 0);
+  menu.moveSelection(1);
+  const moving = paint(menu, 2000);
+  assert.equal(menu.scrollTop, 20, 'c scrolls d into view');
+  const [list] = scrollLists(moving);
+  assert.ok(list, 'a scroll display list is retained');
+  const [strip] = list.resources;
+  assert.equal(strip.height, 80, 'the strip spans the old and new viewports');
+  assert.ok(strip.width < BOX.width, 'the strip is cropped to the ink columns');
+  const copy = list.calls[0];
+  assert.equal(copy.op, DrawOp.RECT_COPY);
+  assert.equal(copy.height, BOX.height);
+  assert.deepEqual(evaluate(copy.y, 0, 0), { value: 0, pending: true });
+  assert.equal(evaluate(copy.y, MENU_HIGHLIGHT_DURATION_MS / 2, 0).value, 10);
+  assert.deepEqual(evaluate(copy.y, MENU_HIGHLIGHT_DURATION_MS, 0), { value: 20, pending: false });
+  assert.equal(list.calls[1].op, DrawOp.ROUNDED_RECT, 'the highlight is drawn over the copied rows');
+  assert.equal(moving.draws.filter((draw) => draw.presentation && !draw.presentation.displayList?.calls.some((c) => c.op === DrawOp.RECT_COPY)).length, 0,
+    'the selected row is in the strip, not a separate selection');
+
+  // First and last frames match the static paints on either side.
+  assert.deepEqual(shown(moving, 2000), shown(before, 1000));
+  const end = 2000 + MENU_HIGHLIGHT_DURATION_MS;
+  const settled = paint(menu, end);
+  assert.equal(scrollLists(settled).length, 0, 'the static paint takes over once the animation ends');
+  assert.deepEqual(shown(moving, end), shown(settled, end));
+});
+
+test('a second move during the scroll starts from the offset on screen', () => {
+  const menu = inkMenu();
+  menu.select(1);
+  paint(menu, 1000);
+  menu.moveSelection(1);
+  paint(menu, 2000);
+  menu.moveSelection(1);
+  const image = paint(menu, 2000 + MENU_HIGHLIGHT_DURATION_MS / 2);
+  assert.equal(menu.scrollTop, 40);
+  const [list] = scrollLists(image);
+  assert.equal(list.resources[0].height, 90, 'the strip starts at the current offset, 10');
+  assert.equal(evaluate(list.calls[0].y, 0, 0).value, 0);
+  assert.equal(evaluate(list.calls[0].y, MENU_HIGHLIGHT_DURATION_MS, 0).value, 30);
+});
+
+test('wraps, programmatic moves, busy backgrounds and oversized strips snap', () => {
+  const wrapping = inkMenu({ wrap: true });
+  wrapping.select(6);
+  paint(wrapping, 1000);
+  wrapping.moveSelection(1);
+  assert.equal(scrollLists(paint(wrapping, 2000)).length, 0, 'wrap');
+
+  const jumped = inkMenu();
+  paint(jumped, 1000);
+  jumped.select(5);
+  assert.equal(scrollLists(paint(jumped, 2000)).length, 0, 'select()');
+
+  const busy = inkMenu();
+  busy.select(1);
+  paint(busy, 1000, { background: 100 });
+  busy.moveSelection(1);
+  const covered = paint(busy, 2000, { background: 100 });
+  assert.equal(scrollLists(covered).length, 0, 'the opaque copy would hide the host background');
+  assert.equal(covered.draws.filter((draw) => draw.presentation).length, 1, 'the selection is still drawn');
+
+  // 600px-wide rows: a 600x220 strip exceeds the 64 KiB resource limit unless cropped.
+  const wide = (inkWidth) => {
+    const menu = new Menu({ items: Array.from({ length: 20 }, (_, i) => i), getHeight: () => 20,
+      draw: ({ image, x, y }) => image.fillRect(x, y + 4, inkWidth, 8, 200) });
+    const options = { box: { x: 0, y: 0, width: 600, height: 200 }, size: [640, 240] };
+    menu.select(8);
+    paint(menu, 1000, options);
+    menu.moveSelection(1);
+    return scrollLists(paint(menu, 2000, options));
+  };
+  assert.equal(wide(600).length, 0, 'too large');
+  assert.equal(wide(40).length, 1, 'narrow ink crops under the limit');
+  assert.equal(wide(40)[0].resources[0].width, 40);
+});
+
+test('rows cut off by the viewport edge scroll without popping in either direction', () => {
+  // 70px box, 20px rows: at rest the fourth visible row shows its top half.
+  const box = { x: 10, y: 5, width: 40, height: 70 };
+  const menu = inkMenu();
+  menu.select(1);
+  let before = paint(menu, 1000, { box });
+  for (const [delta, at] of [[1, 2000], [1, 3000], [-1, 4000], [-1, 5000]]) {
+    const scrollTop = menu.scrollTop;
+    menu.moveSelection(delta);
+    const moving = paint(menu, at, { box });
+    assert.notEqual(menu.scrollTop, scrollTop, `step at ${at} scrolls`);
+    assert.equal(scrollLists(moving).length, 1);
+    assert.deepEqual(shown(moving, at), shown(before, at - 1000), `first frame at ${at}`);
+    const end = at + MENU_HIGHLIGHT_DURATION_MS;
+    before = paint(menu, end, { box });
+    assert.deepEqual(shown(moving, end), shown(before, end), `last frame at ${at}`);
+  }
+});
+
+test('an end without wrap or exit callback bounces, carrying the highlight with its row', () => {
+  for (const [start, delta] of [[6, 1], [0, -1]]) {
+    const menu = inkMenu();
+    menu.select(start);
+    const rest = paint(menu, 1000);
+    const scrollTop = menu.scrollTop;
+    menu.moveSelection(delta);
+    assert.equal(menu.selectedIndex, start);
+    const bouncing = paint(menu, 2000);
+    assert.equal(menu.scrollTop, scrollTop);
+    const [list] = scrollLists(bouncing);
+    assert.ok(list, `bounce ${delta}`);
+    const [copy, box] = list.calls;
+    const at = (value, ms) => evaluate(value, ms, 0).value;
+    const peak = Math.round(MENU_BOUNCE_DURATION_MS * 0.35);
+    // Offsets relative to rest: 8px (0.4 of a 20px row) past the end at the peak.
+    assert.equal(at(copy.y, peak) - at(copy.y, 0), 8 * delta);
+    assert.equal(at(copy.y, MENU_BOUNCE_DURATION_MS), at(copy.y, 0));
+    assert.equal(at(box.y, peak) - at(box.y, 0), -8 * delta, 'the highlight moves with its row');
+    assert.ok(evaluate(copy.y, MENU_BOUNCE_DURATION_MS - 1, 0).pending);
+    assert.deepEqual(shown(bouncing, 2000), shown(rest, 1000));
+    const end = 2000 + MENU_BOUNCE_DURATION_MS;
+    assert.deepEqual(shown(bouncing, end), shown(paint(menu, end), end));
+  }
+  const exits = [];
+  const exiting = inkMenu({ onExitBottom: () => exits.push('bottom') });
+  exiting.select(6);
+  paint(exiting, 1000);
+  exiting.moveSelection(1);
+  assert.deepEqual(exits, ['bottom']);
+  assert.equal(scrollLists(paint(exiting, 2000)).length, 0, 'an exit callback replaces the bounce');
+});
+
+test('with menu animation disabled, scrolls, slides and bounces snap', (t) => {
+  setMenuAnimationReader(() => 'disabled');
+  t.after(() => setMenuAnimationReader(() => 'normal'));
+  const timed = (image) => image.draws.filter((draw) => draw.presentation?.displayList?.timeline);
+  const menu = inkMenu();
+  paint(menu, 1000);
+  menu.moveSelection(1);
+  const slid = paint(menu, 2000);
+  assert.equal(menu.scrollTop, 0);
+  assert.equal(timed(slid).length, 0, 'the highlight snaps');
+  menu.moveSelection(1);
+  const scrolled = paint(menu, 3000);
+  assert.equal(menu.scrollTop, 20);
+  assert.equal(timed(scrolled).length, 0, 'the scroll snaps');
+  menu.select(6);
+  paint(menu, 4000);
+  menu.moveSelection(1);
+  assert.equal(timed(paint(menu, 5000)).length, 0, 'no bounce');
+});
+
+test('menu animation speed scales slide, scroll and bounce durations', (t) => {
+  t.after(() => setMenuAnimationReader(() => 'normal'));
+  for (const [speed, factor] of [['very-fast', 5], ['fast', 2], ['normal', 1], ['slow', 0.5]]) {
+    setMenuAnimationReader(() => speed);
+    const highlight = new MenuHighlightMotion();
+    highlight.paint(0, 0, 10, 20, 100, 20, 0);
+    highlight.navigate(0, false);
+    assert.equal(highlight.paint(1, 0, 10, 40, 100, 20, 100).durationMs, MENU_HIGHLIGHT_DURATION_MS / factor, speed);
+    const scroll = new MenuScrollMotion();
+    scroll.paint(0, BOX, 0);
+    scroll.navigate(false);
+    assert.equal(scroll.paint(20, BOX, 100).durationMs, MENU_HIGHLIGHT_DURATION_MS / factor, speed);
+    scroll.bounce(8);
+    assert.equal(scroll.paint(20, BOX, 1000).durationMs, MENU_BOUNCE_DURATION_MS / factor, speed);
+  }
+});
+

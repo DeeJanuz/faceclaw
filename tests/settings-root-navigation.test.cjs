@@ -26,6 +26,7 @@ function loadPanel() {
     },
     '../metrics': { LIST_ROW_TEXT_INSET: 0, lineStep: () => 10, listRowHeight: () => 20 },
     '../shell/shell': { shell },
+    '../menu-core': require('../.test-build/app/ui/menu-core.js'),
   };
   const source = fs.readFileSync('app/ui/dashboard/settings-panel.ts', 'utf8');
   const output = transpileSource(source);

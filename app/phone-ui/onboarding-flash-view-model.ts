@@ -56,7 +56,7 @@ export class OnboardingFlashViewModel extends Observable {
   private promptBattery: FlashPromptBattery | null = null;
   private flasher: FirmwareFlasher | null = null;
   private flasherUnsubscribers: Array<() => void> = [];
-  private retryAction: () => void = () => this.beginPrompt();
+  private retryAction: () => void | Promise<void> = () => this.beginPrompt();
 
   constructor(options?: { mode?: FlashMode; fromOnboarding?: boolean; autoStart?: boolean }) {
     super();
@@ -213,7 +213,7 @@ export class OnboardingFlashViewModel extends Observable {
         this.finish();
         return;
       case "error":
-        this.retryAction();
+        void this.retryAction();
         return;
       default:
         return;
@@ -571,7 +571,7 @@ export class OnboardingFlashViewModel extends Observable {
     });
   }
 
-  private toError(message: string, retry: () => void, headline = "Something Went Wrong"): void {
+  private toError(message: string, retry: () => void | Promise<void>, headline = "Something Went Wrong"): void {
     this.retryAction = retry;
     this.status = message;
     this.setPhase("error");

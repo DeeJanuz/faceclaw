@@ -20,8 +20,8 @@ function load(file, imports = {}) {
   return module.exports;
 }
 function harness() {
-  const image = load('app/graphics/image.ts', { './bdffont': {}, './textwrap': {} }),
-    plane = load('app/graphics/plane.ts', { './image': image });
+  const image = require('../.test-build/app/graphics/image.js'),
+    plane = require('../.test-build/app/graphics/plane.js');
   const layers = load('app/ui/layers.ts', {
     '../graphics/image': image,
     '../graphics/plane': plane,
@@ -42,6 +42,7 @@ function harness() {
   Object.assign(shellImports, {
     '../layers': layers,
     './chrome-layer': { ShellChromeLayer: class {} },
+    './notification-modal-queue': load('app/ui/shell/notification-modal-queue.ts'),
     '../menu': { MenuLayer: class {} },
     '../../graphics/image': image,
     '../../graphics/plane': plane,
@@ -115,7 +116,7 @@ test('partial dimming composes and replacement layers retain the no-underlay she
 });
 
 test('arrival surface ignores the centered app band and reader restores that band', () => {
-  const image = load('app/graphics/image.ts', { './bdffont': {}, './textwrap': {} });
+  const image = require('../.test-build/app/graphics/image.js');
   const { ExtensionLayer } = load('app/ui/shell/extension-layer.ts', {
     '../../graphics/image': image,
     './geometry': { appViewportRect: () => ({ x: 1, y: 3, width: 4, height: 2 }) },
@@ -140,7 +141,7 @@ test('arrival surface ignores the centered app band and reader restores that ban
   assert.equal(frame.pixels[3 * 6 + 1], 190);
 });
 test('extension cleanup reports the presentation identity it was bound to', () => {
-  const image = load('app/graphics/image.ts', { './bdffont': {}, './textwrap': {} });
+  const image = require('../.test-build/app/graphics/image.js');
   const { ExtensionLayer } = load('app/ui/shell/extension-layer.ts', {
     '../../graphics/image': image,
     './geometry': { appViewportRect: () => ({ x: 0, y: 0, width: 1, height: 1 }) },
@@ -161,7 +162,7 @@ test('extension cleanup reports the presentation identity it was bound to', () =
   assert.deepEqual(removed, ['preview-1', undefined]);
 });
 test('a new presentation cannot reuse pixels from the previous notification', () => {
-  const image = load('app/graphics/image.ts', { './bdffont': {}, './textwrap': {} });
+  const image = require('../.test-build/app/graphics/image.js');
   const { ExtensionLayer } = load('app/ui/shell/extension-layer.ts', {
     '../../graphics/image': image,
     './geometry': { appViewportRect: () => ({ x: 0, y: 0, width: 1, height: 1 }) },

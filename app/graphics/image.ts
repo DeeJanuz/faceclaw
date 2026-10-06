@@ -1,3 +1,6 @@
+import { menuSelectionList } from "./menu-selection-list";
+import { encodeDisplayList, dimDisplayList, paintDisplayList, type DisplayList } from "./display-list";
+import type { MenuHighlightAnimation } from "../ui/menu-highlight-motion";
 import { Glyph } from "./bdffont";
 import { wrapText } from "./textwrap";
 
@@ -5,17 +8,24 @@ export const G2_LENS_WIDTH = 640;
 export const G2_LENS_HEIGHT = 480;
 const DEFAULT_CORNER_RADIUS = 8;
 
-export function imageFromAsciiArt(lines: readonly string[], value = 255): GrayImage {
+/**
+ * Maps ASCII-art characters to gray levels 0-255. Space and "." are 0 unless
+ * the palette overrides them; any other character must have an entry.
+ */
+export type AsciiArtPalette = Readonly<Record<string, number>>;
+
+export function imageFromAsciiArt(lines: readonly string[], palette: AsciiArtPalette): GrayImage {
   const width = Math.max(0, ...lines.map((line) => line.length));
   const image = new GrayImage(width, lines.length, 0);
-  const fill = clampByte(value);
   for (let y = 0; y < lines.length; y++) {
     const line = lines[y]!;
     for (let x = 0; x < line.length; x++) {
-      const pixel = line[x];
-      if (pixel && pixel !== " " && pixel !== ".") {
-        image.pixels[y * width + x] = fill;
+      const pixel = line[x]!;
+      const value = palette[pixel] ?? (pixel === " " || pixel === "." ? 0 : undefined);
+      if (value === undefined) {
+        throw new Error(`imageFromAsciiArt: no palette entry for ${JSON.stringify(pixel)}`);
       }
+      image.pixels[y * width + x] = clampByte(value);
     }
   }
   return image;
@@ -73,7 +83,7 @@ export type PlacedGlyph = {
  * from the moment it is placed.
  */
 export type PlacedImage = {
-  presentation?: { mode?: "image" | "masked-image"; radius: number; background: number; border: number; depth: number; occlusions?: readonly { x: number; y: number; width: number; height: number }[] };
+  presentation?: { displayList?: DisplayList; mode?: "image" | "masked-image"; radius: number; background: number; border: number; depth: number; occlusions?: readonly { x: number; y: number; width: number; height: number }[] };
   kind: "image";
   source: GrayImage;
   x: number;
@@ -274,17 +284,30 @@ export class GrayImage {
     const destX = dx | 0;
     const destY = dy | 0;
 
-    for (let row = 0; row < copyHeight; row++) {
-      const sy = srcY + row;
-      const ty = destY + row;
-      if (sy < 0 || sy >= source.height || ty < 0 || ty >= this.height) continue;
-      for (let col = 0; col < copyWidth; col++) {
-        const sx = srcX + col;
-        const tx = destX + col;
-        if (sx < 0 || sx >= source.width || tx < 0 || tx >= this.width) continue;
-        const value = source.pixels[sy * source.width + sx] ?? 0;
+    // Clip once, then copy row spans: flattening a frame blits every plane,
+    // and per-pixel bounds checks made that a sizeable share of a paint.
+    const colStart = Math.max(0, -destX);
+    const colEnd = Math.min(copyWidth, source.width - srcX, this.width - destX);
+    const rowStart = Math.max(0, -destY);
+    const rowEnd = Math.min(copyHeight, source.height - srcY, this.height - destY);
+    const span = colEnd - colStart;
+    const src = source.pixels;
+    const dst = this.pixels;
+    // A blit within one image copies pixel by pixel, forwards, as it always has.
+    const bulk = !opts.transparentZero && source !== this;
+    // No columns in range means no rows to copy.
+    const rowLimit = span > 0 ? rowEnd : rowStart;
+    for (let row = rowStart; row < rowLimit; row++) {
+      const from = (srcY + row) * source.width + srcX + colStart;
+      const to = (destY + row) * this.width + destX + colStart;
+      if (bulk) {
+        dst.set(src.subarray(from, from + span), to);
+        continue;
+      }
+      for (let i = 0; i < span; i++) {
+        const value = src[from + i]!;
         if (opts.transparentZero && value === 0) continue;
-        this.pixels[ty * this.width + tx] = value;
+        dst[to + i] = value;
       }
     }
 
@@ -396,7 +419,9 @@ export class GrayImage {
         hash = mixInt(hash, placed.source.width);
         hash = mixInt(hash, placed.source.height);
         hash = mixInt(hash, placed.source.sourceContentHash32());
-        if (placed.presentation) { const p = placed.presentation; for (const value of [p.radius, p.background, p.border, p.depth, p.mode === "image" ? 1 : p.mode === "masked-image" ? 2 : 0]) hash = mixInt(hash, value); }
+        if (placed.presentation) { const p = placed.presentation; for (const value of [p.radius, p.background, p.border, p.depth, p.mode === "image" ? 1 : p.mode === "masked-image" ? 2 : 0]) hash = mixInt(hash, value);
+          if (p.displayList) hash = mixInt(hash, bytesHash32(encodeDisplayList({ displayList: p.displayList, x: 0, y: 0, width: placed.source.width, height: placed.source.height, depth: p.depth }, p.displayList.timeline?.startedAt ?? 0)));
+        }
       } else {
         hash = mixInt(hash, 0xf17e);
         hash = mixInt(hash, placed.font.atlasTag);
@@ -412,28 +437,9 @@ export class GrayImage {
     return hash >>> 0;
   }
 
-  /**
-   * FNV-1a over the raster pixels. Four bytes at a time where alignment
-   * allows: this runs on every frame's fingerprint, over the whole screen, on
-   * the thread that is about to hand the frame to the transport.
-   */
+  /** Hash of the raster pixels; see bytesHash32. */
   private pixelsHash32(): number {
-    const pixels = this.pixels;
-    let hash = 2166136261;
-    let i = 0;
-    if ((pixels.byteOffset & 3) === 0) {
-      const words = new Uint32Array(pixels.buffer, pixels.byteOffset, pixels.length >>> 2);
-      for (let w = 0; w < words.length; w++) {
-        hash ^= words[w]!;
-        hash = Math.imul(hash, 16777619);
-      }
-      i = words.length << 2;
-    }
-    for (; i < pixels.length; i++) {
-      hash ^= pixels[i]!;
-      hash = Math.imul(hash, 16777619);
-    }
-    return hash >>> 0;
+    return bytesHash32(this.pixels);
   }
 
   /**
@@ -508,9 +514,44 @@ export class GrayImage {
   }
 
   /** Retain the selected row separately from the menu surface for glasses-side composition. */
-  drawMenuSelection(source: GrayImage, x: number, y: number, background: number, border: number, radius = 8, depth = 2): void {
-    this.drawList.push({ kind: "image", source: source.withDrawsBaked(), x, y,
-      presentation: { radius, background, border, depth } });
+  drawMenuSelection(source: GrayImage, x: number, y: number, background: number, border: number, radius = 8, depth = 2, animation?: MenuHighlightAnimation): void {
+    const baked = source.withDrawsBaked();
+    this.drawList.push({ kind: "image", source: baked, x, y,
+      presentation: { radius, background, border, depth, displayList: menuSelectionList(baked, background, border, radius, animation) } });
+  }
+
+  /**
+   * Paint this image's glyph and image draws onto a gray8 buffer at (dx, dy),
+   * inside `clip`, the way the glasses replay them from a display list (see
+   * DrawOp.DRAWS): glyphs firmware-exact, images skipping pixels whose 4-bit
+   * level is 0. Raster pixels and other draw kinds are not painted.
+   */
+  paintReplayDraws(pixels: Uint8Array, width: number, height: number, dx: number, dy: number,
+      clip: { x: number; y: number; width: number; height: number }): void {
+    const left = Math.max(0, clip.x), top = Math.max(0, clip.y);
+    const right = Math.min(width, clip.x + clip.width), bottom = Math.min(height, clip.y + clip.height);
+    const sink: PixelSink = {
+      setPixel: (x, y, value) => {
+        if (x >= left && y >= top && x < right && y < bottom) pixels[y * width + x] = clampByte(value);
+      },
+    };
+    for (const placed of this.drawList) {
+      if (placed.kind === "glyph") {
+        rasterizeGlyph(sink, placed.font, placed.glyph, placed.x + dx, placed.y + dy, placed.value);
+      } else if (placed.kind === "image" && !placed.presentation) {
+        const source = placed.source;
+        for (let y = 0; y < source.height; y++) for (let x = 0; x < source.width; x++) {
+          const level = grayToNibble(source.pixels[y * source.width + x]!);
+          if (level) sink.setPixel(placed.x + dx + x, placed.y + dy + y, level * 16);
+        }
+      }
+    }
+  }
+
+  /** Submit a retained list alongside this frame; coordinates are relative to x/y. */
+  drawDisplayList(displayList: DisplayList, x: number, y: number, width: number, height: number, depth = 0): void {
+    this.drawList.push({ kind: "image", source: new GrayImage(width, height), x, y,
+      presentation: { radius: 0, background: 0, border: 0, depth, displayList } });
   }
 
   /** Replay an image at stereo depth. Masked images preserve intentional gray8 black (1). */
@@ -571,7 +612,7 @@ export class GrayImage {
     for (const placed of this.drawList) {
       if (placed.kind === "image" && placed.presentation) {
         const p = placed.presentation;
-        copy.drawList.push({ ...placed, source: placed.source.dimmed(factor), presentation: { ...p, background: dimValue(p.background, scale), border: dimValue(p.border, scale) } });
+        copy.drawList.push({ ...placed, source: placed.source.dimmed(factor), presentation: { ...p, background: dimValue(p.background, scale), border: dimValue(p.border, scale), displayList: p.displayList && dimDisplayList(p.displayList, factor) } });
       } else if (placed.kind !== "image") {
         copy.drawList.push({ ...placed, value: dimValue(placed.value, scale) });
       }
@@ -614,6 +655,11 @@ export class GrayImage {
       } else if (placed.kind === "image") {
         if (placed.presentation) {
           if (!presentations) continue;
+          if (placed.presentation.displayList) {
+            paintDisplayList(target.pixels, target.pixels.slice(), target.width, target.height,
+              { displayList: placed.presentation.displayList, x: placed.x + dx, y: placed.y + dy, width: placed.source.width, height: placed.source.height, depth: placed.presentation.depth });
+            continue;
+          }
           if (placed.presentation.mode) {
             target.bitBlt(placed.source, placed.x + dx, placed.y + dy, { transparentZero: true });
             continue;
@@ -646,9 +692,12 @@ export function grayToNibble(value: number): number {
   return value <= 0 ? 0 : Math.min(15, (value + 8) >> 4);
 }
 
+/** Where rasterizeGlyph writes: an image, or a clipped buffer (paintReplayDraws). */
+type PixelSink = { setPixel(x: number, y: number, value: number): void };
+
 /** Bake one glyph into an image's pixel buffer (y is the top of the line). */
 function rasterizeGlyph(
-  target: GrayImage,
+  target: PixelSink,
   font: GlyphFont,
   glyph: Glyph,
   x: number,
@@ -698,6 +747,29 @@ function clampByte(value: number): number {
 }
 
 /** Fold a 32-bit int into an FNV-style running hash. */
+/**
+ * FNV-1a over bytes. Four bytes at a time where alignment allows: this runs on
+ * every frame's fingerprint, over the whole screen, on the thread that is
+ * about to hand the frame to the transport.
+ */
+function bytesHash32(bytes: Uint8Array): number {
+  let hash = 2166136261;
+  let i = 0;
+  if ((bytes.byteOffset & 3) === 0) {
+    const words = new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.length >>> 2);
+    for (let w = 0; w < words.length; w++) {
+      hash ^= words[w]!;
+      hash = Math.imul(hash, 16777619);
+    }
+    i = words.length << 2;
+  }
+  for (; i < bytes.length; i++) {
+    hash ^= bytes[i]!;
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
 function mixInt(hash: number, value: number): number {
   hash ^= value | 0;
   return Math.imul(hash, 16777619);

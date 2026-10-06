@@ -422,18 +422,17 @@ class BleProtocol {
         }
 
         /**
-         * Set the lens brightness: G2SettingPackage{commandId=1 (DeviceReceiveInfo),
-         * deviceReceiveInfoFromApp(3){deviceReceiveBrightness(1){autoAdjust(1),
-         * brightnessLevel(2)}}} on sid 0x09. brightnessLevel is 0-100 (nonlinear; 0 is
-         * dim-but-visible, not off). When autoAdjust is set the ambient-light sensor drives
-         * brightness, so the level field is omitted; otherwise the level is always encoded
-         * (explicit zero included) so brightnessLevel=0 reaches the wire.
+         * Stock settings helper (Faceclaw uses CFW mode 30). autoAdjust and
+         * brightnessLevel are oneof alternatives: never encode both. A level
+         * alone does NOT disable stock auto adjustment; it is a temporary
+         * manual override when auto remains enabled. Stock clamps to 2..100.
          */
         @JvmStatic
         fun buildSetBrightness(magic: Int, autoAdjust: Boolean, brightnessLevel: Int): ByteArray {
             var brightness: MutableList<ByteArray> = ArrayList()
-            brightness.add(encodeVarintField(1, (if (autoAdjust) 1 else 0)))
-            if (!autoAdjust) {
+            if (autoAdjust) {
+                brightness.add(encodeVarintField(1, 1))
+            } else {
                 brightness.add(encodeVarintField(2, brightnessLevel))
             }
             return concat(
@@ -792,8 +791,8 @@ class BleProtocol {
          * are fields 5/6 of the deviceReceiveRequestFromApp submessage (field 4); Faceclaw's custom
          * firmware additionally appends top-level field 100 with its revision ("Faceclaw/<n>";
          * older builds sent "EVENCFW/<ver> <tokens>"), which stock firmware never sends. Returns
-         * null when the ack carries none of it. Compatibility is judged on the TS side
-         * (app/g2/firmware-compat.ts); Java only needs to know whether the firmware is ours at all.
+         * null when the ack carries none of it. The session halts when [FirmwareInfo.isCompatible]
+         * fails; the user-facing classification and messages live in app/g2/firmware-compat.ts.
          */
         @JvmStatic
         fun parseSettingsFirmwareInfo(pb: ByteArray): FirmwareInfo? {
@@ -860,7 +859,7 @@ class BleProtocol {
         private fun concat(parts: MutableList<ByteArray>): ByteArray {
             var out: ByteSink = ByteSink()
             for (part in parts) {
-                if (((part != null) && (part.size > 0))) {
+                if (part.size > 0) {
                     out.write(part, 0, part.size)
                 }
             }
@@ -1472,11 +1471,34 @@ class BleProtocol {
 
         /**
          * True when the glasses run Faceclaw's custom firmware (any revision). Whether the revision
-         * is the one this app needs is decided on the TS side, which disconnects on a mismatch;
-         * this only guards the private modes against stock or third-party firmware in the meantime.
+         * is one this app can run is [isCompatible]; this only guards the private modes against
+         * stock or third-party firmware.
          */
         fun isFaceclawFirmware(): Boolean {
             return extension.trim().startsWith(FACECLAW_EXTENSION_PREFIX)
+        }
+
+        /**
+         * The revision from a "Faceclaw/<n>" extension, or -1 for stock, pre-revision
+         * ("EVENCFW/...") and third-party firmware. Mirrors parseFirmwareExtension in
+         * app/g2/firmware-compat.ts.
+         */
+        fun faceclawRevision(): Int {
+            val text = extension.trim()
+            if (!text.startsWith(FACECLAW_EXTENSION_PREFIX)) {
+                return -1
+            }
+            val digits = text.substring(FACECLAW_EXTENSION_PREFIX.length).trimStart().takeWhile { it in '0'..'9' }
+            return digits.toIntOrNull() ?: -1
+        }
+
+        /**
+         * True when this is Faceclaw's firmware at [requiredRevision] or newer (revisions only add
+         * to the contract). Mirrors hasCompatibleFirmware in app/g2/firmware-compat.ts.
+         */
+        fun isCompatible(requiredRevision: Int): Boolean {
+            val revision = faceclawRevision()
+            return revision >= 0 && revision >= requiredRevision
         }
     }
 }

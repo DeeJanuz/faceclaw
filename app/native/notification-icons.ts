@@ -8,6 +8,7 @@ import { toUint8Array } from "../util/array-util";
 import { rememberNotificationSources } from "./notification-sources";
 
 declare const com: any;
+declare const java: any;
 
 const ICON_SIZE = 24;
 /** Ask the native listener for every active source, including those below the list's display limit. */
@@ -21,10 +22,11 @@ export const ALL_NOTIFICATIONS = 0x7fffffff;
 const ICON_CACHE_MS = 60_000;
 
 let cachedIcons: GrayImage[] = [];
+let cachedKeys: string[] = [];
 let cachedAtMs = 0;
 const keyedIconCache = new Map<string, { icon: GrayImage | null; atMs: number }>();
 const KEYED_ICON_CACHE_MAX = 128;
-let notificationListenerProxy: any | null = null;
+let notificationListenerProxy: any = null;
 const notificationRemovedListeners = new Set<(notificationKey: string) => void>();
 const notificationPostedListeners = new Set<(notificationKey: string) => void>();
 const notificationChangedListeners = new Set<() => void>();
@@ -36,6 +38,11 @@ function invalidateIconCaches(): void {
 
 export type NotificationIconsResult = {
   icons: GrayImage[];
+  /**
+   * The notification each icon stands for, by key, in step with icons: the
+   * member of its group (which gets one icon) the icon was taken from.
+   */
+  keys: string[];
   /** True when the icons came from an expired (or empty) cache under allowStale. */
   stale: boolean;
 };
@@ -49,25 +56,31 @@ export type NotificationIconsResult = {
  * on what is in the tray.
  */
 export function readActiveNotificationIcons(maxIcons: number, allowStale: boolean): NotificationIconsResult {
-  if (!global.isAndroid || maxIcons <= 0) return { icons: [], stale: false };
+  if (!global.isAndroid || maxIcons <= 0) return { icons: [], keys: [], stale: false };
 
-  const externalIcon = externalNotifications().length ? renderIcon("package", ICON_SIZE) : null;
-  const withExternal = (icons: GrayImage[]): GrayImage[] => externalIcon ? [externalIcon, ...icons].slice(0, maxIcons) : icons;
+  // App notifications from SDK apps share one leading icon, keyed by the newest of them.
+  const external = externalNotifications();
+  const externalIcon = external.length ? renderIcon("package", ICON_SIZE) : null;
+  const withExternal = (icons: GrayImage[], keys: string[]): { icons: GrayImage[]; keys: string[] } => externalIcon
+    ? { icons: [externalIcon, ...icons].slice(0, maxIcons), keys: [external[0]!.key, ...keys].slice(0, maxIcons) }
+    : { icons, keys };
   const now = Date.now();
   if (cachedAtMs > 0 && now - cachedAtMs < ICON_CACHE_MS) {
     logCurrent("notification icons served from cache");
-    return { icons: withExternal(cachedIcons.map(icon => icon.clone())), stale: false };
+    return { ...withExternal(cachedIcons.map(icon => icon.clone()), cachedKeys.slice()), stale: false };
   }
   if (allowStale) {
     logCurrent("notification icons served stale");
-    return { icons: withExternal(cachedIcons.map(icon => icon.clone())), stale: true };
+    return { ...withExternal(cachedIcons.map(icon => icon.clone()), cachedKeys.slice()), stale: true };
   }
 
+  const keyList = new java.util.ArrayList();
   const bytes = spanCurrent("fetch-notification-icons", () =>
     toUint8Array(
       com.faceclaw.app.FaceclawMediaNotificationListenerService.getActiveNotificationIconGrays(
         ICON_SIZE,
         maxIcons,
+        keyList,
       ),
     ),
   );
@@ -79,10 +92,15 @@ export function readActiveNotificationIcons(maxIcons: number, allowStale: boolea
     icon.pixels.set(bytes.subarray(index * iconByteLength, (index + 1) * iconByteLength));
     icons.push(icon);
   }
+  const keys: string[] = [];
+  for (let index = 0; index < iconCount; index++) {
+    keys.push(index < keyList.size() ? String(keyList.get(index)) : "");
+  }
 
   cachedIcons = icons;
+  cachedKeys = keys;
   cachedAtMs = now;
-  return { icons: withExternal(icons.map(icon => icon.clone())), stale: false };
+  return { ...withExternal(icons.map(icon => icon.clone()), keys.slice()), stale: false };
 }
 
 export type NotificationIconResult = {

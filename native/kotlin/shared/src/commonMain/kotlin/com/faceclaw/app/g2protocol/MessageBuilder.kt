@@ -97,7 +97,7 @@ class MessageBuilder {
             0,
             streamId,
             payload,
-            CfwMessageWindow.ACK_TIMEOUT_MS,
+            CfwMessageWindow.ACK_STALL_MS,
             tileIndex,
             leftArm,
         )

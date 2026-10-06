@@ -36,6 +36,46 @@ class DisplayListTest {
         renderer.render(DrawProtocol.SCREEN, DisplayListRenderer.Target(source,640,480), DisplayListRenderer.Target(destination,640,480))
         assertContentEquals(source, destination)
     }
+    @Test fun rectCopyMatchesPerPixelReferenceWithShiftsClipsAndAliasing() {
+        val random = Random(7)
+        repeat(4000) { case ->
+            val width = random.nextInt(1, 20); val height = random.nextInt(1, 6)
+            val offset = random.nextInt(3); val shift = random.nextInt(-4, 5)
+            val clip = if (random.nextBoolean()) null else {
+                val left = random.nextInt(-3, width + 1); val top = random.nextInt(-2, height + 1)
+                intArrayOf(left, top, left + random.nextInt(0, width + 3), top + random.nextInt(0, height + 2))
+            }
+            // Screen as a separate array, the target's own array at another offset, or the target itself.
+            val mode = random.nextInt(3)
+            val screenWidth = random.nextInt(1, 20); val screenHeight = random.nextInt(1, 6)
+            val screenOffset = random.nextInt(3)
+            val targetSize = offset + (width + 1) / 2 * height
+            val screenSize = screenOffset + (screenWidth + 1) / 2 * screenHeight
+            val bytes = random.nextBytes(maxOf(targetSize, if (mode == 1) screenSize else 0) + 2)
+            val screenBytes = if (mode == 0) random.nextBytes(screenSize + 1) else bytes
+            val sourceId = if (mode == 2) DrawProtocol.CURRENT else DrawProtocol.SCREEN
+            val sourceWidth = if (mode == 2) width else screenWidth
+            val sourceHeight = if (mode == 2) height else screenHeight
+            val w = random.nextInt(1, sourceWidth + 1); val h = random.nextInt(1, sourceHeight + 1)
+            val x = random.nextInt(sourceWidth - w + 1); val y = random.nextInt(sourceHeight - h + 1)
+            val dx = random.nextInt(-w - 5, width + 5); val dy = random.nextInt(-h - 2, height + 2)
+
+            val expected = bytes.copyOf()
+            val expectedScreen = if (mode == 0) screenBytes.copyOf() else expected
+            val referenceTarget = DisplayListRenderer.Target(expected, width, height, offset, shift, clip)
+            val referenceSource = if (mode == 2) referenceTarget
+                else DisplayListRenderer.Target(expectedScreen, screenWidth, screenHeight, screenOffset)
+            val snapshot = IntArray(w * h) { referenceSource.get(x + it % w, y + it / w) }
+            for (i in snapshot.indices) referenceTarget.put(dx + i % w, dy + i / w, snapshot[i])
+
+            val target = DisplayListRenderer.Target(bytes, width, height, offset, shift, clip)
+            val screen = if (mode == 2) target else DisplayListRenderer.Target(screenBytes, screenWidth, screenHeight, screenOffset)
+            DisplayListRenderer(emptyMap()).execute(
+                DrawProtocol.sequence(listOf(DrawProtocol.rectCopy(sourceId, x, y, w, h, dx, dy))), target, screen)
+            assertContentEquals(expected, bytes, "case $case")
+            if (mode == 0) assertContentEquals(expectedScreen, screenBytes, "case $case screen")
+        }
+    }
     @Test fun invalidGraphDoesNotCopyScreenIntoComposition() {
         val screen = hex("12345678"); val composition = hex("9abcdef0")
         val resources = mapOf(1 to DrawProtocol.displayList(listOf(byteArrayOf(99,0))))
@@ -49,22 +89,61 @@ class DisplayListTest {
         val nested = listOf(DrawProtocol.image(11, -1, 0), DrawProtocol.bbox(hex("0c000000"), 2, 1, 0, 1, 1, 10))
         resources[20]=DrawProtocol.displayList(nested)
         val calls = listOf(DrawProtocol.call(DRAW_OP_DISPLAY_LIST,DrawProtocol.word(20)), DrawProtocol.image(10,3,1),
-            DrawProtocol.call(DRAW_OP_TEXT,hex("0c00070003000f0141")), DrawProtocol.lut(8,4,128))
+            DrawProtocol.call(DRAW_OP_TEXT,hex("0c0007030f0141")), DrawProtocol.lut(8,4,128))
         resources[21]=DrawProtocol.displayList(calls)
-        val screen=hex("123456789abcdef0123456789abcdef0"); val output=ByteArray(16)
+        // Like the C harness, seed composition with the screen: this list has no screen copy.
+        val screen=hex("123456789abcdef0123456789abcdef0"); val output=screen.copyOf()
         val renderer=DisplayListRenderer(resources)
         assertEquals(setOf(10,11,12,20,21),renderer.render(21,DisplayListRenderer.Target(screen,8,4),DisplayListRenderer.Target(output,8,4)))
         // Shared with the C sanitizer harness: signed clipping, resource target override, font and LUT.
-        assertContentEquals(hex("71122334755061700112233445534477"),output)
-        val first=output.copyOf(); renderer.render(21,DisplayListRenderer.Target(screen,8,4),DisplayListRenderer.Target(output,8,4))
+        assertContentEquals(hex("81223344755162701122334445544578"),output)
+        val first=output.copyOf(); screen.copyInto(output); renderer.render(21,DisplayListRenderer.Target(screen,8,4),DisplayListRenderer.Target(output,8,4))
         assertContentEquals(first,output)
         assertContentEquals(hex("123456789abcdef0123456789abcdef0"),screen)
     }
+    @Test fun rootListsComposeTheScreenCopyAndClearBeforeDepthShifts() {
+        val screen = ByteArray(640 * 480 / 2) { (0x12 + it * 0x22).toByte() }
+        val sourceTarget = DisplayListRenderer.Target(screen, 640, 480)
+        // Without a copy, a root presents only what it draws.
+        val empty = mapOf(1 to DrawProtocol.displayList(emptyList()))
+        val composition = ByteArray(screen.size) { 0x55 }
+        DisplayListRenderer(empty).render(1, sourceTarget, DisplayListRenderer.Target(composition, 640, 480))
+        assertTrue(composition.all { it == 0x55.toByte() })
+        for (depth in listOf(-64, -17, 0, 1, 32)) for (right in listOf(false, true)) {
+            val resources = mapOf(1 to DrawProtocol.displayList(DrawProtocol.screenCopy(640, 480, depth)))
+            val output = ByteArray(screen.size) { -1 }
+            val target = DisplayListRenderer.Target(output, 640, 480)
+            DisplayListRenderer(resources, rightLens = right).render(1, sourceTarget, target)
+            val shift = DrawProtocol.depthOffset(depth, right)
+            for (y in listOf(0, 479)) for (x in 0 until 640) {
+                val sx = x - shift
+                assertEquals(if (sx in 0 until 640) sourceTarget.get(sx, y) else 0, target.get(x, y), "depth=$depth right=$right x=$x")
+            }
+        }
+        // Clear fills the whole resource target, padding included, and ignores depth.
+        val raw = DrawProtocol.rawImage(3, 2, hex("1234ab12"))
+        DisplayListRenderer(mapOf(5 to raw)).execute(DrawProtocol.sequence(listOf(DrawProtocol.clear(7, target = 5))),
+            DisplayListRenderer.Target(ByteArray(1), 1, 1))
+        assertContentEquals(DrawProtocol.rawImage(3, 2, hex("77777777")), raw)
+        val rejected = DrawProtocol.call(DRAW_OP_CLEAR, hex("10"))
+        assertFails { DisplayListRenderer(emptyMap()).execute(DrawProtocol.sequence(listOf(rejected)), DisplayListRenderer.Target(ByteArray(1), 1, 1)) }
+    }
     @Test fun graphValidationPrecedesMutationAndCopyPreservesOverlap() {
         val screen=hex("12345678"); val target=DisplayListRenderer.Target(screen,8,1)
-        val copy=DrawProtocol.call(DRAW_OP_RECT_COPY,hex("feff000000000600010002000000"))
+        val copy=DrawProtocol.call(DRAW_OP_RECT_COPY,hex("feff0000060001000200"))
         DisplayListRenderer(emptyMap()).execute(DrawProtocol.sequence(listOf(copy)),target)
         assertContentEquals(hex("12123456"),screen)
+        // Revision 29: an animated source row scrolls a raw strip; source bounds are checked each frame.
+        val strip=mapOf(9 to DrawProtocol.rawImage(2,4,hex("11223344")))
+        val scroll=DrawProtocol.rectCopy(9,DrawValue.Integer(0),DrawValue.animate(0,2,100),2,2,DrawValue.Integer(0),DrawValue.Integer(0))
+        for ((elapsed,rows) in listOf(0L to "1122",100L to "3344",500L to "3344")) {
+            val window=DisplayListRenderer.Target(ByteArray(2),2,2)
+            val renderer=DisplayListRenderer(strip)
+            renderer.execute(DrawProtocol.sequence(listOf(scroll)),window,elapsedMs=elapsed)
+            assertContentEquals(hex(rows),window.bytes); assertEquals(elapsed<100,renderer.animationPending)
+        }
+        val past=DrawProtocol.rectCopy(9,0,3,2,2,0,0)
+        assertFails { DisplayListRenderer(strip).execute(DrawProtocol.sequence(listOf(past)),DisplayListRenderer.Target(ByteArray(2),2,2)) }
         val valid=DrawProtocol.bbox(hex("ffffffff"),4,0,0,8,1)
         assertFails { DisplayListRenderer(emptyMap()).execute(DrawProtocol.sequence(listOf(valid,byteArrayOf(99,0))),target) }
         assertContentEquals(hex("12123456"),screen)
@@ -75,12 +154,12 @@ class DisplayListTest {
     @Test fun roundedRectsAndNestedOddNegativeDepthMatchFirmwareOnBothLenses() {
         val resources = mapOf(
             40 to hex("0404000200f00f0ff0"),
-            41 to hex("0202000f00080202010001000c0008000300040a0a000402022800050004001f"),
+            41 to hex("0202000d0008020201010c0008000300040a0800040202280005041f"),
             42 to hex("02010005000702fd2900"))
         val screen = hex("012345601234560112345601234560122345601234560123345601234560123445601234560123455601234f60123456601234560123456001234560123456011234560123456012234560123456012334560123456012344560123456012345")
         val expected = listOf("01234560123456011aaaaaaaaaa56012aa45644444aa0123a4564444456a1234a564f44f564a2345a6444fff644a3456a4444456444a4560aa44456444aa56011aaaaaaaaaa56012234560123456012334560123456012344560123456012345", "012345601234560112aaaaaaaaaa60122aa56444445aa1233a5644444564a2344a644f44f644a3455a4444ff6444a4566a4444564444a5600aa44564444aa60112aaaaaaaaaa6012234560123456012334560123456012344560123456012345")
         for (right in listOf(false, true)) {
-            val output = ByteArray(screen.size)
+            val output = screen.copyOf() // the shared vector's list has no screen copy
             DisplayListRenderer(resources, rightLens = right).render(42, DisplayListRenderer.Target(screen,16,12), DisplayListRenderer.Target(output,16,12))
             assertContentEquals(hex(expected[if(right) 1 else 0]), output)
         }
@@ -176,7 +255,8 @@ class DisplayListTest {
         val overlay=ShellScene(listOf(ShellScene.Layer(1,0,0,3,3,128,hex("fff0fff0fff0"))))
         val first=planner.plan(app,640,480,null,overlay,1);glasses.apply(first.commands)
         assertContentEquals(app,glasses.screen);assertEquals(255,glasses.composition[0].toInt() and 255)
-        assertEquals(0x44,glasses.composition[100].toInt() and 255)
+        // Half of level 9 is a 5/4 checkerboard; x=200 on row 0 is an even pixel.
+        assertEquals(0x54,glasses.composition[100].toInt() and 255)
         val changed=ShellScene(listOf(ShellScene.Layer(1,0,0,3,3,128,hex("111011101110"))))
         val repaint=planner.plan(app,640,480,null,changed,1)
         assertFalse(repaint.commands.any { it[0].toInt() in listOf(21,22,29) })
@@ -189,6 +269,109 @@ class DisplayListTest {
         assertTrue(reconnect.commands.any { it[0].toInt()==29 });glasses.apply(reconnect.commands)
         assertContentEquals(newer,glasses.screen)
     }
+    @Test fun fullScreenSurfaceDepthShiftsThePresentedScreenPerLens() {
+        val c = SurfaceCompositor()
+        c.configureScreen(640, 480)
+        c.configureSurface("app", 0, 0, 640, 480, 0, 0)
+        c.configureSurface("glance", 0, 0, 640, 480, 900, 0)
+        val board = ByteArray(640 * 480) { if (it % 640 in 100 until 110) 255.toByte() else 0 }
+        c.submitSurface("glance", ArrayByteReader(board), 0, 0, 640, 480, "board")
+        c.setSurfaceDepth("glance", 32)
+        assertEquals(32, c.composite().shellScene.screenDepth)
+        // Only the topmost visible surface counts, and only when it opaquely covers the screen.
+        c.configureSurface("partial", 0, 0, 10, 10, 950, 0)
+        assertEquals(0, c.composite().shellScene.screenDepth)
+        c.setSurfaceVisible("partial", false)
+        c.setSurfaceVisible("glance", false)
+        assertEquals(0, c.composite().shellScene.screenDepth)
+        c.setSurfaceVisible("glance", true)
+        val composite = c.composite()
+        val screen = BmpUtil.pack4bppFromGray8(composite.screenGray, 640, 480)
+        for (right in listOf(false, true)) {
+            val glasses = Glasses(right)
+            glasses.composition.fill(-1) // stale pixels from an earlier frame
+            glasses.apply(ScenePlanner(ResourceCacheState()).plan(screen, 640, 480, null, composite.shellScene, 1).commands)
+            assertContentEquals(screen, glasses.screen)
+            val output = DisplayListRenderer.Target(glasses.composition, 640, 480)
+            val shift = if (right) -16 else 16
+            assertEquals(15, output.get(100 + shift, 0)); assertEquals(0, output.get(99 + shift, 0))
+            assertEquals(15, output.get(109 + shift, 479)); assertEquals(0, output.get(110 + shift, 479))
+            assertEquals(0, output.get(if (right) 639 else 0, 240)) // cleared, not stale
+        }
+    }
+    @Test fun addedDepthJoinsOrInsertsTheDepthField() {
+        val copy = DrawProtocol.rectCopy(DrawProtocol.SCREEN, 0, 0, 4, 4, 0, 0)
+        assertContentEquals(DrawProtocol.rectCopy(DrawProtocol.SCREEN, 0, 0, 4, 4, 0, 0, depth = 8), DrawProtocol.withAddedDepth(copy, 8))
+        val targeted = DrawProtocol.image(3, 1, 2, target = 5, depth = -2)
+        assertContentEquals(DrawProtocol.image(3, 1, 2, target = 5, depth = 6), DrawProtocol.withAddedDepth(targeted, 8))
+        assertSame(copy, DrawProtocol.withAddedDepth(copy, 0))
+        assertContentEquals(DrawProtocol.image(3, 1, 2, depth = 127), DrawProtocol.withAddedDepth(DrawProtocol.image(3, 1, 2, depth = 120), 16))
+    }
+    /** The bottom switcher's Depth setting: the shell scene's depth moves the screen, shell layers and selections together. */
+    @Test fun shellSceneDepthShiftsTheWholePresentationButNotDimming() {
+        val c = SurfaceCompositor()
+        c.configureScreen(640, 480)
+        c.configureSurface("app", 32, 0, 576, 480, 0, 0)
+        c.submitSurface("app", ArrayByteReader(ByteArray(576 * 480) { if (it % 576 in 100 until 110) 255.toByte() else 0 }),
+            0, 0, 576, 480, "stripe")
+        // One white 2x1 shell layer at (200, 10), dimming what is under it, at layer depth -2; scene depth 8.
+        val header = listOf(1, 1, 200, 10, 2, 1, 128, 0, -2).flatMap { listOf(it.toByte(), (it shr 8).toByte()) }.toByteArray()
+        c.setShellScene(ArrayByteReader(header + byteArrayOf(-1, -1) + DrawProtocol.word(8)))
+        val composite = c.composite()
+        assertEquals(8, composite.shellScene.screenDepth)
+        val calls = composite.shellScene.calls(640, 480, intArrayOf(1), IntArray(0))
+        assertTrue(calls.any { it.contentEquals(DrawProtocol.lut(640, 480, 128)) }) // the dim stays whole-screen
+        val screen = BmpUtil.pack4bppFromGray8(composite.screenGray, 640, 480)
+        for (right in listOf(false, true)) {
+            val glasses = Glasses(right)
+            glasses.apply(ScenePlanner(ResourceCacheState()).plan(screen, 640, 480, null, composite.shellScene, 1).commands)
+            val output = DisplayListRenderer.Target(glasses.composition, 640, 480)
+            // Screen: half of 8 per lens. Layer: depth -2 + 8, so one pixel less than the screen's shift on each lens.
+            val shift = if (right) -4 else 4
+            val layerShift = if (right) -3 else 3
+            assertEquals(0, output.get(131 + shift, 200)); assertTrue(output.get(132 + shift, 200) > 0)
+            assertTrue(output.get(141 + shift, 200) > 0); assertEquals(0, output.get(142 + shift, 200))
+            assertEquals(15, output.get(200 + layerShift, 10)); assertEquals(15, output.get(201 + layerShift, 10))
+        }
+        // The phone mirror shows the scene unshifted, so touches land where they look.
+        val preview = assertNotNull(c.previewComposite()).gray
+        assertEquals(0, preview[131].toInt() and 255); assertTrue((preview[132].toInt() and 255) > 0)
+        // A covering surface's own depth still wins over the scene's.
+        c.configureSurface("glance", 0, 0, 640, 480, 900, 0)
+        c.setSurfaceDepth("glance", -16)
+        assertEquals(-16, c.composite().shellScene.screenDepth)
+    }
+    /** #42: stacked modal-sized layers overflow the cache, so the frame bakes the bottom ones instead of throwing. */
+    @Test fun shellOverTheResourceBudgetBakesBottomLayersAndRecovers() {
+        val cache = ResourceCacheState(); val planner = ScenePlanner(cache)
+        val gray = ByteArray(640 * 480) { 48 }; val app = BmpUtil.pack4bppFromGray8(gray, 640, 480)
+        fun layer(key: Int, y: Int, h: Int, nibble: Int, depth: Int = 0) =
+            ShellScene.Layer(key, 14, y, 612, h, 256, ByteArray(306 * h) { (nibble * 17).toByte() }, depth = depth)
+        // Each 612x214 layer is just under the 64 KiB resource cap; three exceed the arena on their own.
+        fun chrome(depth: Int) = layer(1, 444, 36, 7, depth)
+        val modals = listOf(layer(2, 10, 214, 9), layer(3, 120, 214, 11), layer(4, 230, 214, 13, depth = 4))
+        val overflow = ShellScene(listOf(chrome(6)) + modals)
+        val plan = planner.plan(app, 640, 480, null, overflow, 1)
+        assertEquals(2, plan.bakedLayers); assertFalse(plan.bakedSelections)
+        assertTrue(plan.commands.all { it.size <= 65535 })
+        assertTrue(cache.usedBytes() <= ResourceCacheState.CACHE_SIZE)
+        // Baked layers lose their stereo depth; the live ones keep it.
+        val expected = ShellScene(listOf(chrome(0)) + modals)
+        val lenses = listOf(Glasses(), Glasses(true))
+        for (glasses in lenses) {
+            glasses.apply(plan.commands)
+            assertContentEquals(BmpUtil.pack4bppFromGray8(expected.preview(gray, 640, 480, glasses.right), 640, 480), glasses.composition)
+        }
+        // Once the shell fits again, the next frame is fully live and the screen is the app's again.
+        val fits = ShellScene(listOf(chrome(0), modals[2]))
+        val next = planner.plan(app, 640, 480, null, fits, plan.nextFid)
+        assertEquals(0, next.bakedLayers)
+        for (glasses in lenses) {
+            glasses.apply(next.commands)
+            assertContentEquals(app, glasses.screen)
+            assertContentEquals(BmpUtil.pack4bppFromGray8(fits.preview(gray, 640, 480, glasses.right), 640, 480), glasses.composition)
+        }
+    }
     @Test fun noisyFramesRemainBoundedAndResourceBudgetIs192KiB() {
         val cache=ResourceCacheState();val planner=ScenePlanner(cache);val glasses=Glasses()
         val app=ByteArray(640*480/2){(it*37).toByte()}
@@ -196,5 +379,39 @@ class DisplayListTest {
         assertTrue(plan.commands.all { it.size<=65535 });glasses.apply(plan.commands)
         assertContentEquals(app,glasses.screen);assertContentEquals(app,glasses.composition)
         assertEquals(196608,ResourceCacheState.CACHE_SIZE)
+    }
+    /** Revision 35. Same calls and expectations as ClipTest in g2flash/tests/test_display_list.py. */
+    @Test fun clipRectsNarrowEveryOpNestThroughListsAndMoveWithDepth() {
+        val font = ByteArray(198); font[0] = 1; font[1 + 33 * 2] = 193.toByte(); hex("000202ffff").copyInto(font, 193)
+        val resources = mutableMapOf(1 to hex("000404ffffffffffffffff"), 3 to font,
+            5 to hex("0202000700" + "0400010000000f" + "0f00" + "04040900000002000200010008000f"),
+            6 to hex("00040200000000"), 7 to hex("0201000e00080106000000040002000000" + "0f10"))
+        fun draw(call: String, right: Boolean = false): DisplayListRenderer.Target {
+            val target = DisplayListRenderer.Target(ByteArray(64) { 0x11 }, 16, 8)
+            DisplayListRenderer(resources, rightLens = right).execute(DrawProtocol.sequence(listOf(hex(call))), target)
+            return target
+        }
+        fun expect(target: DisplayListRenderer.Target, color: Int, inside: (Int, Int) -> Boolean) {
+            for (y in 0 until 8) for (x in 0 until 16) assertEquals(if (inside(x, y)) color else 1, target.get(x, y), "($x, $y)")
+        }
+        expect(draw("040403000200" + "0a000a00" + "0100" + "0201" + "0f"), 15) { x, y -> x in 3..5 && y in 2..4 }
+        expect(draw("0400" + "0100" + "ff020105" + "00" + "0f"), 15) { x, y -> x in 5..8 && y < 4 }
+        expect(draw("0504" + "0100000002000100" + "0300" + "0000" + "0f" + "02" + "4141"), 15) { x, y -> y == 0 && x in 1..2 }
+        expect(draw("0804" + "0400040004000200" + "0000" + "1000" + "0800" + "0000" + "0f10"), 15) { x, y -> x in 4..7 && y in 4..5 }
+        expect(draw("0904" + "fefffeff04000400" + "09"), 9) { x, y -> x < 2 && y < 2 }
+        expect(draw("0904" + "0300050003000100" + "09"), 9) { x, y -> y == 5 && x in 3..5 }
+        expect(draw("0604" + "0100010001000600" + "0000000010000800" + "77".repeat(16)), 7) { x, y -> x == 1 && y in 1..6 }
+        expect(draw("0204" + "0200020001000100" + "0100" + "0000" + "04000400" + "0000"), 15) { x, y -> x == 2 && y == 2 }
+        expect(draw("0104" + "0100010002000100" + "00" + "000001" + "01" + "8f"), 15) { x, y -> y == 1 && x in 1..2 }
+        expect(draw("0704" + "000000000a000300" + "0500"), 15) { x, y -> (x < 4 && y < 3) || (x == 9 && y < 2) }
+        val deep = "0806" + "02" + "0000000004000400" + "0000" + "1000" + "0800" + "0000" + "0f10"
+        expect(draw(deep), 15) { x, y -> x in 1..4 && y < 4 }
+        expect(draw(deep, right = true), 15) { x, y -> x < 3 && y < 4 }
+        // A target override starts unclipped: the whole resource fills, the screen stays.
+        expect(draw("0704" + "0000000001000100" + "0700"), 15) { _, _ -> false }
+        assertContentEquals(hex("000402ffffffff"), resources.getValue(6))
+        expect(draw("0804" + "0400040000000000" + "0000" + "1000" + "0800" + "0000" + "0f10"), 15) { _, _ -> false }
+        // Unknown flag bits, a truncated clip header, and the old s16 image layout all reject.
+        for (bad in listOf("090800", "0904000000000100", "04000100020001000f")) assertFails(bad) { draw(bad) }
     }
 }

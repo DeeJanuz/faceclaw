@@ -180,6 +180,8 @@ class FaceclawBleCommunicator(context: Context, rightAddress: String?, leftAddre
 
     fun setListener(listener: FaceclawBleCommunicatorListener?) = core.setListener(listener)
 
+    fun setRequiredFirmwareRevision(revision: Int) = core.setRequiredFirmwareRevision(revision)
+
     fun start() {
         synchronized(ACTIVE_LOCK) {
             if (core.isRunning()) return
@@ -273,6 +275,8 @@ class FaceclawBleCommunicator(context: Context, rightAddress: String?, leftAddre
     fun setCompassEnabled(owner: String?, enable: Boolean) = core.setCompassEnabled(owner, enable)
 
     fun setBrightness(autoAdjust: Boolean, brightnessLevel: Int) = core.setBrightness(autoAdjust, brightnessLevel)
+    fun configureBrightness(auto: Boolean, level: Int, minimum: Int, maximum: Int, curve: String, fadeMs: Int) =
+        core.configureBrightness(auto, level, minimum, maximum, curve, fadeMs)
 
     fun enableWearDetectionAndRequestState() = core.enableWearDetectionAndRequestState()
 
@@ -314,6 +318,10 @@ class FaceclawBleCommunicator(context: Context, rightAddress: String?, leftAddre
 
     fun stopG2AudioForwarding() = core.stopG2AudioForwarding()
 
+    fun addAudioMonitorListener(listener: FaceclawAudioPacketListener?) = core.addAudioMonitorListener(listener)
+
+    fun removeAudioMonitorListener(listener: FaceclawAudioPacketListener?) = core.removeAudioMonitorListener(listener)
+
     fun addCompassListener(listener: FaceclawCompassListener?) = core.addCompassListener(listener)
 
     fun removeCompassListener(listener: FaceclawCompassListener?) = core.removeCompassListener(listener)
@@ -337,6 +345,14 @@ class FaceclawBleCommunicator(context: Context, rightAddress: String?, leftAddre
         return PreviewBitmapUtil.fromGray(
                 java.nio.ByteBuffer.wrap(composite.gray), composite.width, composite.height, brightenGamma, green)
     }
+
+    /**
+     * Posted to the main looper after each step of an animation the preview is replaying (menu
+     * highlight slides, scrolls), so the mirror can pull the new frame; frame metrics only cover
+     * frames sent to the glasses, which carry the whole animation in one display list.
+     */
+    fun setPreviewAnimationListener(listener: Runnable?) =
+        core.setPreviewAnimationListener(listener?.let { { mainHandler.post(it); Unit } })
 
     /** Save the current composite as a 4-bit grayscale PNG; returns the path or "". */
     @Throws(java.io.IOException::class)
@@ -394,6 +410,8 @@ class FaceclawBleCommunicator(context: Context, rightAddress: String?, leftAddre
     }
 
     fun setSurfaceVisible(id: String, visible: Boolean) = core.setSurfaceVisible(id, visible)
+
+    fun setSurfaceDepth(id: String, depth: Int) = core.setSurfaceDepth(id, depth)
 
     fun setScreenBlanked(blanked: Boolean) = core.setScreenBlanked(blanked)
 
@@ -515,6 +533,9 @@ class FaceclawBleCommunicator(context: Context, rightAddress: String?, leftAddre
         return prefetchTextures(IntArray(count) { SurfaceCompositor.ScreenDraw.KIND_IMAGE }, imageIds ?: IntArray(0),
             IntArray(count), replace)
     }
+
+    /** Whether submitting this full-surface content would change nothing (see [GlassesSessionCore.isSurfaceCurrent]). */
+    fun isSurfaceCurrent(surfaceId: String, fingerprint: String): Boolean = core.isSurfaceCurrent(surfaceId, fingerprint)
 
     /** Play a tone sequence via CFW load_image_z mode 5 kind 4 (payload built on the TS side). */
     fun playBuzzerSequence(payload: java.nio.ByteBuffer?) {

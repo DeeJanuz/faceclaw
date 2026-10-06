@@ -1,4 +1,4 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class, kotlinx.cinterop.BetaInteropApi::class)
 
 package com.faceclaw.app
 
@@ -223,6 +223,8 @@ class IosSurfaceCompositor(width: Int, height: Int) {
 
     fun visible(id: String, visible: Boolean) = compositor.setSurfaceVisible(id, visible)
 
+    fun depth(id: String, depth: Int) = compositor.setSurfaceDepth(id, depth)
+
     fun dim(below: Int, factor: Double) {
         require(factor.isFinite())
         compositor.setUnderlayDim(below, (factor.coerceIn(0.0, 1.0) * 256).toInt())
@@ -275,4 +277,7 @@ class IosSurfaceCompositor(width: Int, height: Int) {
     fun composite(): NSData = compositor.composite().gray.data()
 
     fun compositeFrame(): IosTextureFrame = IosTextureFrame(compositor.composite())
+
+    /** Called on the main queue after each step of an animation the preview is replaying (see SurfaceCompositor). */
+    fun setPreviewAnimationListener(listener: (() -> Unit)?) = compositor.setPreviewAnimationListener(listener)
 }

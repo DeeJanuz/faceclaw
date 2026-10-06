@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const ts = require('typescript');
+const { Menu } = require('../.test-build/app/ui/menu-core.js');
 function load(file, context) {
   const sandbox = { exports: {}, ...context };
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(file, 'utf8'), {
@@ -26,7 +27,8 @@ test('iOS Type Into App submits UTF-8 terminal text and delays Enter at the byte
       : id.includes('dashboard-settings') ? { anthropicApiKeySetting: { get: () => '' } }
       : id.includes('extension-platform') ? { extensionPlatform: () => null }
       : id.includes('extension-providers') ? { refineThroughExtension: () => null }
-      : {},
+      : id.includes('input-dialog') ? { createInputDialogMenu: (items, selectedIndex) =>
+        new Menu({ items, selectedIndex, wrap: true, getHeight: () => 1, draw() {} }) } : {},
     global: { isIOS: true },
   });
   for (const text of ['hello terminal', 'café π 🔋', 'line one\n第二行', '']) {

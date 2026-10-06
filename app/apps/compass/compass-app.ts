@@ -27,7 +27,6 @@ import { cardinalDirection, createCompassBackground, drawCompassRose, layoutComp
 import { CompassCalibrationLayer } from "./calibration-layer";
 import { getDeclinationAvailability, onDeclinationChanged, refreshDeclination } from "./declination";
 import { getNorthReference, resolveHeading, setNorthReference, type NorthReference } from "./heading";
-import { compassDebugLines, isCompassDebugEnabled, setCompassDebugEnabled } from "./debug";
 
 export const COMPASS_WINDOW_ID = "compass";
 export const COMPASS_SURFACE_ID = "window:compass";
@@ -39,6 +38,9 @@ const TOP_PAD = 2;
 const BOTTOM_PAD = 4;
 /** Clearance between the rose's widest point and the viewport edge. */
 const EDGE_PAD = 8;
+/** Inset of the top-right magnetometer calibration readout from the window edges. */
+const ACCURACY_TOP_PAD = TOP_PAD + 4;
+const ACCURACY_RIGHT_PAD = EDGE_PAD + 4;
 /** Cap on the rose's radius, so a tall window doesn't get a comical one. */
 const MAX_ROSE_RADIUS = 98;
 
@@ -89,11 +91,6 @@ class CompassLayer implements Layer {
   toggleNorthReference(): void {
     setNorthReference(getNorthReference() === "true" ? "magnetic" : "true");
     this.ensureDeclination();
-    this.requestRender();
-  }
-
-  toggleDebugInfo(): void {
-    setCompassDebugEnabled(!isCompassDebugEnabled());
     this.requestRender();
   }
 
@@ -162,20 +159,12 @@ class CompassLayer implements Layer {
     const headingText = heading === null ? "--°" : `${Math.round(heading)}° ${cardinalDirection(heading)}`;
     const statusLines = wrapText(small, this.statusText(), width - STACK_GAP * 2);
     const smallStep = lineStep(small);
-    const debugLines = isCompassDebugEnabled() ? compassDebugLines(this.diagnostics) : [];
-    const debugWidth = Math.max(0, ...debugLines.map((line) => small.measureText(line)));
-    const debugGap = debugLines.length ? 12 : 0;
-    // Keep diagnostics beside the heading even in narrow windows. The rose
-    // stays centred on the optical axis; the combined readout fits the viewport.
-    const headingFont = large.measureText(headingText) + debugGap + debugWidth <= width - EDGE_PAD * 2
-      ? large : small;
-    const headingWidth = headingFont.measureText(headingText);
-    const readoutWidth = headingWidth + debugGap + debugWidth;
-    const debugHeight = debugLines.length ? (debugLines.length - 1) * smallStep + small.lineHeight : 0;
-    const readoutHeight = Math.max(headingFont.lineHeight, debugHeight);
+    const headingFont = large.measureText(headingText) <= width - EDGE_PAD * 2 ? large : small;
+    const readoutWidth = headingFont.measureText(headingText);
+    const readoutHeight = headingFont.lineHeight;
 
     // One column centred on the display's true centre, so the rose sits where
-    // the wearer is looking rather than 32px right of it.
+    // the wearer is looking rather than 32px beside it (with a side strip).
     const cx = screenCenterInViewportX();
 
     // The rose is sized and placed first — it hangs off the bottom edge — and
@@ -204,17 +193,14 @@ class CompassLayer implements Layer {
     const image = this.background.image.clone();
     drawCompassRose(image, cx, cy, radius, heading);
     const readoutX = Math.round(Math.max(EDGE_PAD, Math.min(width - EDGE_PAD - readoutWidth, cx - readoutWidth / 2)));
-    image.drawText(headingFont, readoutX, y + Math.floor((readoutHeight - headingFont.lineHeight) / 2),
-      headingText, heading === null ? 150 : 255);
-    for (let i = 0; i < debugLines.length; i++) {
-      image.drawText(small, readoutX + headingWidth + debugGap,
-        y + Math.floor((readoutHeight - debugHeight) / 2) + i * smallStep, debugLines[i]!, 175);
-    }
+    image.drawText(headingFont, readoutX, y, headingText, heading === null ? 150 : 255);
     y += readoutHeight + 4;
     for (const line of statusLines) {
       image.drawText(small, Math.round(cx - small.measureText(line) / 2), y, line, 125);
       y += smallStep;
     }
+    const accuracyText = magneticAccuracyText(this.diagnostics);
+    image.drawText(small, width - ACCURACY_RIGHT_PAD - small.measureText(accuracyText), ACCURACY_TOP_PAD, accuracyText, 175);
 
     return image;
   }
@@ -228,10 +214,9 @@ class CompassLayer implements Layer {
 }
 
 export function createCompassAppWindow(options: InProcessAppOptions): InProcessWindow {
-  let app: InProcessWindow;
   let requestRender = () => {};
   const layer = new CompassLayer(() => requestRender());
-  app = createInProcessWindow({
+  const app = createInProcessWindow({
     appId: "compass",
     windowId: COMPASS_WINDOW_ID,
     title: "Compass",
@@ -253,14 +238,6 @@ export function createCompassAppWindow(options: InProcessAppOptions): InProcessW
         onSelect: (ctx) => {
           ctx.stack.pop();
           layer.toggleNorthReference();
-        },
-      },
-      {
-        label: `Debug information: ${isCompassDebugEnabled() ? "On" : "Off"}`,
-        description: "Show magnetic accuracy (0–3), anomaly flags (0–2), and orientation source beside the heading.",
-        onSelect: (ctx) => {
-          ctx.stack.pop();
-          layer.toggleDebugInfo();
         },
       },
     ],
@@ -298,4 +275,16 @@ function frameStatusText(): string {
     case "no-fix":
       return "Magnetic heading - waiting for location";
   }
+}
+
+/**
+ * The firmware's magnetometer calibration readiness (0-3) as filled/empty
+ * dots, e.g. "Calibration: ●●○" for 2/3. This is the glasses' own sensor
+ * calibration, not the wearer-fit offset set on the calibration screen.
+ */
+function magneticAccuracyText(diagnostics: CompassDiagnostics | null): string {
+  const accuracy = diagnostics && (diagnostics.flags & 0x80) ? diagnostics.magneticAccuracy : -1;
+  if (accuracy < 0) return "Calibration: --";
+  const filled = Math.min(3, accuracy);
+  return `Calibration: ${"●".repeat(filled)}${"○".repeat(3 - filled)}`;
 }

@@ -1,18 +1,91 @@
 # Changelog
 
-## 0.7.3 - Future
+## 0.8.3 - Future
 
-### Other Features
+* Add a client for T3 Code
+* Weather app shows an icon for current conditions, and can add the weather to the status bar and the Glanceboard system card (Weather menu > Settings)
+
+## 0.8.2 - 2026-10-03
+
+### User Interface Customization
+
+* Customizable app switcher: put it on the left, right, bottom, or make it a popup
+* The status bar can be combined with the app switcher when it's on the bottom
+* The display depth is configurable when the app switcher is on the bottom
+* Add Dense style for battery indicators
+
+### Other Features and Fixes
+
+* Animations have configurable speed
+* Fix an issue where animations on the phone preview display stopped before finishing
+* Terminal app lists every configured host, including ones that are still connecting
+* Music app shows its library-browsing app picker on the front page when nothing is playing
+* Fix iOS failing to connect when an incompatible firmware version is installed
+* Mark stock firmware 2.3.2 as validated for installing custom firmware over
+
+## 0.8.1 - 2026-09-30
+
+### Assorted Features and Bug Fixes
+
+* Improve connection reliability
+* Add a video player, launched by picking a video file in the Files app
+* Fix some bugs impacting the Microphones app
+* Add config settings to disable animation categories
+* Reduce phone CPU usage
+* Putting on the glasses auto-wakes the screen
+* Add a button to the phone screen top bar to open EvenHub app phone UI
+* Glanceboard font can be configured separately from the main font 
+* Move Terminal and Navigate settings out of the Settings app and into their respective apps
+
+### EvenHub
+
+* EvenHub compatibility uses menu animations and is closer to style matched
+* EvenHub apps show an icon in the phone top bar to open their phone-side UI
+* Fix a crash on install of larger EvenHub apps
+* Fix line wrapping on EvenHub permissions dialog
+
+## 0.8.0 - 2026-09-26
+
+### Depth and Animation
+
+* A new display-list system for glasses-side drawing, unlocking z-effects and animation
+* Menus animate when changing selection and scrolling
+* Menus bounce at the ends, and show part of the next row when there is more below
+* The launcher and Files app icon grids animate sliding, scrolling and bouncing
+* Fade-in/out effects when turning the screen on/off
+* Custom auto-brightness control algorithm, with configurable min, max and curve
+* Depth effects for the window switcher, top bar, and modals
+* Glanceboard has configurable distance
+* Dimmed background behind the system context menu dithers rather than hiding minimum-brightness underlays
+
+### Other Features and Bugfixes
 
 * Add tokens and faceclaw-input script, which allows using a CLI utility as an input device for the glasses
 * Navigate app: Add map-without-destination mode
 * Nightscout app: Glanceboard widget still shows out-of-bounds values when out of space
+* EvenHub: Fix login form being stuck open without a cancel button
+* Calendar: Fix a timezone issue that could cause all-day events to appear on the preceding day
+* Compass: Make the calibration readiness visible by default
+* Terminal app: Tap a host heading to launch a shell there (alternative to the app context menu)
+* Nightscout: Move the "Always show in top bar" setting earlier in the form so it's harder to miss
+* EvenHub: Fix the sign-in form reopening on every launch after an unfinished sign-in
+* EvenHub: Fix the installer not rerendering when an app finishes downloading
+* Fix a frozen menu in the notification modal
+* Fix a race when restoring open apps at startup, which could leave the previously-foreground window covering the new one
+* Reduce phone CPU usage
+* Fix a memory leak
+* Better handling of silent mode
+* Tweak the layout of the voice input dialog
+* Add GitHub workflows for automated tests
 
 ### iOS port:
 
 * Add iOS calendar integration
 * iOS main screen matches the Android version's styling
 * Hub apps on iOS no longer have their timers stopped while the phone app is in the background
+* Some settings that were Android-only are now available on iOS
+* Move a lot more of the iOS implementation onto shared Kotlin code
+* Converted most Android-specific duplicative code to shared code
 
 ## 0.7.2 - 2026-09-19
 

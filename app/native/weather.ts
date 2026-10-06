@@ -1,9 +1,24 @@
 import { hasLocationPermission } from "./location-permissions";
 import { getCurrentLocation, type CurrentLocation } from "./location";
+import { getStringSetting, setStringSetting } from "./settings-store";
 import { fetchWithUserAgent } from "../util/http";
 import { USER_AGENT } from "../version";
 
 export type WeatherPhase = "permission-required" | "locating" | "loading" | "ready" | "error";
+
+/** Sky and precipitation state, as coarse as the icons that show it. */
+export type WeatherCondition =
+  | "clear"
+  | "partly-cloudy"
+  | "cloudy"
+  | "fog"
+  | "wind"
+  | "drizzle"
+  | "showers"
+  | "rain"
+  | "thunderstorm"
+  | "snow"
+  | "sleet";
 
 export type CurrentWeather = {
   temperatureF: number | null;
@@ -13,6 +28,8 @@ export type CurrentWeather = {
   windDirection: string;
   timestampMs: number | null;
   observed: boolean;
+  condition: WeatherCondition | null;
+  isDaytime: boolean;
 };
 
 export type ForecastPeriod = {
@@ -25,6 +42,7 @@ export type ForecastPeriod = {
   windSpeed: string;
   windDirection: string;
   isDaytime: boolean;
+  condition: WeatherCondition | null;
 };
 
 export type WeatherState = {
@@ -66,6 +84,7 @@ type NwsForecastPeriodResponse = {
   windSpeed?: unknown;
   windDirection?: unknown;
   isDaytime?: unknown;
+  icon?: unknown;
 };
 
 type NwsStationsResponse = {
@@ -76,6 +95,7 @@ type NwsObservationResponse = {
   properties?: {
     timestamp?: unknown;
     textDescription?: unknown;
+    icon?: unknown;
     temperature?: NwsMeasure;
     relativeHumidity?: NwsMeasure;
     windSpeed?: NwsMeasure;
@@ -94,7 +114,12 @@ const NWS_HEADERS = {
   // NWS asks callers to identify themselves with a contact address.
   "User-Agent": `${USER_AGENT} (https://github.com/jimrandomh/faceclaw)`,
 };
-const WEATHER_REFRESH_MS = 30 * 60 * 1000;
+/** Refresh period while the Weather app is open. */
+const APP_REFRESH_MS = 30 * 60 * 1000;
+/** Refresh period for the status-bar and system-card indicators. */
+const BACKGROUND_REFRESH_MS = 60 * 60 * 1000;
+/** Delay before retrying after a failed refresh (capped at the period). */
+const RETRY_AFTER_FAILURE_MS = 10 * 60 * 1000;
 // Android only produces fresh fixes while the Faceclaw screen is open, so a
 // glasses-only day falls back to the saved fix. Label weather once it is old.
 const STALE_LOCATION_MS = 60 * 60 * 1000;
@@ -105,6 +130,9 @@ const FOREGROUND_LOCATION_REFRESH_MS = 10 * 60 * 1000;
 const MAX_PLAUSIBLE_LOCATION_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 20_000;
 const MAX_FORECAST_PERIODS = 14;
+/** Settings-store key holding the last successful refresh. */
+const CACHE_KEY = "weather.cache";
+const CACHE_VERSION = 1;
 
 const DEFAULT_STATE: WeatherState = {
   phase: "permission-required",
@@ -116,12 +144,33 @@ const DEFAULT_STATE: WeatherState = {
   locationTimestampMs: null,
 };
 
-/** Shared weather state for the Weather app and visible external dashboards. */
+type WeatherCache = {
+  version: number;
+  locationName: string;
+  current: CurrentWeather | null;
+  forecast: ForecastPeriod[];
+  lastUpdatedMs: number;
+  locationTimestampMs?: number | null;
+};
+
+/**
+ * Shared weather state, refreshed on a schedule while anything shows it:
+ * every 30 minutes while the Weather app is open, and hourly while a weather
+ * indicator (status bar or Glanceboard system card) is enabled and the
+ * glasses session is up. The last successful refresh is persisted, so a
+ * restart shows it at once and the schedule counts from its age. Visible
+ * external dashboards poll through snapshotForDashboard.
+ */
 export class WeatherBridge {
   private readonly listeners = new Set<(state: WeatherState) => void>();
-  private state: WeatherState = cloneState(DEFAULT_STATE);
-  private refreshHandle: ReturnType<typeof setInterval> | null = null;
+  private loadedState: WeatherState | null = null;
+  private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private refreshInFlight: Promise<void> | null = null;
+  /** Start of the latest refresh attempt, successful or not. */
+  private lastAttemptMs: number | null = null;
+  private appOpen = false;
+  private sessionActive = false;
+  private backgroundWanted = false;
   private nextDashboardRefreshMs = 0;
 
   onStateChange(listener: (state: WeatherState) => void): () => void {
@@ -143,25 +192,37 @@ export class WeatherBridge {
           this.state = cloneState(DEFAULT_STATE);
           this.emit();
         }
-      } else if (!this.refreshInFlight && Date.now() >= this.nextDashboardRefreshMs) {
+      } else if (!this.refreshInFlight && Date.now() >= this.dashboardRefreshDueMs()) {
         void this.refreshNow();
       }
     }
     return this.snapshot();
   }
 
+  /** The Weather app opened (or asked to retry): refresh now, then every 30 minutes. */
   start(): void {
-    if (!this.refreshHandle) {
-      this.refreshHandle = setInterval(() => void this.refreshNow(), WEATHER_REFRESH_MS);
-    }
+    this.appOpen = true;
     void this.refreshNow();
   }
 
+  /** The Weather app closed; any indicator schedule continues. */
   stop(): void {
-    if (this.refreshHandle) {
-      clearInterval(this.refreshHandle);
-      this.refreshHandle = null;
-    }
+    this.appOpen = false;
+    this.schedule();
+  }
+
+  /** Whether a glasses session is up; indicator refreshes only run during one. */
+  setSessionActive(active: boolean): void {
+    if (active === this.sessionActive) return;
+    this.sessionActive = active;
+    this.schedule();
+  }
+
+  /** Whether an indicator wants hourly refreshes (see app/apps/weather/weather-indicators.ts). */
+  setBackgroundRefresh(enabled: boolean): void {
+    if (enabled === this.backgroundWanted) return;
+    this.backgroundWanted = enabled;
+    this.schedule();
   }
 
   /** Called when the Faceclaw screen opens, the only time Android gives fresh fixes. */
@@ -174,9 +235,12 @@ export class WeatherBridge {
 
   async refreshNow(): Promise<void> {
     if (this.refreshInFlight) return this.refreshInFlight;
+    this.clearRefreshTimer();
+    this.lastAttemptMs = Date.now();
     if (!hasLocationPermission()) {
       this.state = cloneState(DEFAULT_STATE);
       this.emit();
+      this.schedule();
       return;
     }
 
@@ -187,8 +251,56 @@ export class WeatherBridge {
     } finally {
       // Failed requests retry at most once a minute, never on every host poll.
       this.nextDashboardRefreshMs = this.state.phase === "permission-required" ? 0
-        : Date.now() + (this.state.phase === "ready" ? WEATHER_REFRESH_MS : 60_000);
+        : Date.now() + (this.state.phase === "ready" ? APP_REFRESH_MS : 60_000);
       this.refreshInFlight = null;
+      this.schedule();
+    }
+  }
+
+  private get state(): WeatherState {
+    if (!this.loadedState) this.loadedState = loadCachedState();
+    return this.loadedState;
+  }
+
+  private set state(state: WeatherState) {
+    this.loadedState = state;
+  }
+
+  /** A restored cache counts toward the dashboard's refresh period. */
+  private dashboardRefreshDueMs(): number {
+    const lastSuccessMs = this.state.lastUpdatedMs;
+    return lastSuccessMs === null ? this.nextDashboardRefreshMs : Math.max(this.nextDashboardRefreshMs, lastSuccessMs + APP_REFRESH_MS);
+  }
+
+  private refreshIntervalMs(): number | null {
+    if (this.appOpen) return APP_REFRESH_MS;
+    if (this.sessionActive && this.backgroundWanted) return BACKGROUND_REFRESH_MS;
+    return null;
+  }
+
+  /**
+   * Arm the timer for the next refresh: one period after the last success,
+   * but no sooner than the retry delay after a failed attempt.
+   */
+  private schedule(): void {
+    this.clearRefreshTimer();
+    // A running refresh reschedules when it settles.
+    if (this.refreshInFlight) return;
+    const intervalMs = this.refreshIntervalMs();
+    if (intervalMs === null) return;
+    const lastSuccessMs = this.state.lastUpdatedMs ?? -Infinity;
+    const lastAttemptMs = this.lastAttemptMs ?? -Infinity;
+    const dueMs = Math.max(lastSuccessMs + intervalMs, lastAttemptMs + Math.min(intervalMs, RETRY_AFTER_FAILURE_MS));
+    this.refreshTimer = setTimeout(() => {
+      this.refreshTimer = null;
+      void this.refreshNow();
+    }, Math.max(0, dueMs - Date.now()));
+  }
+
+  private clearRefreshTimer(): void {
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = null;
     }
   }
 
@@ -228,6 +340,7 @@ export class WeatherBridge {
         lastUpdatedMs: Date.now(),
         locationTimestampMs,
       };
+      saveCachedState(this.state);
       this.emit();
     } catch (error) {
       const message = friendlyWeatherError(error);
@@ -244,6 +357,53 @@ export class WeatherBridge {
   private emit(): void {
     const snapshot = this.snapshot();
     for (const listener of this.listeners) listener(snapshot);
+  }
+}
+
+/** The persisted last refresh, or the default state when there is none (or no permission to refresh it). */
+function loadCachedState(): WeatherState {
+  try {
+    if (!hasLocationPermission()) return cloneState(DEFAULT_STATE);
+    const raw = getStringSetting(CACHE_KEY, "");
+    if (!raw) return cloneState(DEFAULT_STATE);
+    const cache = JSON.parse(raw) as Partial<WeatherCache> | null;
+    if (
+      !cache ||
+      cache.version !== CACHE_VERSION ||
+      typeof cache.lastUpdatedMs !== "number" ||
+      !Array.isArray(cache.forecast)
+    ) {
+      return cloneState(DEFAULT_STATE);
+    }
+    return cloneState({
+      phase: "ready",
+      status: "Weather updated.",
+      locationName: typeof cache.locationName === "string" ? cache.locationName : "",
+      current: cache.current && typeof cache.current === "object" ? cache.current : null,
+      forecast: cache.forecast,
+      lastUpdatedMs: cache.lastUpdatedMs,
+      locationTimestampMs: typeof cache.locationTimestampMs === "number" ? cache.locationTimestampMs : null,
+    });
+  } catch (error) {
+    console.warn(`weather cache unreadable: ${error}`);
+    return cloneState(DEFAULT_STATE);
+  }
+}
+
+function saveCachedState(state: WeatherState): void {
+  if (state.lastUpdatedMs === null) return;
+  const cache: WeatherCache = {
+    version: CACHE_VERSION,
+    locationName: state.locationName,
+    current: state.current,
+    forecast: state.forecast,
+    lastUpdatedMs: state.lastUpdatedMs,
+    locationTimestampMs: state.locationTimestampMs,
+  };
+  try {
+    setStringSetting(CACHE_KEY, JSON.stringify(cache));
+  } catch (error) {
+    console.warn(`weather cache write failed: ${error}`);
   }
 }
 
@@ -319,14 +479,18 @@ function normalizeObservation(
   const temperatureF = convertTemperatureToF(properties?.temperature);
   const windSpeedMph = convertSpeedToMph(properties?.windSpeed);
   const windDegrees = finiteNumber(properties?.windDirection?.value);
+  const textDescription = stringValue(properties?.textDescription);
+  const icon = parseNwsIcon(properties?.icon);
   return {
     temperatureF: temperatureF ?? hourly?.temperatureF ?? null,
-    description: stringValue(properties?.textDescription) || hourly?.shortForecast || "Current conditions",
+    description: textDescription || hourly?.shortForecast || "Current conditions",
     humidityPercent: finiteNumber(properties?.relativeHumidity?.value),
     windSpeedMph,
     windDirection: windDegrees === null ? hourly?.windDirection ?? "" : degreesToCompass(windDegrees),
     timestampMs: timestampValue(properties?.timestamp),
     observed: true,
+    condition: icon.condition ?? conditionFromText(textDescription) ?? hourly?.condition ?? null,
+    isDaytime: icon.isDaytime ?? hourly?.isDaytime ?? isLocalDaytime(),
   };
 }
 
@@ -340,6 +504,8 @@ function currentFromHourly(hourly: ForecastPeriod | undefined, fallback: Forecas
     windDirection: source.windDirection,
     timestampMs: source.startTimeMs || null,
     observed: false,
+    condition: source.condition,
+    isDaytime: source.isDaytime,
   };
 }
 
@@ -348,17 +514,91 @@ function normalizeForecastPeriod(value: NwsForecastPeriodResponse): ForecastPeri
   const name = stringValue(value.name);
   const temperature = finiteNumber(value.temperature);
   const unit = stringValue(value.temperatureUnit).toUpperCase();
+  const shortForecast = stringValue(value.shortForecast);
+  const icon = parseNwsIcon(value.icon);
   return {
     name: name || "Forecast",
     startTimeMs: timestampValue(value.startTime) ?? 0,
     temperatureF: temperature === null ? null : unit === "C" ? temperature * 9 / 5 + 32 : temperature,
-    shortForecast: stringValue(value.shortForecast),
+    shortForecast,
     detailedForecast: stringValue(value.detailedForecast),
     precipitationPercent: finiteNumber(value.probabilityOfPrecipitation?.value),
     windSpeed: stringValue(value.windSpeed),
     windDirection: stringValue(value.windDirection),
-    isDaytime: Boolean(value.isDaytime),
+    isDaytime: icon.isDaytime ?? Boolean(value.isDaytime),
+    condition: icon.condition ?? conditionFromText(shortForecast),
   };
+}
+
+// NWS icon codes (https://api.weather.gov/icons) by the condition they show.
+const NWS_ICON_CONDITIONS: Record<string, WeatherCondition> = {
+  skc: "clear",
+  hot: "clear",
+  cold: "clear",
+  few: "partly-cloudy",
+  sct: "partly-cloudy",
+  bkn: "cloudy",
+  ovc: "cloudy",
+  wind_skc: "wind",
+  wind_few: "wind",
+  wind_sct: "wind",
+  wind_bkn: "wind",
+  wind_ovc: "wind",
+  fog: "fog",
+  haze: "fog",
+  smoke: "fog",
+  dust: "fog",
+  rain: "rain",
+  rain_showers: "rain",
+  rain_showers_hi: "showers",
+  tsra: "thunderstorm",
+  tsra_sct: "thunderstorm",
+  tsra_hi: "thunderstorm",
+  tornado: "thunderstorm",
+  hurricane: "thunderstorm",
+  tropical_storm: "thunderstorm",
+  snow: "snow",
+  blizzard: "snow",
+  sleet: "sleet",
+  fzra: "sleet",
+  rain_fzra: "sleet",
+  snow_fzra: "sleet",
+  rain_sleet: "sleet",
+  snow_sleet: "sleet",
+  rain_snow: "sleet",
+};
+
+/**
+ * Condition and day/night from an NWS icon URL such as
+ * ".../icons/land/day/tsra_sct,40/rain,20?size=medium". A period that
+ * changes partway lists two codes; the first is the one in effect now.
+ */
+function parseNwsIcon(value: unknown): { condition: WeatherCondition | null; isDaytime: boolean | null } {
+  const match = stringValue(value).match(/\/icons\/[^/]+\/(day|night)\/([a-z_]+)/);
+  if (!match) return { condition: null, isDaytime: null };
+  return { condition: NWS_ICON_CONDITIONS[match[2]!] ?? null, isDaytime: match[1] === "day" };
+}
+
+/** Condition from an NWS text description ("Chance Rain Showers"), for when there is no icon. */
+function conditionFromText(text: string): WeatherCondition | null {
+  const lower = text.toLowerCase();
+  if (/thunder|t-storm|tstorm/.test(lower)) return "thunderstorm";
+  if (/freezing|sleet|ice pellets|wintry|hail|rain and snow|snow and rain/.test(lower)) return "sleet";
+  if (/snow|flurr|blizzard/.test(lower)) return "snow";
+  if (/drizzle/.test(lower)) return "drizzle";
+  if (/rain|showers/.test(lower)) return /chance|slight|scattered|isolated|patchy/.test(lower) ? "showers" : "rain";
+  if (/fog|haze|smoke|dust|mist/.test(lower)) return "fog";
+  if (/windy|breezy|blustery/.test(lower)) return "wind";
+  if (/partly|few clouds|mostly sunny|mostly clear/.test(lower)) return "partly-cloudy";
+  if (/cloud|overcast/.test(lower)) return "cloudy";
+  if (/sunny|clear|fair/.test(lower)) return "clear";
+  return null;
+}
+
+/** Rough day/night by the phone's clock, for when NWS gives no hint. */
+function isLocalDaytime(): boolean {
+  const hour = new Date().getHours();
+  return hour >= 6 && hour < 18;
 }
 
 function convertTemperatureToF(measure: NwsMeasure | undefined): number | null {

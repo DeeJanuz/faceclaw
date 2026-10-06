@@ -445,8 +445,9 @@ class BleImageOptimizer {
             }
         }
 
+        /** Source rect then destination origin, little-endian u16s, as DrawProtocol.fromOptimized reads them. */
         private fun encodeMode9Copy(copy: SurfaceCompositor.ScreenCopy): ByteArray {
-            val out = ByteArray(17)
+            val out = ByteArray(13)
             out[0] = 9
             val values =
                 intArrayOf(
@@ -456,8 +457,6 @@ class BleImageOptimizer {
                     copy.height,
                     copy.destinationX,
                     copy.destinationY,
-                    copy.width,
-                    copy.height,
                 )
             var index = 0
             while (index < values.size) {

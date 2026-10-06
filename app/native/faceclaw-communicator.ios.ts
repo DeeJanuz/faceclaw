@@ -1,6 +1,6 @@
 import type { RingInput } from "../g2/ring-input";
 import { File, knownFolders, path, type ImageSource } from "@nativescript/core";
-import { type FirmwareInfo } from "../g2/firmware-compat";
+import { REQUIRED_FACECLAW_FIRMWARE_VERSION, type FirmwareInfo } from "../g2/firmware-compat";
 import { type CompassEvent } from "./compass-types";
 import { fromData, toData } from "./kotlin-data";
 import { previewPixels } from "./ios-graphics";
@@ -10,7 +10,6 @@ export type { FirmwareInfo };
 
 // Kotlin/Native facades exported by FaceclawKit (see native/kotlin/shared/src/iosMain/.../ble).
 declare const FaceclawKitIosGlassesSession: any;
-declare const FaceclawKitIosProtocolPlatform: any;
 declare const FaceclawKitFaceclawBleCommunicatorListener: any;
 declare const FaceclawKitIosAncsListener: any;
 declare const FaceclawKitIosAudioPacketListener: any;
@@ -24,6 +23,7 @@ export type CommunicatorPhase =
   | "charging"
   | "retrying"
   | "unpaired"
+  | "incompatible-firmware"
   | "disconnecting";
 
 export type CommunicatorState = {
@@ -191,6 +191,7 @@ export class FaceclawCommunicatorBridge {
   private latestPhoneLockState: boolean | null = null;
   private readonly evenAppConflictListeners = new Set<(message: string) => void>();
   private readonly frameMetricsListeners = new Set<(metrics: FrameMetrics) => void>();
+  private readonly previewAnimationListeners = new Set<() => void>();
   private readonly firmwareInfoListeners = new Set<(info: FirmwareInfo) => void>();
   private readonly ancsAuthorizationListeners = new Set<(authorized: boolean) => void>();
   private readonly ancsRelayListeners = new Set<(frame: Uint8Array) => void>();
@@ -204,9 +205,15 @@ export class FaceclawCommunicatorBridge {
       String(addresses.left ?? "").toUpperCase(),
       String(addresses.ring ?? "").toUpperCase(),
     );
+    // The shared session halts on any other firmware ("incompatible-firmware").
+    this.communicator.setRequiredFirmwareRevisionRevision(REQUIRED_FACECLAW_FIRMWARE_VERSION);
     this.listenerProxy = SessionListener.new() as SessionListener;
     this.listenerProxy.bridge = this;
     this.communicator.setListenerListener(this.listenerProxy);
+    // Kotlin calls this on the main queue.
+    this.communicator.setPreviewAnimationListenerListener(() => {
+      for (const listener of Array.from(this.previewAnimationListeners)) listener();
+    });
   }
 
   // ----- Kotlin listener entry points (main queue) -----------------------------------
@@ -355,6 +362,15 @@ export class FaceclawCommunicatorBridge {
     return () => this.frameMetricsListeners.delete(listener);
   }
 
+  /**
+   * Each step of an animation the phone preview is replaying (a menu slide
+   * reaches the glasses as one frame, so frame metrics fire only at its start).
+   */
+  onPreviewAnimationFrame(listener: () => void): () => void {
+    this.previewAnimationListeners.add(listener);
+    return () => this.previewAnimationListeners.delete(listener);
+  }
+
   onFirmwareInfo(listener: (info: FirmwareInfo) => void): () => void {
     this.firmwareInfoListeners.add(listener);
     return () => this.firmwareInfoListeners.delete(listener);
@@ -443,9 +459,13 @@ export class FaceclawCommunicatorBridge {
     await this.enqueueNativeCall(() => this.communicator.setFirmwareDebugFlagsEnabled(Boolean(enabled)));
   }
 
-  /** Set lens brightness: auto (ambient sensor) or an explicit 0-100 level. */
+  /** Set lens brightness: Faceclaw auto or a fixed level (clamped to 2–100). */
   async setBrightness(autoAdjust: boolean, level: number): Promise<void> {
     await this.enqueueNativeCall(() => this.communicator.setBrightnessAutoAdjustBrightnessLevel(Boolean(autoAdjust), Math.round(level)));
+  }
+
+  async configureBrightness(p: { auto: boolean; level: number; minimum: number; maximum: number; curve: string; fadeMs: number }): Promise<void> {
+    await this.enqueueNativeCall(() => this.communicator.configureBrightnessAutoLevelMinimumMaximumCurveFadeMs(p.auto, p.level, p.minimum, p.maximum, p.curve, p.fadeMs));
   }
 
   async enableWearDetectionAndRequestState(): Promise<void> {
@@ -524,8 +544,20 @@ export class FaceclawCommunicatorBridge {
     await this.enqueueNativeCall(() => { this.communicator.setSurfaceVisibleIdVisible(id, Boolean(visible)); });
   }
 
+  async setSurfaceDepth(id: string, depth: number): Promise<void> {
+    await this.enqueueNativeCall(() => { this.communicator.setSurfaceDepthIdDepth(id, Math.round(depth)); });
+  }
+
   async setScreenBlanked(blanked: boolean): Promise<void> {
     await this.enqueueNativeCall(() => { this.communicator.setScreenBlankedBlanked(Boolean(blanked)); });
+  }
+
+  /**
+   * See the Android bridge. Not wired to the shared compositor's check on iOS
+   * yet, so every repaint is submitted as before.
+   */
+  isSurfaceCurrent(_surfaceId: string, _fingerprint: string): boolean {
+    return false;
   }
 
   async submitSurfaceFrame(
@@ -585,7 +617,11 @@ export class FaceclawCommunicatorBridge {
 
   async close(): Promise<void> {
     this.setAncsListeners(false);
-    await this.enqueueNativeCall(() => this.communicator.close());
+    this.previewAnimationListeners.clear();
+    await this.enqueueNativeCall(() => {
+      this.communicator.setPreviewAnimationListenerListener(null);
+      this.communicator.close();
+    });
   }
 
   // ----- iOS extras: compass, microphone, iPhone notifications (ANCS) ----------------------

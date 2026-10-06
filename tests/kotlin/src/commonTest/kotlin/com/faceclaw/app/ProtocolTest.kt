@@ -201,14 +201,16 @@ class ProtocolTest {
     @Test
     fun realWorldSlowLensAckDoesNotCausePrematureReplay() {
         val frame = message()
-        frame.ackDeadlineAtMs = CfwMessageWindow.ACK_TIMEOUT_MS.toLong()
+        // One lens acked a full frame at 558 ms while the other was still processing it.
+        val deadline = CfwMessageWindow.ackDeadline(0, 0, 0)
+        frame.ackDeadlineAtMs = deadline
         frame.cfwAckLenses = 1
         assertTrue(CfwMessageWindow.replayWindow(listOf(frame), 558).isEmpty())
         frame.cfwAckLenses = 3
         assertSame(frame, CfwMessageWindow.acknowledgedHead(listOf(frame)))
-        assertTrue(CfwMessageWindow.replayWindow(listOf(frame), 1500).isEmpty())
+        assertTrue(CfwMessageWindow.replayWindow(listOf(frame), deadline).isEmpty())
         frame.cfwAckLenses = 1
-        assertEquals(listOf(frame), CfwMessageWindow.replayWindow(listOf(frame), 1500))
+        assertEquals(listOf(frame), CfwMessageWindow.replayWindow(listOf(frame), deadline))
         frame.ackDeadlineAtMs = 2000
         frame.cfwRetryPending = true
         assertEquals(listOf(frame), CfwMessageWindow.replayWindow(listOf(frame), 100))
@@ -226,6 +228,18 @@ class ProtocolTest {
         assertTrue(CfwMessageWindow.canSend(listOf(message(sid = 1)), eviction))
         assertTrue(CfwMessageWindow.canSend(listOf(earlier), upload))
         assertTrue(CfwMessageWindow.canSend(listOf(eviction), upload))
+    }
+
+    @Test
+    fun cfwAckDeadlineWaitsWhileEitherWritesOrAcksProgress() {
+        // Sent at 1000 into an idle arm: 3 s from the send.
+        assertEquals(4_000L, CfwMessageWindow.ackDeadline(1_000, 1_000, 0))
+        // An ack from the arm restarts the 3 s ack window.
+        assertEquals(5_500L, CfwMessageWindow.ackDeadline(1_000, 1_000, 2_500))
+        // Writes still completing keep it waiting past the ack window, 500 ms at a time.
+        assertEquals(6_700L, CfwMessageWindow.ackDeadline(1_000, 6_200, 2_500))
+        // An ack from before the send doesn't shorten anything.
+        assertEquals(4_000L, CfwMessageWindow.ackDeadline(1_000, 1_000, 900))
     }
 
     @Test

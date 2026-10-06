@@ -1,6 +1,9 @@
 import { fromData, toData } from '../native/kotlin-data'
-import type { SurfaceConfiguration, SurfaceRect } from './surface-compositor'
-export type { SurfaceConfiguration, SurfaceRect } from './surface-compositor'
+export type SurfaceRect = { x: number; y: number; width: number; height: number }
+export type SurfaceConfiguration = SurfaceRect & {
+  zOrder: number
+  transparency: 'opaque' | 'color-key'
+}
 declare const FaceclawKitIosSurfaceCompositor: any
 /** Retained pixels, clipping, layers and composition live in shared Kotlin. */
 export class SurfaceCompositor {
@@ -18,6 +21,7 @@ export class SurfaceCompositor {
   }
   removeSurface(id: string): void { this.native.removeId(id); this.surfaces.delete(id) }
   setSurfaceVisible(id: string, visible: boolean): void { this.native.visibleIdVisible(id, visible) }
+  setSurfaceDepth(id: string, depth: number): void { this.native.depthIdDepth(id, depth) }
   setUnderlayDim(belowZOrder: number, factor: number): void {
     if (!Number.isFinite(factor)) throw new Error('Invalid dim factor')
     this.native.dimBelowFactor(belowZOrder, factor)
@@ -34,4 +38,6 @@ export class SurfaceCompositor {
   }
   setShellScene(bytes: Uint8Array): void { this.native.shellData(toData(bytes)) }
   composite(): Uint8Array { return fromData(this.native.composite()) }
+  /** Called on the main queue after each step of an animation the preview is replaying. */
+  setPreviewAnimationListener(listener: (() => void) | null): void { this.native.setPreviewAnimationListenerListener(listener) }
 }

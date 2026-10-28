@@ -716,8 +716,11 @@ export class ExtensionPlatform {
       if (!source) { result(false, "Notification is stale"); return; }
       if (action === "notification-dismiss") { result(dismissNotification(source.key, source.postTime)); this.notificationsChanged(); return; }
       if (action === "notification-open") {
+        // Close the preview before an APK alert leaves the list; the provider's
+        // own cleanup would otherwise close it with the default sleep restoration.
+        this.hooks.closeSurface?.(feature, false, boundedToken(data.presentationId) ? data.presentationId : undefined);
         if (source.key.startsWith("apk:")) result(invokeExternalNotification(source.key, 0, source.postTime));
-        else { this.hooks.closeSurface?.(feature, false, boundedToken(data.presentationId) ? data.presentationId : undefined); shell.openNotificationModal(source.key, false); result(true); }
+        else { shell.openNotificationModal(source.key, false); result(true); }
         return;
       }
       const index = data.actionIndex;

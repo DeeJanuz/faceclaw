@@ -10,12 +10,14 @@ function harness({
   previewSeconds,
   inputAccepted = true,
   screenOn = true,
+  invoke = () => true,
 } = {}) {
   let sequence = 0;
   const sent = [],
     shown = [],
     closed = [],
-    nativeClosed = [];
+    nativeClosed = [],
+    order = [];
   const imports = {
     '../../assistant/messaging-runtime': {},
     '../../assistant/messaging': { messagingTools: [] },
@@ -35,7 +37,12 @@ function harness({
       onAndroidNotificationRemoved() {},
       onAndroidNotificationsChanged() {},
     },
-    '../../native/external-notifications': {},
+    '../../native/external-notifications': {
+      invokeExternalNotification: (key, index, postTime) => {
+        order.push(`invoke:${key}:${index}:${postTime}`);
+        return invoke(key);
+      },
+    },
     '../../native/notification-apps': { readNotificationApps: () => [] },
     '../../native/shared-style': { initializeSharedHostStyle() {} },
     './extension-policy': require('../.test-build/app/apps/external/extension-policy.js'),
@@ -95,8 +102,9 @@ function harness({
         shown.push(target);
         return true;
       },
-      closeSurface: (_feature, _restoreSleep, presentationId) => {
+      closeSurface: (_feature, restoreSleep, presentationId) => {
         closed.push(presentationId);
+        order.push(`close:${presentationId}:${restoreSleep}`);
         return true;
       },
     },
@@ -108,6 +116,7 @@ function harness({
     shown,
     closed,
     nativeClosed,
+    order,
     setScreenOn: (value) => {
       screenOn = value;
     },
@@ -310,6 +319,62 @@ test('reader handoff keeps the display awake only for a fresh bound notification
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(mismatched.closed, []);
   assert.equal(mismatched.sent.at(-1).data.ok, false);
+});
+
+test('opening an APK alert closes its bound preview keep-awake before the alert leaves the list', async () => {
+  const open = async (h, data) => {
+    const arrival = h.arrivals()[0];
+    h.platform.surfaceInput('ui.notifications', { type: 'click' });
+    h.platform.onNativeEvent(arrival.owner, 'extension-event', {
+      feature: 'ui.notifications',
+      generation: 1,
+      type: 'action',
+      action: 'notification-open',
+      data: { callId: 'open', key: arrival.data.key, postTime: arrival.data.postTime, ...data(arrival) },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    return arrival;
+  };
+  const h = harness({ sources: [notification('apk:reply', { packageName: 'com.faceclaw.t3', postTime: 9 })] });
+  h.arrive('apk:reply');
+  const arrival = await open(h, (a) => ({ presentationId: a.data.presentationId }));
+  // The provider retires the alert when the list changes. Closing first keeps
+  // that cleanup from closing the preview with the default sleep restoration.
+  assert.deepEqual(h.order, [`close:${arrival.data.presentationId}:false`, 'invoke:apk:reply:0:9']);
+  assert.equal(h.sent.at(-1).data.ok, true);
+  assert.equal(h.platform.notificationVisit?.handedOff ?? false, false);
+  // The shell reports the overlay gone; nothing is left handed off to block the next preview.
+  h.platform.closeSurface('ui.notifications', arrival.data.presentationId);
+  h.source([notification('apk:next', { packageName: 'com.faceclaw.t3', postTime: 10 })]);
+  h.arrive('apk:next');
+  assert.equal(h.arrivals().length, 2);
+
+  const refused = harness({
+    sources: [notification('apk:gone', { packageName: 'com.faceclaw.t3', postTime: 9 })],
+    invoke: () => false,
+  });
+  refused.arrive('apk:gone');
+  await open(refused, (a) => ({ presentationId: a.data.presentationId }));
+  assert.equal(refused.sent.at(-1).data.ok, false);
+
+  const stale = harness({ sources: [notification('apk:stale', { packageName: 'com.faceclaw.t3', postTime: 9 })] });
+  stale.arrive('apk:stale');
+  await open(stale, () => ({ presentationId: 'newer-presentation' }));
+  assert.deepEqual(stale.order, ['close:newer-presentation:false', 'invoke:apk:stale:0:9']);
+
+  const ungestured = harness({ sources: [notification('apk:cold', { packageName: 'com.faceclaw.t3', postTime: 9 })] });
+  ungestured.arrive('apk:cold');
+  const cold = ungestured.arrivals()[0];
+  ungestured.platform.onNativeEvent(cold.owner, 'extension-event', {
+    feature: 'ui.notifications',
+    generation: 1,
+    type: 'action',
+    action: 'notification-open',
+    data: { callId: 'open', key: cold.data.key, postTime: cold.data.postTime, presentationId: cold.data.presentationId },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(ungestured.order, []);
+  assert.equal(ungestured.sent.at(-1).data.ok, false);
 });
 
 test('a failed reader launch can reopen the same admitted host presentation', async () => {

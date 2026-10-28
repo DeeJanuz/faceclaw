@@ -3,7 +3,7 @@ import { messagingTools, type MessagingScope } from "../../assistant/messaging";
 import { shell } from "../../ui/shell/shell";
 import { toolRegistry, type ToolResult } from "../../assistant/tool-registry";
 import { readActiveNotifications, onAndroidNotificationPosted, onAndroidNotificationsChanged, onAndroidNotificationRemoved, dismissNotification, invokeNotificationActionAtVersion, replyToNotification, type AndroidNotification } from "../../native/notification-icons";
-import { getExternalNotificationReply, invokeExternalNotification } from "../../native/external-notifications";
+import { getExternalNotificationReply, hasExternalNotification, invokeExternalNotification } from "../../native/external-notifications";
 import { readNotificationApps } from "../../native/notification-apps";
 import { initializeSharedHostStyle } from "../../native/shared-style";
 import { boundedToken, record, ExtensionToolCalls, NotificationLeases } from "./extension-policy";
@@ -716,11 +716,16 @@ export class ExtensionPlatform {
       if (!source) { result(false, "Notification is stale"); return; }
       if (action === "notification-dismiss") { result(dismissNotification(source.key, source.postTime)); this.notificationsChanged(); return; }
       if (action === "notification-open") {
-        // Close the preview before an APK alert leaves the list; the provider's
-        // own cleanup would otherwise close it with the default sleep restoration.
-        this.hooks.closeSurface?.(feature, false, boundedToken(data.presentationId) ? data.presentationId : undefined);
-        if (source.key.startsWith("apk:")) result(invokeExternalNotification(source.key, 0, source.postTime));
-        else { shell.openNotificationModal(source.key, false); result(true); }
+        if (source.key.startsWith("apk:")) {
+          if (!hasExternalNotification(source.key)) { result(false, "Notification is stale"); return; }
+          // The alert leaves the list as it opens, and the provider's cleanup
+          // would close the preview with the default sleep restoration. Close
+          // it first with the display kept awake; a malformed lease closes nothing.
+          const hasPresentationId = Object.prototype.hasOwnProperty.call(data, "presentationId");
+          this.hooks.closeSurface?.(feature, false, hasPresentationId ? (boundedToken(data.presentationId) ? data.presentationId : "") : undefined);
+          result(invokeExternalNotification(source.key, 0, source.postTime));
+        }
+        else { this.hooks.closeSurface?.(feature, false, boundedToken(data.presentationId) ? data.presentationId : undefined); shell.openNotificationModal(source.key, false); result(true); }
         return;
       }
       const index = data.actionIndex;

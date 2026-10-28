@@ -11,6 +11,8 @@ function harness({
   inputAccepted = true,
   screenOn = true,
   invoke = () => true,
+  available = true,
+  realClose = false,
 } = {}) {
   let sequence = 0;
   const sent = [],
@@ -38,6 +40,7 @@ function harness({
       onAndroidNotificationsChanged() {},
     },
     '../../native/external-notifications': {
+      hasExternalNotification: () => available,
       invokeExternalNotification: (key, index, postTime) => {
         order.push(`invoke:${key}:${index}:${postTime}`);
         return invoke(key);
@@ -102,9 +105,13 @@ function harness({
         shown.push(target);
         return true;
       },
-      closeSurface: (_feature, restoreSleep, presentationId) => {
+      closeSurface: (feature, restoreSleep, presentationId) => {
+        // Like the dashboard: a named close must match the shown preview, and
+        // removing the overlay reports back to the platform synchronously.
+        if (realClose && presentationId !== undefined && presentationId !== platform.notificationPresentation?.id) return false;
         closed.push(presentationId);
         order.push(`close:${presentationId}:${restoreSleep}`);
+        if (realClose) platform.closeSurface(feature, presentationId);
         return true;
       },
     },
@@ -322,9 +329,10 @@ test('reader handoff keeps the display awake only for a fresh bound notification
 });
 
 test('opening an APK alert closes its bound preview keep-awake before the alert leaves the list', async () => {
-  const open = async (h, data) => {
+  const apk = (key) => notification(key, { packageName: 'com.faceclaw.t3', postTime: 9 });
+  const open = async (h, data, gesture = true) => {
     const arrival = h.arrivals()[0];
-    h.platform.surfaceInput('ui.notifications', { type: 'click' });
+    if (gesture) h.platform.surfaceInput('ui.notifications', { type: 'click' });
     h.platform.onNativeEvent(arrival.owner, 'extension-event', {
       feature: 'ui.notifications',
       generation: 1,
@@ -335,46 +343,42 @@ test('opening an APK alert closes its bound preview keep-awake before the alert 
     await new Promise((resolve) => setImmediate(resolve));
     return arrival;
   };
-  const h = harness({ sources: [notification('apk:reply', { packageName: 'com.faceclaw.t3', postTime: 9 })] });
+  const h = harness({ sources: [apk('apk:reply')], realClose: true });
   h.arrive('apk:reply');
   const arrival = await open(h, (a) => ({ presentationId: a.data.presentationId }));
   // The provider retires the alert when the list changes. Closing first keeps
   // that cleanup from closing the preview with the default sleep restoration.
   assert.deepEqual(h.order, [`close:${arrival.data.presentationId}:false`, 'invoke:apk:reply:0:9']);
+  assert.deepEqual(h.nativeClosed, [['com.faceclaw.t3/Service', 'ui.notifications', arrival.data.presentationId]]);
+  // Nothing is left handed off, so the next arrival can preview.
+  assert.equal(h.platform.notificationVisit, null);
   assert.equal(h.sent.at(-1).data.ok, true);
-  assert.equal(h.platform.notificationVisit?.handedOff ?? false, false);
-  // The shell reports the overlay gone; nothing is left handed off to block the next preview.
-  h.platform.closeSurface('ui.notifications', arrival.data.presentationId);
-  h.source([notification('apk:next', { packageName: 'com.faceclaw.t3', postTime: 10 })]);
-  h.arrive('apk:next');
-  assert.equal(h.arrivals().length, 2);
 
-  const refused = harness({
-    sources: [notification('apk:gone', { packageName: 'com.faceclaw.t3', postTime: 9 })],
-    invoke: () => false,
-  });
-  refused.arrive('apk:gone');
-  await open(refused, (a) => ({ presentationId: a.data.presentationId }));
-  assert.equal(refused.sent.at(-1).data.ok, false);
+  // Without a lease (an inbox tap) the current notification surface closes, as for Android alerts.
+  const inbox = harness({ sources: [apk('apk:inbox')] });
+  inbox.arrive('apk:inbox');
+  await open(inbox, () => ({}));
+  assert.deepEqual(inbox.order, ['close:undefined:false', 'invoke:apk:inbox:0:9']);
 
-  const stale = harness({ sources: [notification('apk:stale', { packageName: 'com.faceclaw.t3', postTime: 9 })] });
-  stale.arrive('apk:stale');
-  await open(stale, () => ({ presentationId: 'newer-presentation' }));
-  assert.deepEqual(stale.order, ['close:newer-presentation:false', 'invoke:apk:stale:0:9']);
+  for (const presentationId of ['newer-presentation', 42]) {
+    const other = harness({ sources: [apk('apk:other')], realClose: true });
+    other.arrive('apk:other');
+    await open(other, () => ({ presentationId }));
+    // A lease for another preview, or a malformed one, closes nothing.
+    assert.deepEqual(other.order, ['invoke:apk:other:0:9']);
+    assert.notEqual(other.platform.notificationPresentation, null);
+  }
 
-  const ungestured = harness({ sources: [notification('apk:cold', { packageName: 'com.faceclaw.t3', postTime: 9 })] });
-  ungestured.arrive('apk:cold');
-  const cold = ungestured.arrivals()[0];
-  ungestured.platform.onNativeEvent(cold.owner, 'extension-event', {
-    feature: 'ui.notifications',
-    generation: 1,
-    type: 'action',
-    action: 'notification-open',
-    data: { callId: 'open', key: cold.data.key, postTime: cold.data.postTime, presentationId: cold.data.presentationId },
-  });
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(ungestured.order, []);
-  assert.equal(ungestured.sent.at(-1).data.ok, false);
+  for (const [label, options, gesture] of [
+    ['expired', { available: false }, true],
+    ['ungestured', {}, false],
+  ]) {
+    const refused = harness({ sources: [apk(`apk:${label}`)], ...options });
+    refused.arrive(`apk:${label}`);
+    await open(refused, (a) => ({ presentationId: a.data.presentationId }), gesture);
+    assert.deepEqual(refused.order, [], label);
+    assert.equal(refused.sent.at(-1).data.ok, false, label);
+  }
 });
 
 test('a failed reader launch can reopen the same admitted host presentation', async () => {

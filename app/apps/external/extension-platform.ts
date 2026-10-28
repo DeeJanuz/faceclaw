@@ -724,8 +724,7 @@ export class ExtensionPlatform {
           const hasPresentationId = Object.prototype.hasOwnProperty.call(data, "presentationId");
           this.hooks.closeSurface?.(feature, false, hasPresentationId ? (boundedToken(data.presentationId) ? data.presentationId : "") : undefined);
           result(invokeExternalNotification(source.key, 0, source.postTime));
-        }
-        else { this.hooks.closeSurface?.(feature, false, boundedToken(data.presentationId) ? data.presentationId : undefined); shell.openNotificationModal(source.key, false); result(true); }
+        } else { this.hooks.closeSurface?.(feature, false, boundedToken(data.presentationId) ? data.presentationId : undefined); shell.openNotificationModal(source.key, false); result(true); }
         return;
       }
       const index = data.actionIndex;

@@ -345,6 +345,7 @@ test('opening an APK alert closes its bound preview keep-awake before the alert 
   };
   const h = harness({ sources: [apk('apk:reply')], realClose: true });
   h.arrive('apk:reply');
+  assert.notEqual(h.platform.notificationVisit, null);
   const arrival = await open(h, (a) => ({ presentationId: a.data.presentationId }));
   // The provider retires the alert when the list changes. Closing first keeps
   // that cleanup from closing the preview with the default sleep restoration.
@@ -352,6 +353,7 @@ test('opening an APK alert closes its bound preview keep-awake before the alert 
   assert.deepEqual(h.nativeClosed, [['com.faceclaw.t3/Service', 'ui.notifications', arrival.data.presentationId]]);
   // Nothing is left handed off, so the next arrival can preview.
   assert.equal(h.platform.notificationVisit, null);
+  assert.equal(h.platform.notificationPresentation, null);
   assert.equal(h.sent.at(-1).data.ok, true);
 
   // Without a lease (an inbox tap) the current notification surface closes, as for Android alerts.
